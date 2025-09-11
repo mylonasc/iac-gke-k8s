@@ -1,3 +1,15 @@
+
+
+if command -v "terraform" &> /dev/null
+then
+    # This block runs if the command is found (exit code 0)
+    echo "'terraform' is installed - aborting installation. Please first un-install terraform if you want to run this script from scratch."
+    exit
+else
+    # This block runs if the command is NOT found (non-zero exit code)
+    echo "'terraform' is not installed - installing..."
+fi
+
 sudo apt-get update && \
   sudo apt-get install\
    -y gnupg software-properties-common

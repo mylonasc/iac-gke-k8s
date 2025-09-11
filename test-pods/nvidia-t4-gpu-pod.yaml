@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-debugger-pod
+spec:
+  # This section is critical. It restarts the pod only if it fails,
+  # not if it completes successfully. This is useful for debugging.
+  restartPolicy: OnFailure
+
+  containers:
+  - name: gpu-test-container
+    # Use an official NVIDIA image that includes CUDA drivers and nvidia-smi.
+    # The tag specifies the CUDA version and base OS.
+    image: nvidia/cuda:11.8.0-base-ubuntu22.04
+
+    # This command keeps the container alive indefinitely.
+    # Without this, the pod would start, do nothing, and immediately exit.
+    command: ["/bin/sh", "-c"]
+    args: ["sleep 1d"]
+
+    # This section requests 1 GPU from the cluster's available resources.
+    # It's what tells the scheduler to find a node with a GPU.
+    resources:
+      limits:
+        nvidia.com/gpu: 1
+
+  # This section gives the pod permission to run on your tainted GPU Spot pool.
+  # Without these tolerations, the pod would remain stuck in "Pending".
+  tolerations:
+  # Toleration for the GKE Spot VM taint
+  - key: "cloud.google.com/gke-spot"
+    operator: "Equal"
+    value: "true"
+    effect: "NoSchedule"
+  # Toleration for the NVIDIA GPU taint that GKE adds automatically
+  - key: "nvidia.com/gpu"
+    operator: "Exists"
+    effect: "NoSchedule"
+  - key: "gpu-type"
+    operator: "Equal"
+    value: "nvidia-tesla-t4"
+    effect: "NoSchedule"
+

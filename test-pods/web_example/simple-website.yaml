@@ -1,0 +1,23 @@
+# deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-web-deployment
+  labels:
+    app: hello-web
+spec:
+  replicas: 1 # Run 3 identical copies (pods) of our application
+  selector:
+    matchLabels:
+      app: hello-web # This must match the labels in the pod template below
+  template:
+    metadata:
+      labels:
+        app: hello-web # Pods created by this deployment will have this label
+    spec:
+      containers:
+      - name: hello-web-container
+        # This is a public, pre-built container image by Google for demos
+        image: us-docker.pkg.dev/google-samples/containers/gke/hello-app:1.0
+        ports:
+        - containerPort: 8080 # The port the application listens on inside the container
