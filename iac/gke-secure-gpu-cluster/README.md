@@ -16,5 +16,4 @@ To create the `google_secret_manager` resource in google cloud and add a secret,
 terraform apply 
 ```
 
-[doc in progress](https://gemini.google.com/app/2fa906c92fc34f07)
 
