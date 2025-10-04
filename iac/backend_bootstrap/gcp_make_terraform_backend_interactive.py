@@ -6,6 +6,8 @@ import re
 from abc import ABC, abstractmethod
 from datetime import datetime
 
+DEFAULT_LOCATION = 'europe-west4'
+
 # --- ANSI Color Codes for better readability ---
 class Color:
     HEADER = '\033[95m'
@@ -204,7 +206,7 @@ class GetBucketDetailsState(State):
         print("\n--- Configuring GCS Bucket ---")
         suggested_name = f"{context.project_id}-tfstate"
         context.bucket_name = input(f"Enter a bucket name (press Enter for '{suggested_name}'): ") or suggested_name
-        context.location = input("Enter a location (e.g., us-central1) (press Enter for 'us-central1'): ") or "us-central1"
+        context.location = input(f"Enter a location (e.g., {DEFAULT_LOCATION}) (press Enter for '{DEFAULT_LOCATION}'): ") or DEFAULT_LOCATION
         context.transition_to(CreateBucketState())
 
 
