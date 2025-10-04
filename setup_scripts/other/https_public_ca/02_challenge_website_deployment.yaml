@@ -1,0 +1,61 @@
+
+# 1. The Deployment for your application
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-hello-website
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hello
+  template:
+    metadata:
+      labels:
+        app: hello
+    spec:
+      containers:
+      - name: hello-web
+        image: gcr.io/google-samples/hello-app:1.0 # A simple hello-world app
+        ports:
+        - containerPort: 8080
+---
+# 2. The Service to expose the Deployment internally
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-hello-service
+spec:
+  selector:
+    app: hello
+  ports:
+    - protocol: TCP
+      port: 80 # The port the service will listen on
+      targetPort: 8080 # The port the container is listening on
+---
+# 3. The Ingress to manage external traffic and TLS
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: my-website-ingress
+  annotations:
+    # Use the NGINX Ingress controller
+    kubernetes.io/ingress.class: "nginx"
+    # Specify the ClusterIssuer to use for getting the certificate
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  tls:
+  - hosts:
+    - magarathea.ddns.net # IMPORTANT: Replace with your domain
+    secretName: magarathea-ddns-net-tls # cert-manager will create this secret with the TLS cert
+  rules:
+  - host: magarathea.ddns.net # IMPORTANT: Replace with your domain
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: my-hello-service # Route traffic to our service
+            port:
+              number: 80
