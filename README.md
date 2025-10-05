@@ -45,3 +45,15 @@ to select default project:
 gcloud config set project ${PROJECT_ID}
 ```
 
+## Custom Containers and Container hosting
+
+I have not figured out a good setup for managing custom containers and container hosting. 
+
+This list is to keep track containers to be used in the cluster
+
+|container|about|
+|---------|------------|
+|[`mylonasc/magarathea-alpine-base`](https://github.com/mylonasc/magarathea-alpine-base/tree/main)|a lightweight base container|
+
+
+
