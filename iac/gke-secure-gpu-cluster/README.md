@@ -11,6 +11,12 @@ The cloud has the following features:
 
 ## Using a backend
 
+A backend is a place to store and manage your statefile. 
+
+Although statefiles can be local, it is recommended to use a GCP storage bucket for storing your state. 
+
+Scripts for easy setup are provided in the `./backend_bootstrap` folder. 
+
 ## Public access
 The most cost-effective (free) option is to use a node port for public access.
 In order, however, to allow public access to pass google's firewall rules you must create an exception for your cluster. 
