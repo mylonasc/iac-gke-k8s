@@ -63,6 +63,14 @@ variable "environment" {
   default = "production"
 }
 
+variable "custom_cluster_secrets" {
+  type = map(string)
+  default = {
+    "dockerhub-ro-pat" = "A personal access token giving read-only access to the private dockerhub repo."
+    "openai-api-key"   = "OpenAI API Key for accessing the external resource."
+  }
+}
+
 # Additional configuration for k8s, applied after creation:
 variable "k8s_namespace" {
   description = "An additional namespace created (and given access to the configured secret)"

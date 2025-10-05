@@ -204,6 +204,8 @@ data "google_container_cluster" "my_cluster" {
 # This makes the gcloud's credentials available to terraform, to 
 # perform k8s configurations.
 data "google_client_config" "default" {}
+data "google_client_openid_userinfo" "current" {}
+
 
 # Configure the Kubernetes provider to connect to your new GKE cluster
 provider "kubernetes" {

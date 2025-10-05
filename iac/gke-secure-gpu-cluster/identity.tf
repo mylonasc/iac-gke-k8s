@@ -6,12 +6,13 @@ resource "google_service_account" "default_gsa" {
   display_name = "The Default Service Account for managing the deployment."
 }
 
-# 2. Grant the GSA permission to access the secret
-#
-# To be edited when more secrets are in-place:
+# The variable containing the secrets and their descriptions is app_secrets
+
+# 2. Grant the GSA permission to access all the secrets in custom_cluster_secrets
 resource "google_secret_manager_secret_iam_member" "secret_accessor" {
-  project   = google_secret_manager_secret.example_api_key.project # "example_api_key" - to be changed"
-  secret_id = google_secret_manager_secret.example_api_key.secret_id
+  for_each  = var.custom_cluster_secrets
+  project   = google_secret_manager_secret.secrets[each.key].project # the custom_cluster_secrets[each.key] from secrets.tf
+  secret_id = google_secret_manager_secret.secrets[each.key].secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.default_gsa.email}"
 }

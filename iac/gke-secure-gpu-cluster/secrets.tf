@@ -5,9 +5,11 @@ resource "google_project_service" "secretmanager" {
   service = "secretmanager.googleapis.com"
 }
 
-# Create the secret "container" in Google Secret Manager
-resource "google_secret_manager_secret" "example_api_key" {
-  secret_id = "example-api-key"
+# Create the secret "container" in Secret Manager for each entry in the map.
+resource "google_secret_manager_secret" "secrets" {
+  for_each  = var.custom_cluster_secrets
+  project   = var.project_id
+  secret_id = each.key # Use the map key as the secret name
 
   replication {
     auto {}
@@ -16,9 +18,9 @@ resource "google_secret_manager_secret" "example_api_key" {
   labels = {
     "environment" = var.environment
   }
-  depends_on= [
-    google_project_service.secretmanager,
+
+  depends_on = [
+    google_project_service.secretmanager
   ]
 }
-
 
