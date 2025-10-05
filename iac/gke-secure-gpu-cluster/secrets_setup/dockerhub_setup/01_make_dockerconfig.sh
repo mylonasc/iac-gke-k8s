@@ -15,6 +15,8 @@ USERNAME=$1
 PAT=$2
 EMAIL=$3
 
+read -s -p "Please enter the dockerhub password:" DH_PWD
+
 # --- Generate Base64 Encoded Auth String ---
 # The -n flag for echo is crucial to prevent a trailing newline from being encoded.
 AUTH_STRING=$(echo -n "${USERNAME}:${PAT}" | base64)
@@ -26,9 +28,6 @@ cat <<EOF
 {
   "auths": {
     "https://index.docker.io/v1/": {
-      "username": "${USERNAME}",
-      "password": "${PAT}",
-      "email": "${EMAIL}",
       "auth": "${AUTH_STRING}"
     }
   }

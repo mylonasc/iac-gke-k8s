@@ -21,6 +21,7 @@ You can use the following command (with the provided script) to generate this:
 
 and subsequently, run 
 ```bash
+cat docker.json | base64 > docker_secret.bs64
 ./02_add_dockerhub_secret.sh
 ```
 

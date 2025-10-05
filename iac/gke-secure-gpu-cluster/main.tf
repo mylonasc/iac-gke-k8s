@@ -216,8 +216,44 @@ provider "kubernetes" {
 
   cluster_ca_certificate = base64decode(data.google_container_cluster.my_cluster.master_auth[0].cluster_ca_certificate)
 }
+# --- Docker Hub Image Pull Secret ---
 
-# 2. Configuring a new namespace:
+# 1. Data source to fetch the Docker Hub credentials from Google Secret Manager.
+#    This retrieves the content of the 'docker.json' file you uploaded.
+data "google_secret_manager_secret_version" "dockerhub_pat" {
+  project = var.project_id
+  secret  = "dockerhub-ro-pat" # This matches the key in your custom_cluster_secrets variable
+
+  # Ensure the secret has been created by Terraform before trying to read it.
+  depends_on = [
+    google_secret_manager_secret.secrets
+  ]
+}
+
+# 2. Create the Kubernetes secret in your GKE cluster.
+#    This secret will be used by pods to pull private images from Docker Hub.
+resource "kubernetes_secret" "docker_registry_secret" {
+  metadata {
+    name      = "dockerhub-pull-secret"
+    namespace = kubernetes_namespace.app.metadata[0].name
+  }
+
+  # The type must be 'kubernetes.io/dockerconfigjson' for image pull secrets.
+  type = "kubernetes.io/dockerconfigjson"
+
+  # The data field requires a key named '.dockerconfigjson'.
+  # The value is the secret content fetched from Google Secret Manager.
+  data = {
+    ".dockerconfigjson" = data.google_secret_manager_secret_version.dockerhub_pat.secret_data
+  }
+
+  # Ensure the namespace exists before creating the secret in it.
+  depends_on = [
+    kubernetes_namespace.app
+  ]
+}
+
+#  Configuring a new namespace:
 
 # Now, use the configured Kubernetes provider to create a namespace
 resource "kubernetes_namespace" "app" {
@@ -228,5 +264,6 @@ resource "kubernetes_namespace" "app" {
     }
   }
 }
+
 
 
