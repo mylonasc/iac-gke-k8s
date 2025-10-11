@@ -43,7 +43,7 @@ resource "google_container_node_pool" "primary_nodes" {
   name       = "primary-nodes"
   cluster    = google_container_cluster.primary.id
   location   = var.region
-  node_count = 1
+  # node_count = 1
 
   # Add this autoscaling block
   autoscaling {
@@ -52,7 +52,7 @@ resource "google_container_node_pool" "primary_nodes" {
   }
 
   node_config {
-    machine_type = "e2-medium"
+    machine_type = "e2-small"
     spot = var.primary_is_spot
     oauth_scopes = [
       "https://www.googleapis.com/auth/cloud-platform"
