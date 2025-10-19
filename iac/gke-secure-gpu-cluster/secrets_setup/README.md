@@ -1,3 +1,9 @@
+## OUTDATED
+
+The info in this folder might not be relevant anymore. 
+
+Potentially to be deleted in future iterations (or replaced with better instructions).
+
 ## Setup
 
 
@@ -40,3 +46,9 @@ gcloud container operations list
 ```bash
 kubectl get pods -n kube-system | grep csi-secrets
 ```
+
+### Using the defined secrets
+
+A yaml of the following format will be able to access the secrets:
+
+

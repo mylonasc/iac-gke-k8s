@@ -1,3 +1,10 @@
+## OUTDATED! 
+Kept for reference. 
+
+To be deleted after making sure the new setup works fine. 
+
+---------------------------
+
 ## Setting up the docker hub token for k8s use:
 Dockerhub expects the PAT in the following format in a file called `.dockerconfigjson`.  
 ```python

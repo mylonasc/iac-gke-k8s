@@ -1,4 +1,17 @@
 # Configure the Google Cloud provider
+# # This block configures Terraform's core settings
+terraform {
+  # Specifies the required version of the Terraform CLI itself
+  required_version = ">= 1.5.0"
+
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 5.10"
+    }
+  }
+}
+
 provider "google" {
   project = var.project_id
   region  = var.region
@@ -26,6 +39,12 @@ resource "google_container_cluster" "primary" {
   # So we create the smallest possible default node pool and immediately remove it.
   remove_default_node_pool = true
   initial_node_count       = 1
+
+#  addons_config {
+#    gcp_secret_manager_csi_driver_config {
+#      enabled = true
+#    }
+#  }
 
   depends_on = [
     google_project_service.gke_api,
@@ -170,7 +189,7 @@ resource "google_container_node_pool" "general_purpose_pool" {
 
   node_config {
     # e2-standard-4 provides 4 vCPUs and 16 GB of memory
-    machine_type = "e2-standard-4"
+    machine_type = "e2-standard-2"
 
     oauth_scopes = [
       "https://www.googleapis.com/auth/cloud-platform"
@@ -196,10 +215,10 @@ resource "google_container_node_pool" "general_purpose_pool" {
 #
 
 # Use a data source to get the credentials of the cluster we just created
-data "google_container_cluster" "my_cluster" {
-  name     = google_container_cluster.primary.name
-  location = google_container_cluster.primary.location
-}
+#data "google_container_cluster" "my_cluster" {
+#  name     = google_container_cluster.primary.name
+#  location = google_container_cluster.primary.location
+#}
 
 # This makes the gcloud's credentials available to terraform, to 
 # perform k8s configurations.
@@ -210,11 +229,14 @@ data "google_client_openid_userinfo" "current" {}
 # Configure the Kubernetes provider to connect to your new GKE cluster
 provider "kubernetes" {
   # host  = "https://iam.googleapis.com/v1/${data.google_container_cluster.my_cluster.id}"
-  host  = "https://${data.google_container_cluster.my_cluster.endpoint}"
+  # OLD: host  = "https://${data.google_container_cluster.my_cluster.endpoint}"
+  host  = "https://${google_container_cluster.primary.endpoint}"
+
 
   token = data.google_client_config.default.access_token
 
-  cluster_ca_certificate = base64decode(data.google_container_cluster.my_cluster.master_auth[0].cluster_ca_certificate)
+  cluster_ca_certificate = base64decode(google_container_cluster.primary.master_auth[0].cluster_ca_certificate)
+
 }
 # --- Docker Hub Image Pull Secret ---
 
@@ -249,7 +271,7 @@ resource "kubernetes_secret" "docker_registry_secret" {
 
   # Ensure the namespace exists before creating the secret in it.
   depends_on = [
-    kubernetes_namespace.app
+    kubernetes_namespace.app,
   ]
 }
 
