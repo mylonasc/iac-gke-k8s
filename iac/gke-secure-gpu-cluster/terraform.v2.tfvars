@@ -1,6 +1,7 @@
 project_id                  = "gke-gpu-project-473410"
 cluster_deletion_protection = false
-location                    = europe-west4-a
+# location                    = europe-west4-a
+# region                      = "europe-north1-a"
 gpu_count                   = 1
 
 gpu_type_ng_a               = "nvidia-l4"

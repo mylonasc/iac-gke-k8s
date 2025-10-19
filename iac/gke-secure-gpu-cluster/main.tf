@@ -66,7 +66,7 @@ resource "google_container_node_pool" "primary_nodes" {
 
   # Add this autoscaling block
   autoscaling {
-    min_node_count = 0
+    min_node_count = 1
     max_node_count = 1 # Or another small number
   }
 
@@ -175,6 +175,7 @@ resource "google_container_node_pool" "gpu_spot_pool_np_b" {
   ]
 }
 
+
 # General-purpose node pool for standard workloads like web servers
 resource "google_container_node_pool" "general_purpose_pool" {
   name     = "general-purpose-pool"
@@ -189,7 +190,8 @@ resource "google_container_node_pool" "general_purpose_pool" {
 
   node_config {
     # e2-standard-4 provides 4 vCPUs and 16 GB of memory
-    machine_type = "e2-standard-2"
+    # machine_type = "e2-standard-2"
+    machine_type = "e2-medium"
 
     oauth_scopes = [
       "https://www.googleapis.com/auth/cloud-platform"
@@ -225,66 +227,13 @@ resource "google_container_node_pool" "general_purpose_pool" {
 data "google_client_config" "default" {}
 data "google_client_openid_userinfo" "current" {}
 
-
-# Configure the Kubernetes provider to connect to your new GKE cluster
-provider "kubernetes" {
-  # host  = "https://iam.googleapis.com/v1/${data.google_container_cluster.my_cluster.id}"
-  # OLD: host  = "https://${data.google_container_cluster.my_cluster.endpoint}"
-  host  = "https://${google_container_cluster.primary.endpoint}"
-
-
-  token = data.google_client_config.default.access_token
-
-  cluster_ca_certificate = base64decode(google_container_cluster.primary.master_auth[0].cluster_ca_certificate)
-
-}
-# --- Docker Hub Image Pull Secret ---
-
-# 1. Data source to fetch the Docker Hub credentials from Google Secret Manager.
-#    This retrieves the content of the 'docker.json' file you uploaded.
-data "google_secret_manager_secret_version" "dockerhub_pat" {
-  project = var.project_id
-  secret  = "dockerhub-ro-pat" # This matches the key in your custom_cluster_secrets variable
-
-  # Ensure the secret has been created by Terraform before trying to read it.
-  depends_on = [
-    google_secret_manager_secret.secrets
-  ]
-}
-
-# 2. Create the Kubernetes secret in your GKE cluster.
-#    This secret will be used by pods to pull private images from Docker Hub.
-resource "kubernetes_secret" "docker_registry_secret" {
-  metadata {
-    name      = "dockerhub-pull-secret"
-    namespace = kubernetes_namespace.app.metadata[0].name
-  }
-
-  # The type must be 'kubernetes.io/dockerconfigjson' for image pull secrets.
-  type = "kubernetes.io/dockerconfigjson"
-
-  # The data field requires a key named '.dockerconfigjson'.
-  # The value is the secret content fetched from Google Secret Manager.
-  data = {
-    ".dockerconfigjson" = data.google_secret_manager_secret_version.dockerhub_pat.secret_data
-  }
-
-  # Ensure the namespace exists before creating the secret in it.
-  depends_on = [
-    kubernetes_namespace.app,
-  ]
-}
-
-#  Configuring a new namespace:
-
-# Now, use the configured Kubernetes provider to create a namespace
-resource "kubernetes_namespace" "app" {
-  metadata {
-    name = var.k8s_namespace
-    labels = {
-      "environment" = var.environment
-    }
-  }
+module "k8s" {
+  source = "./k8s"
+  project_id    = var.project_id
+  region        = var.region
+  cluster_name  = var.cluster_name
+  k8s_namespace = var.k8s_namespace
+  environment   = var.environment
 }
 
 

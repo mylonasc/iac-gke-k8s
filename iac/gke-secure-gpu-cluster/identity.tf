@@ -24,15 +24,3 @@ resource "google_service_account_iam_member" "workload_identity_user" {
   member             = "serviceAccount:${var.project_id}.svc.id.goog[${var.k8s_namespace}/default-ksa]" # Replace project, namespace, and ksa name
 }
 
-# 4. Kubernetes Service Account (KSA) for your app
-# This assumes you have the Kubernetes provider configured
-resource "kubernetes_service_account" "default_ksa" {
-  metadata {
-    name      = "default-ksa"
-    namespace = var.k8s_namespace # Replace
-    annotations = {
-      # This annotation links the KSA to the GSA
-      "iam.gke.io/gcp-service-account" = google_service_account.default_gsa.email
-    }
-  }
-}
