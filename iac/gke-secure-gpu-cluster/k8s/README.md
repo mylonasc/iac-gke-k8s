@@ -1,4 +1,11 @@
-This module contains Kubernetes resources that must be applied only after the GKE cluster and the supporting Google resources (Secret Manager secrets, service accounts, and the required APIs) exist.
+
+What this will create
+
+- The namespace
+- The docker pull secret (only if you provide the secret payload to the module or have uploaded a Secret Manager secret version beforehand — see options below)
+- The Kubernetes ServiceAccount with the correct annotation for Workload Identity
+
+Important: the docker pull secret is created by the module only when you either pass the base64-encoded dockerconfig JSON into the module (via `dockerconfig_secret_data_b64` and `create_docker_registry_secret=true`) or when a Secret Manager secret version is present and you run the module after uploading that version. The module will not fail cluster creation if secret versions are missing; instead follow the two-stage flow below to provision secrets post-hoc.
 
 Why a two-stage apply
 - Terraform evaluates data sources (for example: the cluster endpoint and Secret Manager secret versions) during plan. The Kubernetes provider inside this module depends on those data sources being available. If you try to apply the module at the same time you create/replace the cluster, Terraform will fail because the cluster (or the Secret Manager API/secrets) does not yet exist.
@@ -39,8 +46,8 @@ terraform apply \
   -var-file=terraform.v2.tfvars
 ```
 
-Notes:
-- The `-target` list is intentionally conservative. At minimum, include the project services, the Secret Manager secrets, the service account and the cluster. You can shorten it but ensure the data sources used by the k8s module will succeed after this step.
+- Notes:
+- The `-target` list is intentionally conservative. At minimum, include the project services, the Secret Manager secret *containers* and the cluster. If you want nodes to be available immediately for Phase B, include at least the primary node pool in Phase A (see example below). You can shorten it but ensure the data sources used by the k8s module will succeed after this step.
 - Creating the cluster can take several minutes. Wait for the apply to finish and for the cluster to be healthy before proceeding.
 
 3) Update kubeconfig and verify cluster readiness
@@ -54,15 +61,29 @@ kubectl get nodes -o wide
 
 Confirm that nodes are Ready and that you can list namespaces. If `kubectl` cannot reach the API, wait and retry — the cluster is still provisioning.
 
-4) Phase B — apply the k8s module
+4) Phase B  apply the k8s module
 
-Once the cluster is ready, apply only the k8s module so the Kubernetes provider inside the module initializes against a reachable API and the Secret Manager data source can read the secret version:
+Once the cluster is reachable and nodes are Ready (or you have verified the k8s API is accessible), apply only the k8s module:
 
 ```bash
 terraform apply -target=module.k8s -var-file=terraform.v2.tfvars
 ```
 
-This will create the namespace, the docker pull secret (reading the Secret Manager secret version), and the Kubernetes ServiceAccount with the correct annotation for Workload Identity.
+Notes on secrets and options
+- If you want the module to create the docker pull secret directly, run Phase B with these variables set (CI-friendly but note secret data may be present in state):
+
+  ```bash
+  terraform apply -target=module.k8s -var='create_docker_registry_secret=true' -var='dockerconfig_secret_data_b64=<base64-encoded-dockerconfigjson>' -var-file=terraform.v2.tfvars
+  ```
+
+- Preferred, more secure option: upload secret *versions* to Secret Manager (CI or manual) and then run Phase B. Example:
+
+  ```bash
+  echo -n "$DOCKER_CONFIG_JSON" | gcloud secrets versions add dockerhub-ro-pat --data-file=- --project=<project>
+  terraform apply -target=module.k8s -var-file=terraform.v2.tfvars
+  ```
+
+This two-stage approach keeps cluster creation independent from secret provisioning and is recommended for long-term maintainability.
 
 5) Finalize (optional full apply)
 

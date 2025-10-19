@@ -17,6 +17,15 @@ Although statefiles can be local, it is recommended to use a GCP storage bucket 
 
 Scripts for easy setup are provided in the `./backend_bootstrap` folder. 
 
+Note on enabling remote state
+
+This repository contains a backend template at `iac/gke-secure-gpu-cluster/europe_backend.tf`. To enable remote state for this Terraform project you can either:
+
+- Copy the template to `backend.tf` in the same directory (and then run `terraform init`), or
+- Run the helper `iac/backend_bootstrap/gcp_make_terraform_backend_interactive.py` which can provision the GCS bucket and write a backend file for you.
+
+If you don't enable a remote backend, Terraform will default to local state.
+
 ## Public access
 The most cost-effective (free) option is to use a node port for public access.
 In order, however, to allow public access to pass google's firewall rules you must create an exception for your cluster. 
@@ -29,10 +38,13 @@ gcloud container clusters list
 
 ## Extension with secret management
 
-To create the `google_secret_manager` resource in google cloud and add a secret, run  the terraform apply on the `secrets.tf` file
+To create the Secret Manager containers (the secret resources) run the terraform apply for `secrets.tf` as part of Phase A (this repo's automation does that). Note: creating the secret *container* does not add a secret *version* (the actual secret value). You must upload secret versions from CI or manually via `gcloud secrets versions add` before the k8s module can read secret values.
+
 ```bash
-terraform apply 
+terraform apply -target=google_secret_manager_secret.secrets -var-file=terraform.v2.tfvars
 ```
+
+Also ensure secrets are present (versions) before running `terraform apply -target=module.k8s`.
 
 ## Two-stage apply and automation
 

@@ -1,2 +1,3 @@
 *.tfstate*
 planfile*
+_local_*sh
