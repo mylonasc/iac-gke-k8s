@@ -17,6 +17,11 @@ provider "google" {
   region  = var.region
 }
 
+provider "google-beta" {
+  project = var.project_id
+  region  = var.region
+}
+
 # Enable necessary APIs for the project
 resource "google_project_service" "gke_api" {
   service = "container.googleapis.com"
@@ -33,6 +38,7 @@ resource "google_project_service" "compute_api" {
 resource "google_container_cluster" "primary" {
   name     = var.cluster_name
   location = var.region
+  provider = google-beta
 
   # We can't create a cluster with no node pool defined, but we want to use
   # a separate 'google_container_node_pool' resource.
@@ -40,11 +46,9 @@ resource "google_container_cluster" "primary" {
   remove_default_node_pool = true
   initial_node_count       = 1
 
-#  addons_config {
-#    gcp_secret_manager_csi_driver_config {
-#      enabled = true
-#    }
-#  }
+  secret_manager_config {
+    enabled = true
+  }
 
   depends_on = [
     google_project_service.gke_api,
@@ -62,7 +66,6 @@ resource "google_container_node_pool" "primary_nodes" {
   name       = "primary-nodes"
   cluster    = google_container_cluster.primary.id
   location   = var.region
-  # node_count = 1
 
   # Add this autoscaling block
   autoscaling {
@@ -70,8 +73,10 @@ resource "google_container_node_pool" "primary_nodes" {
     max_node_count = 1 # Or another small number
   }
 
+
   node_config {
-    machine_type = "e2-small"
+    # machine_type = "e2-medium"
+    machine_type = "e2-standard-2"
     spot = var.primary_is_spot
     oauth_scopes = [
       "https://www.googleapis.com/auth/cloud-platform"
@@ -175,6 +180,45 @@ resource "google_container_node_pool" "gpu_spot_pool_np_b" {
   ]
 }
 
+# General-purpose node pool for standard workloads like web servers
+resource "google_container_node_pool" "general_purpose_spot_pool_small" {
+  name     = "general-purpose-pool-small"
+  cluster  = google_container_cluster.primary.id
+  location = var.region
+
+  # Configure autoscaling for cost-efficiency and performance
+  autoscaling {
+    min_node_count = 0
+    max_node_count = 5
+  }
+
+  node_config {
+    # e2-standard-4 provides 4 vCPUs and 16 GB of memory
+    # machine_type = "e2-standard-2"
+    machine_type = "e2-small"
+    spot = true
+    oauth_scopes = [
+      "https://www.googleapis.com/auth/cloud-platform"
+    ]
+    # Add a LABEL to attract your specific workloads
+    labels = {
+      "purpose" = "general-apps-small"
+    }
+
+    # Add a TAINT to repel all other pods (including system pods)
+    taint {
+      key    = "purpose"
+      value  = "general-apps-small"
+      effect = "NO_SCHEDULE"
+    }
+  }
+
+  # Ensure the standard node pool is created first for stability
+  depends_on = [
+    google_container_node_pool.primary_nodes,
+  ]
+}
+
 
 # General-purpose node pool for standard workloads like web servers
 resource "google_container_node_pool" "general_purpose_pool" {
@@ -196,6 +240,17 @@ resource "google_container_node_pool" "general_purpose_pool" {
     oauth_scopes = [
       "https://www.googleapis.com/auth/cloud-platform"
     ]
+    # Add a LABEL to attract your specific workloads
+    labels = {
+      "purpose" = "general-apps"
+    }
+
+    # Add a TAINT to repel all other pods (including system pods)
+    taint {
+      key    = "purpose"
+      value  = "general-apps"
+      effect = "NO_SCHEDULE"
+    }
   }
 
   # Ensure the standard node pool is created first for stability
