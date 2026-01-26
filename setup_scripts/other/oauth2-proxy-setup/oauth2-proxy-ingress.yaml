@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: oauth2-proxy
+  namespace: oauth2-proxy
+  annotations:
+    kubernetes.io/ingress.class: nginx
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: magarathea.ddns.net
+      http:
+        paths:
+          - path: /oauth2
+            pathType: Prefix
+            backend:
+              service:
+                name: oauth2-proxy
+                port:
+                  number: 80
+  # TLS strongly recommended (cookie-secure=true requires https)
+  tls:
+    - hosts:
+        - magarathea.ddns.net
+      secretName: magarathea-ddns-tls

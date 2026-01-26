@@ -74,10 +74,13 @@ CLIENT_SECRET="$(jq -er '.web.client_secret // empty' "$OAUTH_JSON")" \
 [[ -n "$CLIENT_ID" ]] || die "Extracted client_id is empty. Check '.web.client_id' in '$OAUTH_JSON'."
 [[ -n "$CLIENT_SECRET" ]] || die "Extracted client_secret is empty. Check '.web.client_secret' in '$OAUTH_JSON'."
 
-# ----- Generate cookie secret -----
-# 32 random bytes base64-encoded is a common choice for oauth2-proxy cookie secret.
-COOKIE_SECRET="$("$PYTHON_BIN" -c 'import os,base64; print(base64.b64encode(os.urandom(32)).decode())')" \
-  || die "Failed to generate cookie secret with $PYTHON_BIN."
+# # ----- Generate cookie secret -----
+# # 32 random bytes base64-encoded is a common choice for oauth2-proxy cookie secret.
+# COOKIE_SECRET="$("$PYTHON_BIN" -c 'import os,base64; print(base64.b64encode(os.urandom(32)).decode())')" \
+#   || die "Failed to generate cookie secret with $PYTHON_BIN."
+
+COOKIE_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24)[:32])')"
+echo "$COOKIE_SECRET" | wc -c   # should print 33 because newline; without newline it’s 32
 
 # ----- Create namespace and secret -----
 NAMESPACE="oauth2-proxy"

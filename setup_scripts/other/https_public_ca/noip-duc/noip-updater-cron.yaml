@@ -23,11 +23,13 @@ spec:
               if [ -z "$IP" ]; then echo "No IP found yet"; exit 1; fi
               
               echo "Found Ingress IP: $IP. Updating No-IP..."
-              
+              echo "Hostname to be changed: ${NOIP_HOSTNAMES}"
               # 2. Call No-IP API
               # Note: Use the variable names exactly as they appear in your .env
               curl -s -u "${NOIP_USERNAME}:${NOIP_PASSWORD}" \
                 "https://dynupdate.no-ip.com/nic/update?hostname=${NOIP_HOSTNAMES}&myip=$IP"
+
+              echo "done!"
             envFrom:
             - secretRef:
                 name: noip-credentials # created by "create_secret.sh"
