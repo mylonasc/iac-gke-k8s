@@ -1,0 +1,31 @@
+# This is so that the cronjob that
+# updates the IP at NoIp can see the
+# k8s ingress IP (from checking the cluster)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: noip-updater-sa # the service account name
+  namespace: ingress-nginx # the namespace that contains the secret
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: service-reader
+  namespace: ingress-nginx
+rules:
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: noip-updater-binding
+  namespace: ingress-nginx
+subjects:
+- kind: ServiceAccount
+  name: noip-updater-sa
+roleRef:
+  kind: Role
+  name: service-reader
+  apiGroup: rbac.authorization.k8s.io
