@@ -47,8 +47,5 @@ gcloud container operations list
 kubectl get pods -n kube-system | grep csi-secrets
 ```
 
-### Using the defined secrets
-
-A yaml of the following format will be able to access the secrets:
 
 
