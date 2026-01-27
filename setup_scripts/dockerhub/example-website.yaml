@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: private-dockerhub-demo
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: private-dockerhub-demo
+  template:
+    metadata:
+      labels:
+        app: private-dockerhub-demo
+    spec:
+      imagePullSecrets:
+        - name: dockerhub-regcred
+      containers:
+        - name: app
+          image: docker.io/mylonasc/magarathea:alpine-py312-fastapi-small
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "echo pulled ok; sleep 3600"]

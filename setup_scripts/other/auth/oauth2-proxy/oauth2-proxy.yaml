@@ -18,36 +18,28 @@ spec:
           image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
           imagePullPolicy: IfNotPresent
           args:
-            # Core
             - --provider=google
             - --http-address=0.0.0.0:4180
-
-            # Must match your Google OAuth "Authorized redirect URI"
             - --redirect-url=https://magarathea.ddns.net/oauth2/callback
 
-            # Where nginx will call to validate a request
-            # (oauth2-proxy provides /oauth2/auth automatically)
             - --email-domain=*
 
-            # If you only want your own domain:
-            # - --email-domain=yourcompany.com
-
-            # Cookies / security
             - --cookie-secure=true
             - --cookie-httponly=true
             - --cookie-samesite=lax
-
-            # Helpful headers to upstream / nginx
-            - --set-authorization-header=true
-            - --pass-access-token=true
-            - --pass-user-headers=true
-
-            # Usually good defaults
             - --cookie-refresh=1h
             - --cookie-expire=8h
 
-            # (Optional but recommended when behind reverse proxies)
             - --reverse-proxy=true
+
+            # Makes nginx auth_request integration work nicely
+            - --set-xauthrequest=true
+            - --upstream=static://200
+
+            # Optional headers to upstream (fine to keep)
+            - --set-authorization-header=true
+            - --pass-access-token=true
+            - --pass-user-headers=true
 
           env:
             - name: OAUTH2_PROXY_CLIENT_ID
