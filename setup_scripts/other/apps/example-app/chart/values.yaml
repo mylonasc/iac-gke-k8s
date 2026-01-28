@@ -1,0 +1,29 @@
+namespace: app-hello-2
+
+app:
+  name: my-website-2
+  labels:
+    app: hello
+  image: gcr.io/google-samples/hello-app:1.0
+  replicas: 1
+  containerPort: 8080
+
+service:
+  name: my-hello-service-2
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: true
+  className: nginx
+  host: magarathea.ddns.net
+  tlsSecretName: magarathea-ddns-net-tls
+  path: /new
+  pathType: Prefix
+
+auth:
+  enabled: true
+  # if you keep oauth2 endpoints on same host:
+  url: "https://$host/oauth2/auth"
+  signin: "https://$host/oauth2/start?rd=$escaped_request_uri"
+  responseHeaders: "x-auth-request-user,x-auth-request-email"
