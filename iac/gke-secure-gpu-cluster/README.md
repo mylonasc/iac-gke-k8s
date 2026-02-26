@@ -5,6 +5,7 @@ This is a deployment that creates a GKE in google cloud kybernetes engine.
 The cloud has the following features:
 * 2 types of GPU-enabled nodes clusters
 * 1 type of non-GPU general purpose nodes cluster
+* 1 type of isolated autoscaled node pool for sandboxed workloads
 * Secrets manager integration (e.g., for API keys)
 * Remote backend integration
 
@@ -19,10 +20,10 @@ Scripts for easy setup are provided in the `./backend_bootstrap` folder.
 
 Note on enabling remote state
 
-This repository contains a backend template at `iac/gke-secure-gpu-cluster/europe_backend.tf`. To enable remote state for this Terraform project you can either:
+This repository already contains a GCS backend configuration in `iac/gke-secure-gpu-cluster/europe_backend.tf`. In normal usage, run `terraform init -reconfigure` in this directory and Terraform will use that backend.
 
-- Copy the template to `backend.tf` in the same directory (and then run `terraform init`), or
-- Run the helper `iac/backend_bootstrap/gcp_make_terraform_backend_interactive.py` which can provision the GCS bucket and write a backend file for you.
+- If you need a different backend bucket/prefix, update the backend block and run `terraform init -reconfigure`.
+- If you need to bootstrap a new backend bucket, use `iac/backend_bootstrap/gcp_make_terraform_backend_interactive.py`.
 
 If you don't enable a remote backend, Terraform will default to local state.
 
@@ -66,4 +67,12 @@ It performs Phase A, waits for the cluster to be reachable and for nodes to be R
 
 Security note: prefer uploading secret versions from CI rather than placing secret payloads into Terraform state. The script supports a dry-run mode and should be used from CI or with care locally.
 
+## Isolated sandboxed workloads
 
+This Terraform module now includes a dedicated isolated node pool (`google_container_node_pool.gvisor_pool`) with:
+
+- autoscaling from zero,
+- GKE-managed sandbox taint plus labels for strict workload placement,
+- a manifest example for requesting the `gvisor` runtime.
+
+See `iac/gke-secure-gpu-cluster/k8s/gvisor-isolated-nodes.md` for create/de-provision steps, runtime verification, connectivity checks, and dynamic usage patterns from Python.

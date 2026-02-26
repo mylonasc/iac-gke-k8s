@@ -77,3 +77,33 @@ variable "k8s_namespace" {
   type = string
   default = "alt-default"
 }
+
+variable "enable_gvisor_pool" {
+  description = "When true, creates a dedicated node pool for gVisor-sandboxed workloads."
+  type        = bool
+  default     = true
+}
+
+variable "gvisor_pool_machine_type" {
+  description = "Machine type for the gVisor node pool."
+  type        = string
+  default     = "e2-medium"
+}
+
+variable "gvisor_pool_min_nodes" {
+  description = "Minimum node count for the gVisor node pool autoscaler."
+  type        = number
+  default     = 0
+}
+
+variable "gvisor_pool_max_nodes" {
+  description = "Maximum node count for the gVisor node pool autoscaler."
+  type        = number
+  default     = 5
+}
+
+variable "gvisor_pool_is_spot" {
+  description = "Whether gVisor node pool nodes should use Spot VMs."
+  type        = bool
+  default     = true
+}

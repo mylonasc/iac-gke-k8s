@@ -84,6 +84,43 @@ resource "google_container_node_pool" "primary_nodes" {
   }
 }
 
+# Dedicated gVisor-sandboxed node pool for isolated workloads
+resource "google_container_node_pool" "gvisor_pool" {
+  count    = var.enable_gvisor_pool ? 1 : 0
+  name     = "gvisor-sandbox-pool"
+  cluster  = google_container_cluster.primary.id
+  location = var.region
+  provider = google-beta
+
+  autoscaling {
+    min_node_count = var.gvisor_pool_min_nodes
+    max_node_count = var.gvisor_pool_max_nodes
+  }
+
+  node_config {
+    machine_type = var.gvisor_pool_machine_type
+    spot         = var.gvisor_pool_is_spot
+    image_type   = "COS_CONTAINERD"
+
+    sandbox_config {
+      sandbox_type = "gvisor"
+    }
+
+    labels = {
+      "workload-isolation" = "gvisor"
+      "purpose"            = "isolated-sandbox"
+    }
+
+    oauth_scopes = [
+      "https://www.googleapis.com/auth/cloud-platform"
+    ]
+  }
+
+  depends_on = [
+    google_container_node_pool.primary_nodes,
+  ]
+}
+
 # GPU node pool using Spot VMs - type 1
 resource "google_container_node_pool" "gpu_spot_pool_np_a" {
   name    = "gpu-spot-pool-a"
@@ -290,6 +327,3 @@ module "k8s" {
   k8s_namespace = var.k8s_namespace
   environment   = var.environment
 }
-
-
-
