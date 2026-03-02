@@ -1,78 +1,90 @@
 ## About
 
-This is a deployment that creates a GKE in google cloud kybernetes engine. 
+Terraform deployment for a GKE Standard cluster with mixed node pools, Workload Identity, Secret Manager integration, and Terraform-managed Kubernetes resources (including Agent Sandbox).
 
-The cloud has the following features:
-* 2 types of GPU-enabled nodes clusters
-* 1 type of non-GPU general purpose nodes cluster
-* 1 type of isolated autoscaled node pool for sandboxed workloads
-* Secrets manager integration (e.g., for API keys)
-* Remote backend integration
+## Implemented Features
 
+| Feature | Status | Where configured |
+|---|---|---|
+| GKE Standard cluster | Enabled | `main.tf` (`google_container_cluster.primary`) |
+| GPU node pool A (spot) | Enabled | `main.tf` (`google_container_node_pool.gpu_spot_pool_np_a`) |
+| GPU node pool B (spot) | Enabled | `main.tf` (`google_container_node_pool.gpu_spot_pool_np_b`) |
+| General-purpose pool | Enabled | `main.tf` (`google_container_node_pool.general_purpose_pool`) |
+| General-purpose small spot pool | Enabled | `main.tf` (`google_container_node_pool.general_purpose_spot_pool_small`) |
+| Isolated gVisor node pool | Enabled | `main.tf` (`google_container_node_pool.gvisor_pool`) |
+| Secret Manager containers | Enabled | `secrets.tf` + targeted Phase A |
+| Kubernetes namespace/service account/secrets | Enabled | `module "k8s"` |
+| Agent Sandbox controller and CRDs | Enabled | `k8s/agent_sandbox.tf` |
+| Agent Sandbox runtime (template/pool/router) | Enabled | `k8s/agent_sandbox.tf` with `enable_agent_sandbox_runtime=true` |
+| Remote Terraform backend (GCS) | Enabled | `europe_backend.tf` |
 
-## Using a backend
+## Backend State
 
-A backend is a place to store and manage your statefile. 
+State is configured to use GCS backend in `europe_backend.tf`.
 
-Although statefiles can be local, it is recommended to use a GCP storage bucket for storing your state. 
-
-Scripts for easy setup are provided in the `./backend_bootstrap` folder. 
-
-Note on enabling remote state
-
-This repository already contains a GCS backend configuration in `iac/gke-secure-gpu-cluster/europe_backend.tf`. In normal usage, run `terraform init -reconfigure` in this directory and Terraform will use that backend.
-
-- If you need a different backend bucket/prefix, update the backend block and run `terraform init -reconfigure`.
-- If you need to bootstrap a new backend bucket, use `iac/backend_bootstrap/gcp_make_terraform_backend_interactive.py`.
-
-If you don't enable a remote backend, Terraform will default to local state.
-
-## Public access
-The most cost-effective (free) option is to use a node port for public access.
-In order, however, to allow public access to pass google's firewall rules you must create an exception for your cluster. 
-
-You can find the name of the available clusters by running:
+- Reinitialize when backend settings change:
 
 ```bash
-gcloud container clusters list
+terraform init -reconfigure
 ```
 
-## Extension with secret management
+- If you need a different bucket/prefix, edit `europe_backend.tf` and re-run init.
+- If you need to bootstrap a backend bucket, use `iac/backend_bootstrap/gcp_make_terraform_backend_interactive.py`.
 
-To create the Secret Manager containers (the secret resources) run the terraform apply for `secrets.tf` as part of Phase A (this repo's automation does that). Note: creating the secret *container* does not add a secret *version* (the actual secret value). You must upload secret versions from CI or manually via `gcloud secrets versions add` before the k8s module can read secret values.
+## Two-Stage Apply Pattern
+
+This repository uses a two-stage apply to avoid Kubernetes provider ordering issues:
+
+1. **Phase A**: create/refresh project services, secrets containers, service account, cluster, and node pools.
+2. Upload secret versions to Secret Manager (from CI or manually).
+3. **Phase B**: apply `module.k8s`.
+
+Use the automation helper:
 
 ```bash
-terraform apply -target=google_secret_manager_secret.secrets -var-file=terraform.v2.tfvars
+./scripts/deploy_with_secrets.sh --project <project-id> --var-file terraform.v3.tfvars
 ```
 
-Also ensure secrets are present (versions) before running `terraform apply -target=module.k8s`.
+To execute (not dry-run):
 
-## Two-stage apply and automation
+```bash
+./scripts/deploy_with_secrets.sh --execute --project <project-id> --var-file terraform.v3.tfvars
+```
 
-This repo uses a two-stage apply pattern to avoid Terraform provider-init ordering issues: the Kubernetes provider needs a reachable cluster and Secret Manager secret versions to read before it can create Kubernetes resources.
+## Agent Sandbox (Terraform-managed)
 
-Recommended flow:
+Agent Sandbox is managed by Terraform in `module.k8s`.
 
-1. Phase A: create project services, secret containers, service account, and the cluster (this repo contains a targeted apply example in `k8s/README.md`).
-2. Provision secret versions to Secret Manager (preferably from CI using the CI secret store, or manually via `gcloud secrets versions add`).
-3. Phase B: apply `module.k8s` (targeted apply) to create Kubernetes namespace, pull secrets, and service accounts.
+For fresh bootstrap of runtime CRs, use two-pass rollout:
 
-Automation helper:
+1. Controller + CRDs only:
 
-There is a helper script to automate the flow:
+```bash
+terraform apply -target=module.k8s -var='enable_agent_sandbox_runtime=false' -var-file=terraform.v3.tfvars
+```
 
-	iac/gke-secure-gpu-cluster/scripts/deploy_with_secrets.sh
+2. Runtime resources:
 
-It performs Phase A, waits for the cluster to be reachable and for nodes to be Ready, optionally uploads secret versions from environment variables (DOCKER_CONFIG_JSON, OPENAI_API_KEY), then runs Phase B to apply `module.k8s`.
+```bash
+terraform apply -target=module.k8s -var='enable_agent_sandbox_runtime=true' -var-file=terraform.v3.tfvars
+```
 
-Security note: prefer uploading secret versions from CI rather than placing secret payloads into Terraform state. The script supports a dry-run mode and should be used from CI or with care locally.
+Script shortcut:
 
-## Isolated sandboxed workloads
+```bash
+./scripts/deploy_with_secrets.sh --execute --project <project-id> --var-file terraform.v3.tfvars --bootstrap-agent-sandbox
+```
 
-This Terraform module now includes a dedicated isolated node pool (`google_container_node_pool.gvisor_pool`) with:
+Notes:
+- On clusters where runtime objects already exist, pass 1 can temporarily remove runtime objects before pass 2 recreates them.
+- After pass 2, `terraform plan -target=module.k8s -var='enable_agent_sandbox_runtime=true'` should converge with no changes.
 
-- autoscaling from zero,
-- GKE-managed sandbox taint plus labels for strict workload placement,
-- a manifest example for requesting the `gvisor` runtime.
+Python client example:
 
-See `iac/gke-secure-gpu-cluster/k8s/gvisor-isolated-nodes.md` for create/de-provision steps, runtime verification, connectivity checks, and dynamic usage patterns from Python.
+- `scripts/agent_sandbox_claim_client.py`
+
+## gVisor-Isolated Workloads
+
+For details on scheduling workloads onto the isolated sandbox node pool, see:
+
+- `k8s/gvisor-isolated-nodes.md`

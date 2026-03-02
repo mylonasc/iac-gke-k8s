@@ -33,7 +33,7 @@ terraform plan \
   -target=google_service_account.default_gsa \
   -target=google_service_account_iam_member.workload_identity_user \
   -target=google_container_cluster.primary \
-  -var-file=terraform.v2.tfvars
+  -var-file=<var-file>.tfvars
 
 terraform apply \
   -target=google_project_service.gke_api \
@@ -43,7 +43,7 @@ terraform apply \
   -target=google_service_account.default_gsa \
   -target=google_service_account_iam_member.workload_identity_user \
   -target=google_container_cluster.primary \
-  -var-file=terraform.v2.tfvars
+  -var-file=<var-file>.tfvars
 ```
 
 - Notes:
@@ -66,21 +66,21 @@ Confirm that nodes are Ready and that you can list namespaces. If `kubectl` cann
 Once the cluster is reachable and nodes are Ready (or you have verified the k8s API is accessible), apply only the k8s module:
 
 ```bash
-terraform apply -target=module.k8s -var-file=terraform.v2.tfvars
+terraform apply -target=module.k8s -var-file=<var-file>.tfvars
 ```
 
 Notes on secrets and options
 - If you want the module to create the docker pull secret directly, run Phase B with these variables set (CI-friendly but note secret data may be present in state):
 
   ```bash
-  terraform apply -target=module.k8s -var='create_docker_registry_secret=true' -var='dockerconfig_secret_data_b64=<base64-encoded-dockerconfigjson>' -var-file=terraform.v2.tfvars
+  terraform apply -target=module.k8s -var='create_docker_registry_secret=true' -var='dockerconfig_secret_data_b64=<base64-encoded-dockerconfigjson>' -var-file=<var-file>.tfvars
   ```
 
 - Preferred, more secure option: upload secret *versions* to Secret Manager (CI or manual) and then run Phase B. Example:
 
   ```bash
   echo -n "$DOCKER_CONFIG_JSON" | gcloud secrets versions add dockerhub-ro-pat --data-file=- --project=<project>
-  terraform apply -target=module.k8s -var-file=terraform.v2.tfvars
+  terraform apply -target=module.k8s -var-file=<var-file>.tfvars
   ```
 
 This two-stage approach keeps cluster creation independent from secret provisioning and is recommended for long-term maintainability.
@@ -90,7 +90,7 @@ This two-stage approach keeps cluster creation independent from secret provision
 If you want to ensure any remaining resources are up-to-date, run a full apply:
 
 ```bash
-terraform apply -var-file=terraform.v2.tfvars
+terraform apply -var-file=<var-file>.tfvars
 ```
 
 Troubleshooting tips
@@ -109,14 +109,21 @@ What it does:
 - Waits until the cluster control plane is reachable and at least one node is Ready (if node pools were created)
 - Optionally uploads secret versions to Secret Manager from environment variables (DOCKER_CONFIG_JSON and OPENAI_API_KEY)
 - Runs Phase B: `terraform apply -target=module.k8s`
+- Optional Agent Sandbox bootstrap mode for fresh clusters:
+  - pass 1: `enable_agent_sandbox_runtime=false` (controller + CRDs)
+  - pass 2: `enable_agent_sandbox_runtime=true` (runtime resources)
+  - if runtime objects already exist, pass 1 can temporarily remove them before pass 2 recreates them
 
 Usage:
 
   # Dry-run (does not perform changes):
-  ./scripts/deploy_with_secrets.sh --project gke-gpu-project-473410
+  ./scripts/deploy_with_secrets.sh --project gke-gpu-project-473410 --var-file terraform.v3.tfvars
 
   # Execute (reads secrets from env and uploads to Secret Manager):
-  DOCKER_CONFIG_JSON='{"auths":{}}' OPENAI_API_KEY='sk-...' ./scripts/deploy_with_secrets.sh --execute --project gke-gpu-project-473410
+  DOCKER_CONFIG_JSON='{"auths":{}}' OPENAI_API_KEY='sk-...' ./scripts/deploy_with_secrets.sh --execute --project gke-gpu-project-473410 --var-file terraform.v3.tfvars
+
+  # Execute with Agent Sandbox two-pass bootstrap:
+  ./scripts/deploy_with_secrets.sh --execute --project gke-gpu-project-473410 --var-file terraform.v3.tfvars --bootstrap-agent-sandbox
 
 Security note: the script uploads secrets from environment variables to Secret Manager. Keep secrets out of shell history and CI logs. Prefer using your CI's secret store.
 
@@ -124,5 +131,3 @@ Why keep this separation
 - Prevents provider-init ordering problems when replacing the cluster.
 - Allows you to recreate or replace clusters without forcing Terraform to re-initialize the Kubernetes provider mid-apply.
 - Keeps lifecycle boundaries clear: infra (GCP) vs runtime manifests (K8s).
-
-If you want, I can generate a small shell script that automates Phase A -> wait -> Phase B (dry-run by default and `--execute` to run). Contact me and I will add it under `scripts/`.

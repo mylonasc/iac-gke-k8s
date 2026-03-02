@@ -7,13 +7,18 @@ set -euo pipefail
 
 usage() {
   cat <<EOF
-Usage: $0 [--execute] [--project PROJECT] [--cluster CLUSTER] [--region REGION]
+Usage: $0 [--execute] [--project PROJECT] [--cluster CLUSTER] [--region REGION] [--var-file TFVARS] [--bootstrap-agent-sandbox]
 
 Options:
   --execute           Actually run terraform/gcloud commands. Default is dry-run.
   --project PROJECT   GCP project id (default from var file or env PROJECT_ID)
   --cluster CLUSTER   Cluster name (default: gpu-spot-cluster)
   --region REGION     Cluster region/zone (default: europe-west4-a)
+  --var-file TFVARS   Terraform variable file (default: terraform.v2.tfvars)
+  --bootstrap-agent-sandbox
+                      Run module.k8s in two passes:
+                      1) enable_agent_sandbox_runtime=false (install CRDs/controller)
+                      2) enable_agent_sandbox_runtime=true  (install runtime resources)
 
 Environment variables used to upload secrets (optional):
   DOCKER_CONFIG_JSON  - docker config JSON (not base64). If set, will be uploaded to Secret Manager secret 'dockerhub-ro-pat' as a new version.
@@ -34,6 +39,8 @@ EXECUTE=0
 PROJECT=""
 CLUSTER="gpu-spot-cluster"
 REGION="europe-west4-a"
+VAR_FILE="terraform.v2.tfvars"
+BOOTSTRAP_AGENT_SANDBOX=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -41,6 +48,8 @@ while [[ $# -gt 0 ]]; do
     --project) PROJECT="$2"; shift 2 ;;
     --cluster) CLUSTER="$2"; shift 2 ;;
     --region) REGION="$2"; shift 2 ;;
+    --var-file) VAR_FILE="$2"; shift 2 ;;
+    --bootstrap-agent-sandbox) BOOTSTRAP_AGENT_SANDBOX=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1"; usage; exit 2 ;;
   esac
@@ -48,20 +57,21 @@ done
 
 if [[ -z "$PROJECT" ]]; then
   # try to read project from terraform var file if present
-  if [[ -f "terraform.v2.tfvars" ]]; then
-    PROJECT=$(grep -E "^project_id\s*=\s*\"?" terraform.v2.tfvars | head -n1 | sed -E 's/.*=\s*"?([^"\n]+)"?/\1/') || true
+  if [[ -f "$VAR_FILE" ]]; then
+    PROJECT=$(grep -E "^project_id\s*=\s*\"?" "$VAR_FILE" | head -n1 | sed -E 's/.*=\s*"?([^"\n]+)"?/\1/') || true
   fi
   PROJECT=${PROJECT:-}
 fi
 
 if [[ -z "$PROJECT" ]]; then
-  echo "Project not provided and not found in terraform.v2.tfvars. Provide --project or set it in terraform.v2.tfvars." >&2
+  echo "Project not provided and not found in $VAR_FILE. Provide --project or set it in the selected var file." >&2
   exit 2
 fi
 
 echo "Project: $PROJECT"
 echo "Cluster: $CLUSTER"
 echo "Region: $REGION"
+echo "Var file: $VAR_FILE"
 
 TF_DIR="$(pwd)"
 
@@ -92,12 +102,12 @@ PHASE_A_TARGETS=(
   "-target=google_container_node_pool.gpu_spot_pool_np_b"
 )
 
-PLAN_CMD=(terraform plan -var-file=terraform.v2.tfvars)
+PLAN_CMD=(terraform plan -var-file="$VAR_FILE")
 PLAN_CMD+=("${PHASE_A_TARGETS[@]}")
 
 run_or_echo "${PLAN_CMD[@]}"
 
-APPLY_CMD=(terraform apply -var-file=terraform.v2.tfvars -auto-approve)
+APPLY_CMD=(terraform apply -var-file="$VAR_FILE" -auto-approve)
 APPLY_CMD+=("${PHASE_A_TARGETS[@]}")
 
 run_or_echo "${APPLY_CMD[@]}"
@@ -166,6 +176,12 @@ fi
 
 # Phase B: apply the k8s module only
 echo "\n==> Phase B: apply module.k8s"
-run_or_echo "terraform apply -target=module.k8s -var-file=terraform.v2.tfvars -auto-approve"
+if [[ $BOOTSTRAP_AGENT_SANDBOX -eq 1 ]]; then
+  echo "Bootstrap mode enabled: running two-pass Agent Sandbox rollout"
+  run_or_echo "terraform apply -target=module.k8s -var-file=$VAR_FILE -var='enable_agent_sandbox_runtime=false' -auto-approve"
+  run_or_echo "terraform apply -target=module.k8s -var-file=$VAR_FILE -var='enable_agent_sandbox_runtime=true' -auto-approve"
+else
+  run_or_echo "terraform apply -target=module.k8s -var-file=$VAR_FILE -auto-approve"
+fi
 
 echo "\nFinished. If this was a dry-run, re-run with --execute to perform changes."

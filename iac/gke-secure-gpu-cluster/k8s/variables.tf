@@ -41,3 +41,37 @@ variable "docker_registry_secret_name" {
   type        = string
   default     = "dockerhub-pull-secret"
 }
+
+variable "enable_agent_sandbox" {
+  description = "When true, install and manage Agent Sandbox resources via Terraform."
+  type        = bool
+  default     = true
+}
+
+variable "agent_sandbox_version" {
+  description = "Agent Sandbox release version used for controller/CRD manifests."
+  type        = string
+  default     = "v0.1.0"
+}
+
+variable "agent_sandbox_runtime_image" {
+  description = "Container image for sandbox runtime pods."
+  type        = string
+}
+
+variable "agent_sandbox_router_image" {
+  description = "Container image for sandbox router pods."
+  type        = string
+}
+
+variable "agent_sandbox_warm_pool_replicas" {
+  description = "Number of pre-warmed sandbox pods to maintain."
+  type        = number
+  default     = 2
+}
+
+variable "enable_agent_sandbox_runtime" {
+  description = "When true, create Agent Sandbox runtime resources after CRDs are available."
+  type        = bool
+  default     = false
+}

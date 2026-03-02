@@ -24,12 +24,12 @@ provider "google-beta" {
 
 # Enable necessary APIs for the project
 resource "google_project_service" "gke_api" {
-  service = "container.googleapis.com"
+  service            = "container.googleapis.com"
   disable_on_destroy = false
 }
 
 resource "google_project_service" "compute_api" {
-  service = "compute.googleapis.com"
+  service            = "compute.googleapis.com"
   disable_on_destroy = false
 }
 
@@ -63,9 +63,9 @@ resource "google_container_cluster" "primary" {
 # Standard node pool for system pods and reliability
 # This follows the best practice mentioned in the documentation.
 resource "google_container_node_pool" "primary_nodes" {
-  name       = "primary-nodes"
-  cluster    = google_container_cluster.primary.id
-  location   = var.region
+  name     = "primary-nodes"
+  cluster  = google_container_cluster.primary.id
+  location = var.region
 
   # Add this autoscaling block
   autoscaling {
@@ -77,7 +77,7 @@ resource "google_container_node_pool" "primary_nodes" {
   node_config {
     # machine_type = "e2-medium"
     machine_type = "e2-standard-2"
-    spot = var.primary_is_spot
+    spot         = var.primary_is_spot
     oauth_scopes = [
       "https://www.googleapis.com/auth/cloud-platform"
     ]
@@ -123,8 +123,8 @@ resource "google_container_node_pool" "gvisor_pool" {
 
 # GPU node pool using Spot VMs - type 1
 resource "google_container_node_pool" "gpu_spot_pool_np_a" {
-  name    = "gpu-spot-pool-a"
-  cluster = google_container_cluster.primary.id
+  name     = "gpu-spot-pool-a"
+  cluster  = google_container_cluster.primary.id
   location = var.region
 
   autoscaling {
@@ -137,7 +137,7 @@ resource "google_container_node_pool" "gpu_spot_pool_np_a" {
     spot = true
 
     machine_type = var.gpu_machine_type_ng_a
-    
+
     # Define the GPU type and count
     guest_accelerator {
       type  = var.gpu_type_ng_a
@@ -171,8 +171,8 @@ resource "google_container_node_pool" "gpu_spot_pool_np_a" {
 
 # GPU node pool using Spot VMs - type 1
 resource "google_container_node_pool" "gpu_spot_pool_np_b" {
-  name    = "gpu-spot-pool-b"
-  cluster = google_container_cluster.primary.id
+  name     = "gpu-spot-pool-b"
+  cluster  = google_container_cluster.primary.id
   location = var.region
 
   autoscaling {
@@ -185,7 +185,7 @@ resource "google_container_node_pool" "gpu_spot_pool_np_b" {
     spot = true
 
     machine_type = var.gpu_machine_type_ng_b
-    
+
     # Define the GPU type and count
     guest_accelerator {
       type  = var.gpu_type_ng_b
@@ -199,7 +199,7 @@ resource "google_container_node_pool" "gpu_spot_pool_np_b" {
       value  = "true"
       effect = "NO_SCHEDULE"
     }
-    
+
     taint {
       key    = "gpu-type"
       value  = var.gpu_type_ng_b
@@ -233,7 +233,7 @@ resource "google_container_node_pool" "general_purpose_spot_pool_small" {
     # e2-standard-4 provides 4 vCPUs and 16 GB of memory
     # machine_type = "e2-standard-2"
     machine_type = "e2-small"
-    spot = true
+    spot         = true
     oauth_scopes = [
       "https://www.googleapis.com/auth/cloud-platform"
     ]
@@ -320,10 +320,17 @@ data "google_client_config" "default" {}
 data "google_client_openid_userinfo" "current" {}
 
 module "k8s" {
-  source = "./k8s"
+  source        = "./k8s"
   project_id    = var.project_id
   region        = var.region
   cluster_name  = var.cluster_name
   k8s_namespace = var.k8s_namespace
   environment   = var.environment
+
+  enable_agent_sandbox             = var.enable_agent_sandbox
+  agent_sandbox_version            = var.agent_sandbox_version
+  agent_sandbox_runtime_image      = var.agent_sandbox_runtime_image
+  agent_sandbox_router_image       = var.agent_sandbox_router_image
+  agent_sandbox_warm_pool_replicas = var.agent_sandbox_warm_pool_replicas
+  enable_agent_sandbox_runtime     = var.enable_agent_sandbox_runtime
 }
