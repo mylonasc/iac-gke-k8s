@@ -138,6 +138,12 @@ variable "agent_sandbox_warm_pool_replicas" {
   default     = 2
 }
 
+variable "agent_sandbox_router_replicas" {
+  description = "Number of sandbox router pod replicas to keep available."
+  type        = number
+  default     = 2
+}
+
 variable "enable_agent_sandbox_runtime" {
   description = "When true, manages Agent Sandbox runtime resources (SandboxTemplate, warm pool, router). Keep false for the first apply so CRDs are installed first."
   type        = bool

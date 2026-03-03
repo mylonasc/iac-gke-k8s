@@ -39,6 +39,14 @@ Automated equivalent:
 
 Note: if runtime objects already exist and you run bootstrap mode, pass 1 can remove runtime objects before pass 2 recreates them.
 
+### Idle-at-zero mode
+
+You can keep runtime resources managed while allowing the gVisor pool to scale to zero when idle by setting:
+
+- `enable_agent_sandbox_runtime = true`
+- `agent_sandbox_warm_pool_replicas = 0`
+- `agent_sandbox_router_replicas = 0`
+
 ## Verify runtime status
 
 ```bash

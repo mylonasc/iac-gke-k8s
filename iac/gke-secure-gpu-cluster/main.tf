@@ -332,5 +332,6 @@ module "k8s" {
   agent_sandbox_runtime_image      = var.agent_sandbox_runtime_image
   agent_sandbox_router_image       = var.agent_sandbox_router_image
   agent_sandbox_warm_pool_replicas = var.agent_sandbox_warm_pool_replicas
+  agent_sandbox_router_replicas    = var.agent_sandbox_router_replicas
   enable_agent_sandbox_runtime     = var.enable_agent_sandbox_runtime
 }

@@ -200,7 +200,7 @@ resource "kubernetes_manifest" "agent_sandbox_router_deployment" {
       namespace = local.ns
     }
     spec = {
-      replicas = 2
+      replicas = var.agent_sandbox_router_replicas
       selector = {
         matchLabels = {
           app = "sandbox-router"

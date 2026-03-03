@@ -78,6 +78,10 @@ Script shortcut:
 Notes:
 - On clusters where runtime objects already exist, pass 1 can temporarily remove runtime objects before pass 2 recreates them.
 - After pass 2, `terraform plan -target=module.k8s -var='enable_agent_sandbox_runtime=true'` should converge with no changes.
+- To keep Agent Sandbox runtime installed but idle at zero gVisor nodes, set:
+  - `enable_agent_sandbox_runtime = true`
+  - `agent_sandbox_warm_pool_replicas = 0`
+  - `agent_sandbox_router_replicas = 0`
 
 Python client example:
 

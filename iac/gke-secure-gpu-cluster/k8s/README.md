@@ -113,6 +113,9 @@ What it does:
   - pass 1: `enable_agent_sandbox_runtime=false` (controller + CRDs)
   - pass 2: `enable_agent_sandbox_runtime=true` (runtime resources)
   - if runtime objects already exist, pass 1 can temporarily remove them before pass 2 recreates them
+- Idle-at-zero mode for Agent Sandbox runtime (keep runtime managed but no steady-state gVisor pods):
+  - set `agent_sandbox_warm_pool_replicas=0`
+  - set `agent_sandbox_router_replicas=0`
 
 Usage:
 
