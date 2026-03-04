@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastapi-token-inspection
+  namespace: alt-default
+  labels:
+    app: fastapi-token-inspection
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fastapi-token-inspection
+  template:
+    metadata:
+      labels:
+        app: fastapi-token-inspection
+    spec:
+      containers:
+        - name: api
+          image: python:3.12-alpine
+          ports:
+            - containerPort: 8000
+          workingDir: /app
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              pip install --no-cache-dir --root-user-action=ignore fastapi "uvicorn[standard]"
+              cat > /app/main.py <<'PY'
+              import base64
+              import json
+              from fastapi import FastAPI, Header, HTTPException
+
+              app = FastAPI()
+
+              def decode_jwt_payload(token: str) -> dict:
+                  parts = token.split(".")
+                  if len(parts) < 2:
+                      raise ValueError("Token is not a JWT")
+                  payload = parts[1] + "=" * (-len(parts[1]) % 4)
+                  decoded = base64.urlsafe_b64decode(payload.encode("utf-8")).decode("utf-8")
+                  return json.loads(decoded)
+
+              @app.get("/inspect-token")
+              async def inspect_token(authorization: str | None = Header(default=None)):
+                  if not authorization or not authorization.lower().startswith("bearer "):
+                      raise HTTPException(status_code=401, detail="Missing Bearer token")
+
+                  token = authorization.split(" ", 1)[1].strip()
+                  try:
+                      payload = decode_jwt_payload(token)
+                  except Exception as exc:
+                      raise HTTPException(status_code=400, detail=f"Invalid token: {exc}")
+
+                  print(f"Bearer token payload: {json.dumps(payload, separators=(",",":"))}", flush=True)
+                  return {"payload": payload}
+
+              @app.get("/token-inspection")
+              async def token_inspection_alias(authorization: str | None = Header(default=None)):
+                  return await inspect_token(authorization)
+              PY
+              uvicorn main:app --host 0.0.0.0 --port 8000

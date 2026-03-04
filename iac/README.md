@@ -2,6 +2,7 @@
 
 - Main GKE deployment: `gke-secure-gpu-cluster`
 - Backend bootstrap helpers: `backend_bootstrap`
+- Project documentation index: `../docs/README.md`
 
 Start with:
 

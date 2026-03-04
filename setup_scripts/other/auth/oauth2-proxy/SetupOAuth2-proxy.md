@@ -1,3 +1,7 @@
+> This is an example-oriented setup note for oauth2-proxy with ingress-nginx.
+> Validate against current official docs before production use:
+> `https://oauth2-proxy.github.io/oauth2-proxy/`
+> and `https://kubernetes.github.io/ingress-nginx/examples/auth/oauth-external-auth/`.
 
 * **Ingress A (no auth annotations):** routes `https://yourdomain.com/oauth2/*` → `oauth2-proxy`
 * **Ingress B (protected):** routes `https://yourdomain.com/*` → your app, and uses `auth-url` / `auth-signin` to bounce users to `/oauth2/start`

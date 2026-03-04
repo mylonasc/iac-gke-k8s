@@ -2,6 +2,12 @@
 
 Terraform deployment for a GKE Standard cluster with mixed node pools, Workload Identity, Secret Manager integration, and Terraform-managed Kubernetes resources (including Agent Sandbox).
 
+Related project docs:
+
+- `docs/README.md`
+- `docs/deploy-and-operations.md`
+- `docs/inventory.md`
+
 ## Implemented Features
 
 | Feature | Status | Where configured |

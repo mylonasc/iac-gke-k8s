@@ -2,6 +2,13 @@
 
 This document instructs an infra/coding assistant how to gather safe, useful diagnostics from the GKE cluster in this repo.
 
+Primary references:
+
+- `docs/deploy-and-operations.md`
+- `docs/runbooks/cluster-api-unreachable.md`
+- `docs/runbooks/gpu-pods-pending.md`
+- `docs/runbooks/secret-access-failures.md`
+
 Principles
 - Always ask for permission before accessing a production cluster. If the user requests diagnostics, confirm the target cluster name/region and whether it's a prod/test/dev cluster.
 - Do NOT exfiltrate secrets or full logs that contain tokens/keys. Redact or mark sensitive files before sharing externally.
@@ -85,7 +92,7 @@ Terraform context (infra state)
 # From the infra folder in this repo
 cd iac/gke-secure-gpu-cluster
 terraform init -backend=false
-terraform plan -var-file=terraform.v2.tfvars -refresh-only -out=refresh.plan
+terraform plan -var-file=terraform.v3.tfvars -refresh-only -out=refresh.plan
 terraform show -json refresh.plan > ../diagnostics/terraform-refresh.json
 terraform state list > ../diagnostics/terraform-state-list.txt || true
 terraform output > ../diagnostics/terraform-outputs.txt || true

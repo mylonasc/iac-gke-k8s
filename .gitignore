@@ -1,0 +1,9 @@
+# Terraform working directories
+**/.terraform/
+
+# Local Python environments and notebook artifacts
+**/.venv/
+**/.ipynb_checkpoints/
+
+# Local diagnostics bundles
+gke-diagnostics-*.tgz

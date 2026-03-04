@@ -1,0 +1,21 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fastapi-token-inspection
+  namespace: alt-default
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/auth-url: "https://$host/oauth2/auth"
+    nginx.ingress.kubernetes.io/auth-signin: "https://$host/oauth2/start?rd=$escaped_request_uri"
+    nginx.ingress.kubernetes.io/auth-response-headers: "Authorization,X-Auth-Request-Email,X-Auth-Request-User"
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /token-inspection
+            pathType: Prefix
+            backend:
+              service:
+                name: fastapi-token-inspection
+                port:
+                  number: 80

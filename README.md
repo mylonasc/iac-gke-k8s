@@ -2,6 +2,15 @@
 
 Infrastructure-as-code for a GKE Standard cluster with mixed node pools (GPU and non-GPU), gVisor-isolated workloads, Secret Manager integration, and Terraform-managed Agent Sandbox.
 
+## Documentation Map
+
+- Documentation index: `docs/README.md`
+- Deployment and day-2 operations: `docs/deploy-and-operations.md`
+- Deployed inventory (what exists and where): `docs/inventory.md`
+- Project links and console entry points: `docs/links.md`
+- Documentation completeness checklist: `docs/completeness-checklist.md`
+- Archived notes: `docs/archive/`
+
 ## Cluster Features
 
 | Area | Implemented | Terraform resource/module | Notes |

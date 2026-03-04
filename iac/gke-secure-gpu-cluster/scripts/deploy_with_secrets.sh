@@ -14,7 +14,7 @@ Options:
   --project PROJECT   GCP project id (default from var file or env PROJECT_ID)
   --cluster CLUSTER   Cluster name (default: gpu-spot-cluster)
   --region REGION     Cluster region/zone (default: europe-west4-a)
-  --var-file TFVARS   Terraform variable file (default: terraform.v2.tfvars)
+  --var-file TFVARS   Terraform variable file (default: terraform.v3.tfvars)
   --bootstrap-agent-sandbox
                       Run module.k8s in two passes:
                       1) enable_agent_sandbox_runtime=false (install CRDs/controller)
@@ -39,7 +39,7 @@ EXECUTE=0
 PROJECT=""
 CLUSTER="gpu-spot-cluster"
 REGION="europe-west4-a"
-VAR_FILE="terraform.v2.tfvars"
+VAR_FILE="terraform.v3.tfvars"
 BOOTSTRAP_AGENT_SANDBOX=0
 
 while [[ $# -gt 0 ]]; do

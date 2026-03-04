@@ -1,3 +1,8 @@
+> Historical snapshot output from `inspect_cluster.sh`.
+> 
+> This file is not a live source of truth and can become stale after any cluster change.
+> For current state, rerun `./inspect_cluster.sh` and capture a fresh report.
+
 Starting GKE Cluster Inspection...
 Context: gke_gke-gpu-project-473410_europe-west4-a_gpu-spot-cluster
 

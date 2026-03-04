@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastapi-token-inspection
+  namespace: alt-default
+  labels:
+    app: fastapi-token-inspection
+spec:
+  selector:
+    app: fastapi-token-inspection
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
