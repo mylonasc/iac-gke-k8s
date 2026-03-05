@@ -8,6 +8,7 @@
 
 # Local Python environments and notebook artifacts
 **/.venv/
+**/.venv-*/
 **/.ipynb_checkpoints/
 **/__pycache__/
 **/*.py[cod]

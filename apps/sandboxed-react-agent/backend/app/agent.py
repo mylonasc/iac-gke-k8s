@@ -80,6 +80,34 @@ class SandboxedReactAgent:
         self.sandbox_manager = SandboxManager()
         self.sessions: dict[str, SessionState] = {}
 
+    def _sanitize_messages(
+        self, messages: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        sanitized: list[dict[str, Any]] = []
+        open_tool_ids: set[str] = set()
+
+        for message in messages:
+            role = message.get("role")
+            if role == "assistant":
+                tool_calls = message.get("tool_calls") or []
+                for tc in tool_calls:
+                    tc_id = tc.get("id")
+                    if tc_id:
+                        open_tool_ids.add(tc_id)
+                sanitized.append(message)
+                continue
+
+            if role == "tool":
+                tool_call_id = message.get("tool_call_id")
+                if tool_call_id and tool_call_id in open_tool_ids:
+                    open_tool_ids.remove(tool_call_id)
+                    sanitized.append(message)
+                continue
+
+            sanitized.append(message)
+
+        return sanitized
+
     def get_runtime_config(self) -> dict[str, Any]:
         return {
             "model": self.model,
@@ -147,6 +175,7 @@ class SandboxedReactAgent:
 
     def chat(self, user_message: str, session_id: str | None = None) -> dict[str, Any]:
         state = self.get_or_create_session(session_id)
+        state.messages = self._sanitize_messages(state.messages)
         state.updated_at = _now_iso()
         state.messages.append({"role": "user", "content": user_message})
 
@@ -192,17 +221,24 @@ class SandboxedReactAgent:
                 }
                 state.messages.append(assistant_payload)
 
+                limit_reached = False
                 for tc in tool_calls:
                     if len(turn_tool_calls) >= self.max_tool_calls_per_turn:
-                        state.last_error = "Tool-calling loop exhausted max tool calls"
-                        return {
-                            "session_id": state.session_id,
-                            "reply": "I hit the tool-calling safety limit for this turn.",
-                            "tool_calls": turn_tool_calls,
-                            "error": state.last_error,
-                        }
+                        limit_reached = True
+                        output = json.dumps(
+                            {
+                                "tool": tc.function.name,
+                                "ok": False,
+                                "stdout": "",
+                                "stderr": "",
+                                "error": "Skipped due to max tool calls per turn safety limit",
+                            },
+                            ensure_ascii=True,
+                        )
+                    else:
+                        output = self._run_tool(tc.function.name, tc.function.arguments)
+                        state.tool_calls += 1
 
-                    output = self._run_tool(tc.function.name, tc.function.arguments)
                     turn_tool_calls.append(
                         {
                             "tool": tc.function.name,
@@ -217,7 +253,16 @@ class SandboxedReactAgent:
                             "content": output,
                         }
                     )
-                    state.tool_calls += 1
+
+                if limit_reached:
+                    state.last_error = "Tool-calling loop exhausted max tool calls"
+                    state.updated_at = _now_iso()
+                    return {
+                        "session_id": state.session_id,
+                        "reply": "I hit the tool-calling safety limit for this turn.",
+                        "tool_calls": turn_tool_calls,
+                        "error": state.last_error,
+                    }
 
             state.last_error = "Tool-calling loop exhausted max iterations"
             return {
@@ -228,6 +273,11 @@ class SandboxedReactAgent:
             }
         except Exception as exc:
             state.last_error = str(exc)
+            if (
+                "tool_call_ids did not have response messages" in state.last_error
+                or "messages with role 'tool' must be a response" in state.last_error
+            ):
+                state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
             return {
                 "session_id": state.session_id,
                 "reply": "The agent failed while processing your request.",

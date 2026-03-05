@@ -139,7 +139,8 @@ function App() {
         : "";
 
       const assistantMessage = data.reply || data.error || "No response from agent.";
-      setMessages((prev) => [...prev, { role: "assistant", content: `${assistantMessage}${toolMeta}` }]);
+      const errorMeta = data.error ? `\n\n[error: ${data.error}]` : "";
+      setMessages((prev) => [...prev, { role: "assistant", content: `${assistantMessage}${toolMeta}${errorMeta}` }]);
     } catch (error) {
       setMessages((prev) => [
         ...prev,

@@ -1,0 +1,42 @@
+apiVersion: app.diagrams/v1
+kind: Actor
+metadata:
+  name: user-browser
+spec:
+  targets:
+    - name: sandboxed-react-agent-web
+      namespace: alt-default
+      kind: Ingress
+      apiVersion: networking.k8s.io/v1
+      edge: COMMUNICATION
+---
+apiVersion: app.diagrams/v1
+kind: Agent
+metadata:
+  name: llm-agent
+spec:
+  targets:
+    - name: sandboxed-react-agent-backend
+      namespace: alt-default
+      kind: Deployment
+      apiVersion: apps/v1
+      edge: CONTROLLED_BY
+    - name: openai-api
+      kind: ExternalSystem
+      apiVersion: app.diagrams/v1
+      edge: COMMUNICATION
+    - name: sandbox-router-svc
+      namespace: alt-default
+      kind: Service
+      apiVersion: v1
+      edge: COMMUNICATION
+    - name: python-runtime-claim
+      namespace: alt-default
+      kind: SandboxClaim
+      apiVersion: extensions.agents.x-k8s.io/v1alpha1
+      edge: REFERENCE
+---
+apiVersion: app.diagrams/v1
+kind: ExternalSystem
+metadata:
+  name: openai-api

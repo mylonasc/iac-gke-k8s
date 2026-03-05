@@ -21,26 +21,16 @@ It supports two execution targets:
 
 The backend currently uses an in-memory session store (single replica recommended).
 
-## Deployment diagram (Kubediagrams)
+## Deployment diagram (KubeDiagrams)
 
-```kubediagrams
-flowchart LR
-  User([User Browser]) --> IngressWeb[Ingress: sandboxed-react-agent-web]
-  IngressWeb --> FrontendSvc[Service: sandboxed-react-agent-frontend]
-  FrontendSvc --> FrontendPod[(Pod: sandboxed-react-agent-frontend)]
+To render diagrams on demand:
 
-  FrontendPod --> IngressApi[Ingress: sandboxed-react-agent-api]
-  IngressApi --> BackendSvc[Service: sandboxed-react-agent-backend]
-  BackendSvc --> BackendPod[(Pod: sandboxed-react-agent-backend)]
-
-  BackendPod --> OpenAI[(OpenAI API)]
-  BackendPod --> RouterSvc[Service: sandbox-router-svc]
-  RouterSvc --> RouterPod[(Pod: sandbox-router-deployment)]
-
-  RouterPod --> Claim[SandboxClaim]
-  Claim --> Sandbox[Sandbox]
-  Sandbox --> SandboxPod[(Pod: python-runtime-sandbox)]
+```bash
+./apps/sandboxed-react-agent/render_k8s_diagrams.sh
 ```
+
+![Deployment diagram (KubeDiagrams)](docs/diagrams/deployment-kubediagrams.svg)
+
 
 ### Component roles in the cluster
 
@@ -82,35 +72,8 @@ flowchart LR
 
 ## Interaction diagram
 
-```kubediagrams
-sequenceDiagram
-  autonumber
-  actor U as 👤 User
-  participant F as 🧩 Frontend Pod
-  participant B as ⚙️ Backend (Agent)
-  participant O as 🤖 OpenAI API
-  participant R as 🛣️ Sandbox Router
-  participant C as 📦 SandboxClaim CRD
-  participant S as 📦 Sandbox CRD
-  participant P as 🧱 gVisor Sandbox Pod
+![Interaction diagram (KubeDiagrams)](docs/diagrams/interaction-kubediagrams.svg)
 
-  U->>F: Open app + send message
-  F->>B: POST /api/chat
-  B->>O: chat.completions (tools enabled)
-  O-->>B: tool_call(s)
-
-  B->>R: /execute request
-  R->>C: Create/resolve SandboxClaim
-  C->>S: Bind to Sandbox
-  S->>P: Schedule runtime pod (RuntimeClass=gvisor)
-  P-->>R: Tool execution output
-
-  R-->>B: tool result payload
-  B->>O: follow-up with tool result
-  O-->>B: final assistant content
-  B-->>F: chat response JSON
-  F-->>U: Render assistant answer
-```
 
 ## Folder structure
 

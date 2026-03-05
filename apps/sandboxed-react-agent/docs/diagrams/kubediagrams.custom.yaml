@@ -1,0 +1,70 @@
+nodes:
+  Actor/app.diagrams/v1:
+    scope: Outside
+    diagram_node_classname: diagrams.onprem.client.User
+    edges: |
+      for idx, target in enumerate(query_path(resource, "spec.targets", [])):
+        edges.add_edge_to(
+          f"spec.targets[{idx}]",
+          target.get("name"),
+          target.get("namespace"),
+          target.get("kind"),
+          target.get("apiVersion"),
+          target.get("edge", "COMMUNICATION"),
+          data=target,
+        )
+
+  Agent/app.diagrams/v1:
+    scope: Outside
+    diagram_node_classname: diagrams.onprem.compute.Server
+    edges: |
+      for idx, target in enumerate(query_path(resource, "spec.targets", [])):
+        edges.add_edge_to(
+          f"spec.targets[{idx}]",
+          target.get("name"),
+          target.get("namespace"),
+          target.get("kind"),
+          target.get("apiVersion"),
+          target.get("edge", "COMMUNICATION"),
+          data=target,
+        )
+
+  ExternalSystem/app.diagrams/v1:
+    scope: Outside
+    diagram_node_classname: diagrams.onprem.network.Internet
+
+  SandboxTemplate/extensions.agents.x-k8s.io/v1alpha1:
+    scope: Namespaced
+    diagram_node_classname: diagrams.k8s.others.CRD
+
+  SandboxWarmPool/extensions.agents.x-k8s.io/v1alpha1:
+    scope: Namespaced
+    diagram_node_classname: diagrams.k8s.others.CRD
+    edges: |
+      template_ref = query_path(resource, "spec.sandboxTemplateRef")
+      if template_ref is not None:
+        edges.add_edge_to(
+          "spec.sandboxTemplateRef",
+          template_ref.get("name"),
+          get_namespace(resource),
+          "SandboxTemplate",
+          "extensions.agents.x-k8s.io/v1alpha1",
+          "REFERENCE",
+          data=template_ref,
+        )
+
+  SandboxClaim/extensions.agents.x-k8s.io/v1alpha1:
+    scope: Namespaced
+    diagram_node_classname: diagrams.k8s.others.CRD
+    edges: |
+      template_ref = query_path(resource, "spec.sandboxTemplateRef")
+      if template_ref is not None:
+        edges.add_edge_to(
+          "spec.sandboxTemplateRef",
+          template_ref.get("name"),
+          get_namespace(resource),
+          "SandboxTemplate",
+          "extensions.agents.x-k8s.io/v1alpha1",
+          "REFERENCE",
+          data=template_ref,
+        )
