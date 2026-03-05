@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 K8S_DIR="${SCRIPT_DIR}/k8s"
 NAMESPACE="${NAMESPACE:-alt-default}"
+INGRESS_FILE="${INGRESS_FILE:-ingress.magarathea.yaml}"
 DELETE_PULL_SECRET=0
 
 if [[ "${1:-}" == "--delete-pull-secret" ]]; then
@@ -12,6 +13,8 @@ fi
 
 echo "Tearing down sandboxed-react-agent from namespace: ${NAMESPACE}"
 
+kubectl delete -f "${K8S_DIR}/${INGRESS_FILE}" --ignore-not-found
+kubectl delete -f "${K8S_DIR}/ingress.yaml" --ignore-not-found
 kubectl delete -f "${K8S_DIR}/ingress.magarathea.yaml" --ignore-not-found
 kubectl delete -f "${K8S_DIR}/frontend-service.yaml" --ignore-not-found
 kubectl delete -f "${K8S_DIR}/frontend-deployment.yaml" --ignore-not-found
@@ -26,4 +29,4 @@ if [[ "${DELETE_PULL_SECRET}" -eq 1 ]]; then
 fi
 
 echo "Sandboxed React Agent resources removed."
-kubectl -n "${NAMESPACE}" get deploy,svc,ingress | grep sandboxed-react-agent || true
+kubectl -n "${NAMESPACE}" get deploy,svc,ingress,role,rolebinding,secret | grep sandboxed-react-agent || true

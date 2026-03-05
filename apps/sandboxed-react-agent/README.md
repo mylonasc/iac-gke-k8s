@@ -308,12 +308,13 @@ Optional parameters:
 ## Teardown
 
 ```bash
-kubectl delete -f apps/sandboxed-react-agent/k8s/ingress.magarathea.yaml
-kubectl delete -f apps/sandboxed-react-agent/k8s/frontend-service.yaml
-kubectl delete -f apps/sandboxed-react-agent/k8s/frontend-deployment.yaml
-kubectl delete -f apps/sandboxed-react-agent/k8s/backend-service.yaml
-kubectl delete -f apps/sandboxed-react-agent/k8s/backend-deployment.yaml
-kubectl -n alt-default delete secret sandboxed-react-agent-secrets
+./apps/sandboxed-react-agent/teardown.sh
+```
+
+Optional cleanup of Docker pull secret too:
+
+```bash
+./apps/sandboxed-react-agent/teardown.sh --delete-pull-secret
 ```
 
 ## Notes and limitations
