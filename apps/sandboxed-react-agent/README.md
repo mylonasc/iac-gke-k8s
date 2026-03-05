@@ -21,6 +21,97 @@ It supports two execution targets:
 
 The backend currently uses an in-memory session store (single replica recommended).
 
+## Deployment diagram (Kubediagrams)
+
+```kubediagrams
+flowchart LR
+  User([User Browser]) --> IngressWeb[Ingress: sandboxed-react-agent-web]
+  IngressWeb --> FrontendSvc[Service: sandboxed-react-agent-frontend]
+  FrontendSvc --> FrontendPod[(Pod: sandboxed-react-agent-frontend)]
+
+  FrontendPod --> IngressApi[Ingress: sandboxed-react-agent-api]
+  IngressApi --> BackendSvc[Service: sandboxed-react-agent-backend]
+  BackendSvc --> BackendPod[(Pod: sandboxed-react-agent-backend)]
+
+  BackendPod --> OpenAI[(OpenAI API)]
+  BackendPod --> RouterSvc[Service: sandbox-router-svc]
+  RouterSvc --> RouterPod[(Pod: sandbox-router-deployment)]
+
+  RouterPod --> Claim[SandboxClaim]
+  Claim --> Sandbox[Sandbox]
+  Sandbox --> SandboxPod[(Pod: python-runtime-sandbox)]
+```
+
+### Component roles in the cluster
+
+- 🌐 **Ingress (`sandboxed-react-agent-web`, `sandboxed-react-agent-api`)**
+  - Terminates external HTTP(S) traffic for `magarathea.ddns.net`.
+  - Routes UI requests to frontend and `/api/*` requests to backend.
+- 🧩 **Frontend Deployment/Pod (`sandboxed-react-agent-frontend`)**
+  - Serves the React app through NGINX.
+  - Proxies `/api/*` to backend service (`BACKEND_UPSTREAM` in env).
+- ⚙️ **Backend Deployment/Pod (`sandboxed-react-agent-backend`)**
+  - Hosts FastAPI endpoints (`/api/chat`, `/api/health`, `/api/config`).
+  - Contains the agent logic (LLM call loop + tool orchestration).
+  - Uses `k8s-agent-sandbox` SDK in `cluster` mode.
+- 🔐 **Secret + ServiceAccount + RBAC**
+  - `sandboxed-react-agent-secrets` provides `OPENAI_API_KEY`.
+  - `default-ksa` (annotated for Workload Identity) is used by backend.
+  - Role/RoleBinding (`backend-sandbox-rbac.yaml`) allows creating `SandboxClaim` and reading related Agent Sandbox CRDs.
+- 🛣️ **Sandbox Router (`sandbox-router-svc`, `sandbox-router-deployment`)**
+  - Receives backend execution requests and forwards them to a concrete sandbox runtime.
+  - Handles routing against claim/sandbox lifecycle resources.
+- 🧱 **Agent Sandbox CRDs and runtime resources**
+  - `SandboxTemplate` defines sandbox pod spec (runtime image, probes, constraints).
+  - `SandboxWarmPool` optionally keeps pre-warmed sandboxes to reduce cold starts.
+  - `SandboxClaim` requests an isolated runtime for execution.
+  - `Sandbox` represents the bound runtime backing a claim.
+  - Runtime pod uses `RuntimeClass: gvisor` and schedules to the gVisor node pool.
+
+### Runtime interaction details
+
+1. User opens the app URL; ingress routes to frontend service/pod.
+2. Frontend sends chat input to backend `/api/chat` via ingress/API path.
+3. Backend agent sends conversation + tools to OpenAI.
+4. If model chooses a tool, backend requests execution through `sandbox-router-svc`.
+5. Router ensures a sandbox exists (create/use `SandboxClaim` -> `Sandbox` -> runtime pod).
+6. Tool command executes in sandbox runtime pod (`python-runtime-sandbox`).
+7. Router returns tool output to backend.
+8. Backend sends tool result back to OpenAI for final assistant response.
+9. Final answer is returned to frontend and rendered to user.
+
+## Interaction diagram
+
+```kubediagrams
+sequenceDiagram
+  autonumber
+  actor U as 👤 User
+  participant F as 🧩 Frontend Pod
+  participant B as ⚙️ Backend (Agent)
+  participant O as 🤖 OpenAI API
+  participant R as 🛣️ Sandbox Router
+  participant C as 📦 SandboxClaim CRD
+  participant S as 📦 Sandbox CRD
+  participant P as 🧱 gVisor Sandbox Pod
+
+  U->>F: Open app + send message
+  F->>B: POST /api/chat
+  B->>O: chat.completions (tools enabled)
+  O-->>B: tool_call(s)
+
+  B->>R: /execute request
+  R->>C: Create/resolve SandboxClaim
+  C->>S: Bind to Sandbox
+  S->>P: Schedule runtime pod (RuntimeClass=gvisor)
+  P-->>R: Tool execution output
+
+  R-->>B: tool result payload
+  B->>O: follow-up with tool result
+  O-->>B: final assistant content
+  B-->>F: chat response JSON
+  F-->>U: Render assistant answer
+```
+
 ## Folder structure
 
 - `backend/`: FastAPI service and Dockerfile.
@@ -226,6 +317,20 @@ The panel calls backend API endpoints:
 - `start.sh` can auto-scale the sandbox router deployment (if present).
   - Enabled by default with `SCALE_SANDBOX_ROUTER=1` and `SANDBOX_ROUTER_REPLICAS=1`.
   - Set `SCALE_SANDBOX_ROUTER=0` to skip this step.
+
+## Kubernetes diagnostics
+
+Run the built-in diagnostics script:
+
+```bash
+./apps/sandboxed-react-agent/diagnose_k8s_app.sh
+```
+
+Optional parameters:
+
+- `NAMESPACE=alt-default` (default)
+- `LOG_SINCE=20m` (window for backend timeout/error detection)
+- `TIMEOUT_CURL=60` and `TIMEOUT_WAIT_POD=90s`
 
 ## API endpoints
 
