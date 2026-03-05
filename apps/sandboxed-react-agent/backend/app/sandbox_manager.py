@@ -1,6 +1,8 @@
 import json
 import os
+import shlex
 import subprocess
+import textwrap
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -96,6 +98,32 @@ class SandboxManager:
             return value
         return value[: self.max_output_chars] + "\n...[truncated]"
 
+    def _build_python_script(self, code: str) -> str:
+        encoded = json.dumps(code)
+        return textwrap.dedent(
+            f"""
+            import ast
+
+            source = {encoded}
+            tree = ast.parse(source, mode="exec")
+            namespace = {{}}
+
+            if tree.body and isinstance(tree.body[-1], ast.Expr):
+                last_expr = tree.body.pop()
+                module_obj = ast.Module(body=tree.body, type_ignores=[])
+                exec(compile(module_obj, "<sandbox>", "exec"), namespace, namespace)
+                result = eval(
+                    compile(ast.Expression(last_expr.value), "<sandbox>", "eval"),
+                    namespace,
+                    namespace,
+                )
+                if result is not None:
+                    print(result)
+            else:
+                exec(compile(tree, "<sandbox>", "exec"), namespace, namespace)
+            """
+        ).strip()
+
     def _run_cluster(self, command: str, tool_name: str) -> SandboxExecutionResult:
         try:
             with SandboxClient(
@@ -173,15 +201,16 @@ class SandboxManager:
             )
 
     def exec_python(self, code: str) -> SandboxExecutionResult:
+        script = self._build_python_script(code)
         if self.mode == "local":
-            command = ["python", "-c", code]
+            command = ["python", "-c", script]
             return self._run_local(
                 command=command,
                 tool_name="sandbox_exec_python",
                 shell=False,
             )
 
-        command = "python - <<'PY'\n" + code + "\nPY\n"
+        command = f"python -c {shlex.quote(script)}"
         return self._run_cluster(command=command, tool_name="sandbox_exec_python")
 
     def exec_shell(self, shell_command: str) -> SandboxExecutionResult:

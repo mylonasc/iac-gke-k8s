@@ -215,6 +215,18 @@ The panel calls backend API endpoints:
 - `GET /api/config`
 - `POST /api/config`
 
+## Kubernetes notes
+
+- The frontend container expects `BACKEND_UPSTREAM` at runtime.
+  - In Kubernetes manifests it is set to `sandboxed-react-agent-backend:80`.
+  - In Docker Compose it is set to `backend:8000`.
+- `default-ksa` requires namespaced RBAC to create Agent Sandbox claims.
+  - This repo includes `apps/sandboxed-react-agent/k8s/backend-sandbox-rbac.yaml`.
+  - `start.sh` applies it automatically.
+- `start.sh` can auto-scale the sandbox router deployment (if present).
+  - Enabled by default with `SCALE_SANDBOX_ROUTER=1` and `SANDBOX_ROUTER_REPLICAS=1`.
+  - Set `SCALE_SANDBOX_ROUTER=0` to skip this step.
+
 ## API endpoints
 
 - `POST /api/chat`

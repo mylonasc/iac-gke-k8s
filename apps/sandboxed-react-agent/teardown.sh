@@ -15,6 +15,7 @@ echo "Tearing down sandboxed-react-agent from namespace: ${NAMESPACE}"
 kubectl delete -f "${K8S_DIR}/ingress.magarathea.yaml" --ignore-not-found
 kubectl delete -f "${K8S_DIR}/frontend-service.yaml" --ignore-not-found
 kubectl delete -f "${K8S_DIR}/frontend-deployment.yaml" --ignore-not-found
+kubectl delete -f "${K8S_DIR}/backend-sandbox-rbac.yaml" --ignore-not-found
 kubectl delete -f "${K8S_DIR}/backend-service.yaml" --ignore-not-found
 kubectl delete -f "${K8S_DIR}/backend-deployment.yaml" --ignore-not-found
 

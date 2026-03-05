@@ -30,6 +30,8 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+    environment:
+      BACKEND_UPSTREAM: backend:8000
     ports:
       - "8080:80"
     restart: unless-stopped
