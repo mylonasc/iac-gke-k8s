@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandboxed-react-agent-backend
+  namespace: alt-default
+  labels:
+    app: sandboxed-react-agent-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sandboxed-react-agent-backend
+  template:
+    metadata:
+      labels:
+        app: sandboxed-react-agent-backend
+    spec:
+      serviceAccountName: default-ksa
+      imagePullSecrets:
+        - name: dockerhub-regcred
+      containers:
+        - name: backend
+          image: docker.io/mylonasc/magarathea:sandboxed-react-agent-backend-0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sandboxed-react-agent-secrets
+                  key: openai-api-key
+            - name: OPENAI_MODEL
+              value: gpt-4o-mini
+            - name: SANDBOX_MODE
+              value: cluster
+            - name: SANDBOX_API_URL
+              value: http://sandbox-router-svc.alt-default.svc.cluster.local:8080
+            - name: SANDBOX_TEMPLATE_NAME
+              value: python-runtime-template
+            - name: SANDBOX_NAMESPACE
+              value: alt-default
+            - name: AGENT_MAX_TOOL_CALLS_PER_TURN
+              value: "4"
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi

@@ -1,0 +1,18 @@
+# Local env files (templates remain tracked)
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Frontend local artifacts
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/.vite/
+
+# Backend local artifacts
+backend/**/__pycache__/
+backend/**/*.py[cod]
+
+# Docker Compose local override
+docker-compose.override.yml

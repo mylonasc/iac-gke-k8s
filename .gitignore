@@ -1,9 +1,47 @@
 # Terraform working directories
 **/.terraform/
 
+# Terraform state and local plans
+**/*.tfstate
+**/*.tfstate.*
+**/planfile*
+
 # Local Python environments and notebook artifacts
 **/.venv/
 **/.ipynb_checkpoints/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.coverage
+**/.tox/
+**/htmlcov/
+
+# React/Node build artifacts
+**/node_modules/
+**/dist/
+**/build/
+**/.vite/
+**/npm-debug.log*
+**/yarn-debug.log*
+**/yarn-error.log*
+**/pnpm-debug.log*
+
+# Docker local artifacts
+**/.docker/
+**/docker-compose.override.yml
+
+# Kubernetes local files
+**/.kube/
+**/kubeconfig
+**/kubeconfig.*
+
+# Environment files (keep templates tracked)
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.*.example
 
 # Local diagnostics bundles
 gke-diagnostics-*.tgz
