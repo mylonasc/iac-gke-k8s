@@ -2,6 +2,7 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 import textwrap
 from dataclasses import dataclass
 from typing import Sequence
@@ -16,6 +17,7 @@ class SandboxExecutionResult:
     stdout: str
     stderr: str
     error: str | None = None
+    assets: list[dict[str, str]] | None = None
 
     def as_tool_payload(self) -> str:
         payload = {
@@ -24,6 +26,7 @@ class SandboxExecutionResult:
             "stdout": self.stdout,
             "stderr": self.stderr,
             "error": self.error,
+            "assets": self.assets or [],
         }
         return json.dumps(payload, ensure_ascii=True)
 
@@ -98,15 +101,77 @@ class SandboxManager:
             return value
         return value[: self.max_output_chars] + "\n...[truncated]"
 
+    def _extract_asset_markers(self, stdout: str) -> tuple[str, list[dict[str, str]]]:
+        assets: list[dict[str, str]] = []
+        cleaned_lines: list[str] = []
+        for line in stdout.splitlines():
+            if line.startswith(self.ASSET_MARKER):
+                raw = line[len(self.ASSET_MARKER) :].strip()
+                try:
+                    parsed = json.loads(raw)
+                    if (
+                        isinstance(parsed, dict)
+                        and isinstance(parsed.get("filename"), str)
+                        and isinstance(parsed.get("mime_type"), str)
+                        and isinstance(parsed.get("base64"), str)
+                    ):
+                        assets.append(
+                            {
+                                "filename": parsed["filename"],
+                                "mime_type": parsed["mime_type"],
+                                "base64": parsed["base64"],
+                            }
+                        )
+                        continue
+                except Exception:
+                    pass
+            cleaned_lines.append(line)
+        cleaned_stdout = "\n".join(cleaned_lines)
+        return cleaned_stdout, assets
+
     def _build_python_script(self, code: str) -> str:
         encoded = json.dumps(code)
         return textwrap.dedent(
             f"""
             import ast
+            import base64
+            import pathlib
+            import mimetypes
+            import os
+            import json
+            import re
+            from pathlib import Path
 
             source = {encoded}
             tree = ast.parse(source, mode="exec")
             namespace = {{}}
+            _asset_marker = {json.dumps(self.ASSET_MARKER)}
+            _exposed_assets = []
+            _candidate_paths = []
+
+            def expose_asset(path, filename=None, mime_type=None):
+                p = Path(path)
+                if not p.exists() or not p.is_file():
+                    raise FileNotFoundError(f"Asset path not found: {{p}}")
+                data = p.read_bytes()
+                if len(data) > 5 * 1024 * 1024:
+                    raise ValueError("Asset too large (max 5MB)")
+                guessed_mime = mime_type or mimetypes.guess_type(p.name)[0] or "application/octet-stream"
+                _exposed_assets.append({{
+                    "filename": filename or p.name,
+                    "mime_type": guessed_mime,
+                    "base64": base64.b64encode(data).decode("ascii"),
+                }})
+
+            namespace["expose_asset"] = expose_asset
+
+            # Try to infer likely output files from string literals in source.
+            _literal_paths = re.findall(r'[\"\\\']([^\"\\\']+\\.(?:png|jpg|jpeg|gif|webp|svg|pdf|csv|txt|json|zip))[\"\\\']', source, flags=re.IGNORECASE)
+            for _path in _literal_paths:
+                try:
+                    _candidate_paths.append(str(Path(_path)))
+                except Exception:
+                    pass
 
             if tree.body and isinstance(tree.body[-1], ast.Expr):
                 last_expr = tree.body.pop()
@@ -121,6 +186,18 @@ class SandboxManager:
                     print(result)
             else:
                 exec(compile(tree, "<sandbox>", "exec"), namespace, namespace)
+
+            # Guardrail: if no asset explicitly exposed, auto-expose any detected image/file paths.
+            if not _exposed_assets:
+                for _candidate in _candidate_paths:
+                    try:
+                        if Path(_candidate).exists() and Path(_candidate).is_file():
+                            expose_asset(_candidate)
+                    except Exception:
+                        pass
+
+            for _asset in _exposed_assets:
+                print(_asset_marker + json.dumps(_asset))
             """
         ).strip()
 
@@ -133,13 +210,16 @@ class SandboxManager:
                 server_port=self.server_port,
             ) as sandbox:
                 result = sandbox.run(command)
-                stdout = self._truncate(getattr(result, "stdout", ""))
+                full_stdout = getattr(result, "stdout", "")
+                clean_stdout, assets = self._extract_asset_markers(full_stdout)
+                stdout = self._truncate(clean_stdout)
                 stderr = self._truncate(getattr(result, "stderr", ""))
                 return SandboxExecutionResult(
                     tool_name=tool_name,
                     ok=True,
                     stdout=stdout,
                     stderr=stderr,
+                    assets=assets,
                 )
         except Exception as exc:
             return SandboxExecutionResult(
@@ -163,7 +243,8 @@ class SandboxManager:
                 timeout=self.local_timeout_seconds,
                 executable="/bin/sh" if shell else None,
             )
-            stdout = self._truncate(completed.stdout)
+            clean_stdout, assets = self._extract_asset_markers(completed.stdout)
+            stdout = self._truncate(clean_stdout)
             stderr = self._truncate(completed.stderr)
             if completed.returncode != 0:
                 stderr = self._truncate(
@@ -174,6 +255,7 @@ class SandboxManager:
                 ok=completed.returncode == 0,
                 stdout=stdout,
                 stderr=stderr,
+                assets=assets,
             )
         except subprocess.TimeoutExpired as exc:
             stdout_value = exc.stdout or ""
@@ -203,7 +285,7 @@ class SandboxManager:
     def exec_python(self, code: str) -> SandboxExecutionResult:
         script = self._build_python_script(code)
         if self.mode == "local":
-            command = ["python", "-c", script]
+            command = [sys.executable, "-c", script]
             return self._run_local(
                 command=command,
                 tool_name="sandbox_exec_python",
@@ -222,3 +304,5 @@ class SandboxManager:
             )
 
         return self._run_cluster(command=shell_command, tool_name="sandbox_exec_shell")
+
+    ASSET_MARKER = "__ASSET__"

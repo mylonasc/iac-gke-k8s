@@ -16,6 +16,8 @@ services:
       SANDBOX_LOCAL_TIMEOUT_SECONDS: ${SANDBOX_LOCAL_TIMEOUT_SECONDS:-20}
     expose:
       - "8000"
+    volumes:
+      - backend_data:/app/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"]
       interval: 10s
@@ -35,3 +37,6 @@ services:
     ports:
       - "8080:80"
     restart: unless-stopped
+
+volumes:
+  backend_data:
