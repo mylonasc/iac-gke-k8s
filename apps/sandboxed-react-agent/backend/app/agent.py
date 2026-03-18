@@ -5,10 +5,11 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, TypedDict
 
 from assistant_stream import RunController
-from openai import OpenAI
+from langgraph.graph import END, StateGraph
+from openai import AsyncOpenAI
 
 from .asset_manager import AssetManager
 from .sandbox_manager import SandboxManager
@@ -88,17 +89,30 @@ def _token_chunks(text: str) -> list[str]:
     return chunks or [text]
 
 
+class AgentGraphState(TypedDict):
+    session_id: str
+    messages: list[dict[str, Any]]
+    pending_tool_calls: list[dict[str, Any]]
+    turn_tool_calls: list[dict[str, Any]]
+    tool_events: list[dict[str, Any]]
+    tool_call_count: int
+    final_reply: str
+    error: str
+    limit_reached: bool
+
+
 class SandboxedReactAgent:
     def __init__(self) -> None:
         self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
         self.max_tool_calls_per_turn = int(
             os.getenv("AGENT_MAX_TOOL_CALLS_PER_TURN", "4")
         )
-        self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        self.async_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         self.sandbox_manager = SandboxManager()
         self.session_store = SessionStore()
         self.asset_manager = AssetManager(self.session_store)
         self.sessions: dict[str, SessionState] = {}
+        self._agent_graph = self._build_agent_graph()
         self._load_sessions_from_store()
 
     def _session_to_dict(self, session: SessionState) -> dict[str, Any]:
@@ -402,6 +416,197 @@ class SandboxedReactAgent:
         }
         return json.dumps(payload, ensure_ascii=True), stored_assets
 
+    async def _run_tool_async(
+        self,
+        *,
+        session_id: str,
+        tool_call_id: str | None,
+        name: str,
+        arguments_json: str,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        return await asyncio.to_thread(
+            self._run_tool,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            name=name,
+            arguments_json=arguments_json,
+        )
+
+    async def _persist_session_async(self, session: SessionState) -> None:
+        await asyncio.to_thread(self._persist_session, session)
+
+    async def _create_completion_async(self, messages: list[dict[str, Any]]) -> Any:
+        return await self.async_client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            tools=TOOLS,
+            tool_choice="auto",
+            temperature=0.2,
+        )
+
+    async def _graph_model_node(self, state: AgentGraphState) -> AgentGraphState:
+        completion = await self._create_completion_async(state["messages"])
+        assistant_message = completion.choices[0].message
+        tool_calls = assistant_message.tool_calls or []
+
+        if not tool_calls:
+            final_text = assistant_message.content or ""
+            return {
+                **state,
+                "messages": state["messages"]
+                + [{"role": "assistant", "content": final_text}],
+                "pending_tool_calls": [],
+                "final_reply": final_text,
+            }
+
+        assistant_payload = {
+            "role": "assistant",
+            "content": assistant_message.content or "",
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in tool_calls
+            ],
+        }
+        return {
+            **state,
+            "messages": state["messages"] + [assistant_payload],
+            "pending_tool_calls": assistant_payload["tool_calls"],
+        }
+
+    async def _graph_tools_node(self, state: AgentGraphState) -> AgentGraphState:
+        messages = list(state["messages"])
+        turn_tool_calls = list(state["turn_tool_calls"])
+        tool_events = list(state["tool_events"])
+        tool_call_count = int(state["tool_call_count"])
+        pending_tool_calls = list(state.get("pending_tool_calls", []))
+        limit_reached = False
+        error_text = state.get("error", "")
+        final_reply = state.get("final_reply", "")
+
+        for tc in pending_tool_calls:
+            tool_name = tc.get("function", {}).get("name", "")
+            args_text = tc.get("function", {}).get("arguments", "{}")
+            tool_call_id = tc.get("id") or f"tool_{uuid.uuid4().hex}"
+
+            if tool_call_count >= self.max_tool_calls_per_turn:
+                limit_reached = True
+                error_text = "Tool-calling loop exhausted max tool calls"
+                final_reply = "I hit the tool-calling safety limit for this turn."
+                break
+
+            output, stored_assets = await self._run_tool_async(
+                session_id=state["session_id"],
+                tool_call_id=tool_call_id,
+                name=tool_name,
+                arguments_json=args_text,
+            )
+            tool_call_count += 1
+
+            turn_tool_calls.append(
+                {
+                    "tool": tool_name,
+                    "arguments": args_text,
+                    "result": output,
+                }
+            )
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": output,
+                }
+            )
+
+            try:
+                parsed_args = json.loads(args_text)
+            except json.JSONDecodeError:
+                parsed_args = {}
+
+            parsed_result: Any = output
+            try:
+                parsed_result = json.loads(output)
+            except json.JSONDecodeError:
+                parsed_result = output
+
+            is_error = isinstance(parsed_result, dict) and not parsed_result.get(
+                "ok", True
+            )
+            tool_events.append(
+                {
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_name,
+                    "args_text": args_text,
+                    "args": parsed_args,
+                    "result": parsed_result,
+                    "is_error": is_error,
+                    "stored_assets": stored_assets,
+                }
+            )
+
+        if limit_reached:
+            messages.append({"role": "assistant", "content": final_reply})
+
+        return {
+            **state,
+            "messages": messages,
+            "pending_tool_calls": [],
+            "turn_tool_calls": turn_tool_calls,
+            "tool_events": tool_events,
+            "tool_call_count": tool_call_count,
+            "limit_reached": limit_reached,
+            "error": error_text,
+            "final_reply": final_reply,
+        }
+
+    def _route_after_model(self, state: AgentGraphState) -> str:
+        if state.get("pending_tool_calls"):
+            return "tools"
+        return END
+
+    def _route_after_tools(self, state: AgentGraphState) -> str:
+        if state.get("limit_reached"):
+            return END
+        return "model"
+
+    def _build_agent_graph(self):
+        graph = StateGraph(AgentGraphState)
+        graph.add_node("model", self._graph_model_node)
+        graph.add_node("tools", self._graph_tools_node)
+        graph.set_entry_point("model")
+        graph.add_conditional_edges("model", self._route_after_model)
+        graph.add_conditional_edges("tools", self._route_after_tools)
+        return graph.compile()
+
+    async def _run_agent_graph_async(
+        self, messages: list[dict[str, Any]], session_id: str
+    ) -> AgentGraphState:
+        initial_state: AgentGraphState = {
+            "session_id": session_id,
+            "messages": list(messages),
+            "pending_tool_calls": [],
+            "turn_tool_calls": [],
+            "tool_events": [],
+            "tool_call_count": 0,
+            "final_reply": "",
+            "error": "",
+            "limit_reached": False,
+        }
+        result = await self._agent_graph.ainvoke(
+            initial_state,
+            config={
+                "recursion_limit": max(20, self.max_tool_calls_per_turn * 4 + 8),
+                "configurable": {"session_id": session_id},
+            },
+        )
+        return result
+
     def chat(self, user_message: str, session_id: str | None = None) -> dict[str, Any]:
         state = self.get_or_create_session(session_id)
         state.messages = self._sanitize_messages(state.messages)
@@ -409,107 +614,34 @@ class SandboxedReactAgent:
         state.messages.append({"role": "user", "content": user_message})
         if state.title == "New chat":
             state.title = self._title_from_text(user_message)
-
-        turn_tool_calls: list[dict[str, Any]] = []
-
         try:
-            for _ in range(self.max_tool_calls_per_turn + 1):
-                completion = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=state.messages,
-                    tools=TOOLS,
-                    tool_choice="auto",
-                    temperature=0.2,
+            result = asyncio.run(
+                self._run_agent_graph_async(state.messages, state.session_id)
+            )
+            state.messages = result["messages"]
+            state.tool_calls += len(result.get("tool_events", []))
+            state.updated_at = _now_iso()
+
+            if result.get("limit_reached"):
+                state.last_error = result.get("error") or (
+                    "Tool-calling loop exhausted max tool calls"
                 )
+            else:
+                state.last_error = result.get("error") or None
 
-                assistant_message = completion.choices[0].message
-                tool_calls = assistant_message.tool_calls or []
-
-                if not tool_calls:
-                    final_text = assistant_message.content or ""
-                    state.messages.append({"role": "assistant", "content": final_text})
-                    state.updated_at = _now_iso()
-                    self._persist_session(state)
-                    return {
-                        "session_id": state.session_id,
-                        "reply": final_text,
-                        "tool_calls": turn_tool_calls,
-                    }
-
-                assistant_payload = {
-                    "role": "assistant",
-                    "content": assistant_message.content or "",
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
-                            },
-                        }
-                        for tc in tool_calls
-                    ],
-                }
-                state.messages.append(assistant_payload)
-
-                limit_reached = False
-                for tc in tool_calls:
-                    if len(turn_tool_calls) >= self.max_tool_calls_per_turn:
-                        limit_reached = True
-                        output = json.dumps(
-                            {
-                                "tool": tc.function.name,
-                                "ok": False,
-                                "stdout": "",
-                                "stderr": "",
-                                "error": "Skipped due to max tool calls per turn safety limit",
-                            },
-                            ensure_ascii=True,
-                        )
-                    else:
-                        output, _ = self._run_tool(
-                            session_id=state.session_id,
-                            tool_call_id=tc.id,
-                            name=tc.function.name,
-                            arguments_json=tc.function.arguments,
-                        )
-                        state.tool_calls += 1
-
-                    turn_tool_calls.append(
-                        {
-                            "tool": tc.function.name,
-                            "arguments": tc.function.arguments,
-                            "result": output,
-                        }
-                    )
-                    state.messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": output,
-                        }
-                    )
-
-                if limit_reached:
-                    state.last_error = "Tool-calling loop exhausted max tool calls"
-                    state.updated_at = _now_iso()
-                    self._persist_session(state)
-                    return {
-                        "session_id": state.session_id,
-                        "reply": "I hit the tool-calling safety limit for this turn.",
-                        "tool_calls": turn_tool_calls,
-                        "error": state.last_error,
-                    }
-
-            state.last_error = "Tool-calling loop exhausted max iterations"
             self._persist_session(state)
-            return {
+            reply = result.get("final_reply") or ""
+            if not reply and result.get("limit_reached"):
+                reply = "I hit the tool-calling safety limit for this turn."
+
+            response: dict[str, Any] = {
                 "session_id": state.session_id,
-                "reply": "I hit the tool-calling safety limit for this turn.",
-                "tool_calls": turn_tool_calls,
-                "error": state.last_error,
+                "reply": reply,
+                "tool_calls": result.get("turn_tool_calls", []),
             }
+            if state.last_error:
+                response["error"] = state.last_error
+            return response
         except Exception as exc:
             state.last_error = str(exc)
             if (
@@ -521,7 +653,7 @@ class SandboxedReactAgent:
             return {
                 "session_id": state.session_id,
                 "reply": "The agent failed while processing your request.",
-                "tool_calls": turn_tool_calls,
+                "tool_calls": [],
                 "error": state.last_error,
             }
 
@@ -613,86 +745,33 @@ class SandboxedReactAgent:
                     )
                 session.updated_at = _now_iso()
 
-                turn_tool_calls = 0
-                while True:
-                    assistant_ui_message = self._new_assistant_ui_message()
-                    assistant_index = len(session.ui_messages)
-                    controller.state["messages"].append(assistant_ui_message)
-                    session.ui_messages.append(assistant_ui_message)
+                assistant_ui_message = self._new_assistant_ui_message()
+                assistant_index = len(session.ui_messages)
+                controller.state["messages"].append(assistant_ui_message)
+                session.ui_messages.append(assistant_ui_message)
 
-                    self._append_tool_update(
-                        controller,
-                        stage="model",
-                        status="running",
-                        detail="Planning response...",
-                    )
-                    await self._stream_text_to_ui(
-                        controller,
-                        assistant_index=assistant_index,
-                        part_index=0,
-                        text="Planning response...\n",
-                        delay_seconds=0.01,
-                    )
+                self._append_tool_update(
+                    controller,
+                    stage="model",
+                    status="running",
+                    detail="Planning response...",
+                )
+                await self._stream_text_to_ui(
+                    controller,
+                    assistant_index=assistant_index,
+                    part_index=0,
+                    text="Planning response...\n",
+                    delay_seconds=0.01,
+                )
 
-                    completion = self.client.chat.completions.create(
-                        model=self.model,
-                        messages=session.messages,
-                        tools=TOOLS,
-                        tool_choice="auto",
-                        temperature=0.2,
-                    )
-                    assistant_message = completion.choices[0].message
-                    tool_calls = assistant_message.tool_calls or []
+                graph_result = await self._run_agent_graph_async(
+                    session.messages, session.session_id
+                )
+                session.messages = graph_result["messages"]
+                tool_events = graph_result.get("tool_events", [])
+                session.tool_calls += len(tool_events)
 
-                    if not tool_calls:
-                        final_text = assistant_message.content or ""
-                        session.messages.append(
-                            {"role": "assistant", "content": final_text}
-                        )
-
-                        await self._stream_text_to_ui(
-                            controller,
-                            assistant_index=assistant_index,
-                            part_index=0,
-                            text="Generating final response...\n",
-                            delay_seconds=0.01,
-                        )
-                        await self._stream_text_to_ui(
-                            controller,
-                            assistant_index=assistant_index,
-                            part_index=1,
-                            text=final_text,
-                            delay_seconds=0.008,
-                        )
-
-                        controller.state["messages"][assistant_index]["status"] = {
-                            "type": "complete"
-                        }
-                        self._append_tool_update(
-                            controller,
-                            stage="model",
-                            status="completed",
-                            detail="Completed response",
-                        )
-                        break
-
-                    assistant_payload = {
-                        "role": "assistant",
-                        "content": assistant_message.content or "",
-                        "tool_calls": [
-                            {
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.function.name,
-                                    "arguments": tc.function.arguments,
-                                },
-                            }
-                            for tc in tool_calls
-                        ],
-                    }
-                    session.messages.append(assistant_payload)
-
+                if tool_events:
                     await self._stream_text_to_ui(
                         controller,
                         assistant_index=assistant_index,
@@ -701,131 +780,94 @@ class SandboxedReactAgent:
                         delay_seconds=0.01,
                     )
 
-                    for tc in tool_calls:
-                        if turn_tool_calls >= self.max_tool_calls_per_turn:
-                            self._finalize_assistant_message_status(
-                                controller, assistant_index
-                            )
-                            await self._stream_text_to_ui(
-                                controller,
-                                assistant_index=assistant_index,
-                                part_index=1,
-                                text="I hit the tool-calling safety limit for this turn.",
-                                delay_seconds=0.008,
-                            )
-                            session.last_error = (
-                                "Tool-calling loop exhausted max tool calls"
-                            )
-                            self._sync_session_ui_from_controller(session, controller)
-                            self._persist_session(session)
-                            return
+                for event in tool_events:
+                    tool_name = str(event.get("tool_name") or "tool")
+                    tool_call_id = str(
+                        event.get("tool_call_id") or f"tool_{uuid.uuid4().hex}"
+                    )
+                    args_text = str(event.get("args_text") or "{}")
+                    parsed_args = (
+                        event.get("args") if isinstance(event.get("args"), dict) else {}
+                    )
+                    parsed_result = event.get("result")
+                    is_error = bool(event.get("is_error"))
 
-                        turn_tool_calls += 1
-                        tool_name = tc.function.name
-                        args_text = tc.function.arguments or "{}"
-                        tool_call_id = tc.id or f"tool_{uuid.uuid4().hex}"
+                    tool_part_index = len(
+                        controller.state["messages"][assistant_index]["content"]
+                    )
+                    controller.state["messages"][assistant_index]["content"].append(
+                        {
+                            "type": "tool-call",
+                            "toolCallId": tool_call_id,
+                            "toolName": tool_name,
+                            "argsText": args_text,
+                            "args": parsed_args,
+                            "result": parsed_result,
+                            **({"isError": True} if is_error else {}),
+                        }
+                    )
 
-                        try:
-                            parsed_args = json.loads(args_text)
-                        except json.JSONDecodeError:
-                            parsed_args = {}
+                    for asset in event.get("stored_assets", []) or []:
+                        if str(asset.get("mime_type", "")).startswith("image/"):
+                            controller.state["messages"][assistant_index][
+                                "content"
+                            ].append({"type": "image", "image": asset["view_url"]})
 
-                        tool_part_index = len(
-                            controller.state["messages"][assistant_index]["content"]
-                        )
-                        controller.state["messages"][assistant_index]["content"].append(
-                            {
-                                "type": "tool-call",
-                                "toolCallId": tool_call_id,
-                                "toolName": tool_name,
-                                "argsText": args_text,
-                                "args": parsed_args,
-                            }
-                        )
+                    self._append_tool_update(
+                        controller,
+                        stage="tool",
+                        status="completed" if not is_error else "error",
+                        detail=f"Finished {tool_name}",
+                        tool=tool_name,
+                    )
+                    await self._stream_text_to_ui(
+                        controller,
+                        assistant_index=assistant_index,
+                        part_index=0,
+                        text=f"Finished tool: {tool_name}\n",
+                        delay_seconds=0.01,
+                    )
 
-                        self._append_tool_update(
-                            controller,
-                            stage="tool",
-                            status="running",
-                            detail=f"Running {tool_name}",
-                            tool=tool_name,
-                        )
-                        await self._stream_text_to_ui(
-                            controller,
-                            assistant_index=assistant_index,
-                            part_index=0,
-                            text=f"Running tool: {tool_name}\n",
-                            delay_seconds=0.01,
-                        )
+                final_text = graph_result.get("final_reply") or ""
+                if graph_result.get("limit_reached") and not final_text:
+                    final_text = "I hit the tool-calling safety limit for this turn."
 
-                        output, stored_assets = self._run_tool(
-                            session_id=session.session_id,
-                            tool_call_id=tool_call_id,
-                            name=tool_name,
-                            arguments_json=args_text,
-                        )
-                        session.tool_calls += 1
+                await self._stream_text_to_ui(
+                    controller,
+                    assistant_index=assistant_index,
+                    part_index=0,
+                    text="Generating final response...\n",
+                    delay_seconds=0.01,
+                )
+                await self._stream_text_to_ui(
+                    controller,
+                    assistant_index=assistant_index,
+                    part_index=1,
+                    text=final_text,
+                    delay_seconds=0.008,
+                )
 
-                        parsed_result: Any = output
-                        try:
-                            parsed_result = json.loads(output)
-                        except json.JSONDecodeError:
-                            parsed_result = output
+                controller.state["messages"][assistant_index]["status"] = {
+                    "type": "complete"
+                }
+                self._append_tool_update(
+                    controller,
+                    stage="model",
+                    status="completed",
+                    detail="Completed response",
+                )
 
-                        is_error = isinstance(
-                            parsed_result, dict
-                        ) and not parsed_result.get("ok", True)
-
-                        controller.state["messages"][assistant_index]["content"][
-                            tool_part_index
-                        ]["result"] = parsed_result
-                        if is_error:
-                            controller.state["messages"][assistant_index]["content"][
-                                tool_part_index
-                            ]["isError"] = True
-
-                        for asset in stored_assets:
-                            if str(asset.get("mime_type", "")).startswith("image/"):
-                                controller.state["messages"][assistant_index][
-                                    "content"
-                                ].append(
-                                    {
-                                        "type": "image",
-                                        "image": asset["view_url"],
-                                    }
-                                )
-
-                        session.messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call_id,
-                                "content": output,
-                            }
-                        )
-
-                        self._append_tool_update(
-                            controller,
-                            stage="tool",
-                            status="completed" if not is_error else "error",
-                            detail=f"Finished {tool_name}",
-                            tool=tool_name,
-                        )
-                        await self._stream_text_to_ui(
-                            controller,
-                            assistant_index=assistant_index,
-                            part_index=0,
-                            text=f"Finished tool: {tool_name}\n",
-                            delay_seconds=0.01,
-                        )
-
-                    controller.state["messages"][assistant_index]["status"] = {
-                        "type": "complete"
-                    }
+                if graph_result.get("limit_reached"):
+                    session.last_error = graph_result.get("error") or (
+                        "Tool-calling loop exhausted max tool calls"
+                    )
+                else:
+                    session.last_error = graph_result.get("error") or None
 
                 session.updated_at = _now_iso()
                 self._sync_session_ui_from_controller(session, controller)
                 self._normalize_session_ui_messages(session)
-                self._persist_session(session)
+                await self._persist_session_async(session)
             except Exception as exc:
                 error_text = str(exc)
                 session.last_error = error_text
@@ -853,7 +895,7 @@ class SandboxedReactAgent:
                 }
                 self._sync_session_ui_from_controller(session, controller)
                 self._normalize_session_ui_messages(session)
-                self._persist_session(session)
+                await self._persist_session_async(session)
 
     def get_state_summary(self) -> dict[str, Any]:
         return {

@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: alt-default-ops-console
+  namespace: alt-default
+  labels:
+    app: alt-default-ops-console
+spec:
+  type: ClusterIP
+  selector:
+    app: alt-default-ops-console
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000

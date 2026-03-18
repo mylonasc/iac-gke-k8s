@@ -1,0 +1,23 @@
+services:
+  ops-console:
+    build:
+      context: ./backend
+    container_name: alt-default-ops-console-local
+    env_file:
+      - .env.local
+    environment:
+      MOCK_CLUSTER: "1"
+      TARGET_NAMESPACE: alt-default
+      APP_BASE_PATH: ""
+      MANAGED_DEPLOYMENTS: sandboxed-react-agent-backend,sandboxed-react-agent-frontend,sandbox-router-deployment
+      JWT_JWKS_URL: https://www.googleapis.com/oauth2/v3/certs
+      JWT_ISSUERS: https://accounts.google.com,accounts.google.com
+      JWT_AUDIENCE: 730057796039-nbdsmpa646o31veefn9vok7kvl4trddg.apps.googleusercontent.com
+      JWT_EMAIL_ALLOWLIST: mylonas.charilaos@gmail.com
+      JWT_REQUIRED_GROUP: ""
+      OAUTH_REDIRECT_URI: http://localhost/auth2/callback
+      OAUTH_SCOPES: openid email profile
+      COOKIE_SECURE: "0"
+    ports:
+      - "80:8000"
+      - "8080:8000"

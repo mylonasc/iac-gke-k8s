@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>alt-default ops admin</title>
+  <style>
+    :root { --ink: #182025; --muted: #5b6872; --line: #d9e1e5; --ok: #0f8b4c; --err: #b52020; --card: #ffffff; }
+    body { margin: 0; font-family: ui-sans-serif, -apple-system, Segoe UI, Arial, sans-serif; color: var(--ink); background: linear-gradient(135deg, #edf5f7, #f6f2ed); }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 20px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin-bottom: 14px; }
+    .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .btn { border: 1px solid #98a9b5; background: #fff; color: var(--ink); border-radius: 8px; padding: 6px 10px; cursor: pointer; text-decoration: none; }
+    .muted { color: var(--muted); }
+    .ok { color: var(--ok); }
+    .err { color: var(--err); }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); font-size: 0.92rem; }
+    input { padding: 6px 8px; border: 1px solid #b9c7d0; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>alt-default ops console</h1>
+      <div class="row" style="margin-bottom: 8px;">
+        <button class="btn" onclick="logoutGoogle()">Logout</button>
+      </div>
+      <div class="muted">signed in as {{ email }} via {{ issuer }}</div>
+      <div id="meta" class="muted"></div>
+      <div id="action" class="muted"></div>
+    </div>
+
+    <div class="card">
+      <h2>Managed Deployments</h2>
+      <table>
+        <thead><tr><th>Name</th><th>Ready</th><th>Desired</th><th>Actions</th></tr></thead>
+        <tbody id="deployments"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>Sandbox Claims</h2>
+      <div class="row" style="margin-bottom: 10px;">
+        <input id="template" value="python-runtime-template" placeholder="template" />
+        <input id="claim" placeholder="optional claim name" />
+        <button class="btn" onclick="createClaim()">Create claim</button>
+      </div>
+      <table>
+        <thead><tr><th>Claim</th><th>Action</th></tr></thead>
+        <tbody id="claims"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>Pods</h2>
+      <table>
+        <thead><tr><th>Name</th><th>Phase</th><th>Node</th><th>Ready</th></tr></thead>
+        <tbody id="pods"></tbody>
+      </table>
+    </div>
+  </div>
+
+<script>
+const BASE = "{{ base_path }}";
+
+function withBase(path) {
+  return `${BASE}${path}`;
+}
+
+async function api(path, opts) {
+  const r = await fetch(withBase(path), { ...opts, headers: { 'Content-Type': 'application/json', ...(opts?.headers || {}) } });
+  const text = await r.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+  if (!r.ok) throw new Error(data.detail || data.raw || ('HTTP ' + r.status));
+  return data;
+}
+
+function setMsg(id, msg, cls) {
+  const el = document.getElementById(id);
+  el.textContent = msg;
+  el.className = cls || '';
+}
+
+async function refresh() {
+  try {
+    const ov = await api('/api/overview');
+    const now = new Date().toLocaleTimeString();
+    setMsg('meta', 'mode: ' + (ov.cluster_mode || 'unknown') + ' | namespace: ' + (ov.namespace || '{{ namespace }}') + ' | last refresh: ' + now, 'muted');
+    renderDeployments(ov.deployments || []);
+    renderClaims(ov.sandboxclaims || []);
+    renderPods(ov.pods || []);
+  } catch (e) {
+    setMsg('action', 'refresh failed: ' + e.message, 'err');
+  }
+}
+
+async function logoutGoogle() {
+  await fetch(withBase('/auth2/logout'), { method: 'POST' });
+  window.location.href = withBase('/');
+}
+
+function renderDeployments(items) {
+  const tbody = document.getElementById('deployments');
+  tbody.innerHTML = '';
+  items.filter(d => d.manageable).forEach(d => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${d.name}</td><td>${d.ready}</td><td>${d.desired}</td><td><button class="btn" onclick="scale('${d.name}',0)">Scale 0</button> <button class="btn" onclick="scale('${d.name}',1)">Scale 1</button></td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+function renderClaims(items) {
+  const tbody = document.getElementById('claims');
+  tbody.innerHTML = '';
+  items.forEach(name => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${name}</td><td><button class="btn" onclick="deleteClaim('${name}')">Delete</button></td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+function renderPods(items) {
+  const tbody = document.getElementById('pods');
+  tbody.innerHTML = '';
+  items.forEach(p => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${p.name}</td><td>${p.phase}</td><td>${p.node || ''}</td><td>${p.ready ? 'yes' : 'no'}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+async function scale(name, replicas) {
+  try {
+    await api(`/api/deployments/${name}/scale`, { method: 'POST', body: JSON.stringify({ replicas }) });
+    setMsg('action', `scaled ${name} to ${replicas}`, 'ok');
+    await refresh();
+  } catch (e) {
+    setMsg('action', 'scale failed: ' + e.message, 'err');
+  }
+}
+
+async function createClaim() {
+  const template = document.getElementById('template').value.trim();
+  const claim = document.getElementById('claim').value.trim();
+  try {
+    await api('/api/sandboxclaims', { method: 'POST', body: JSON.stringify({ template_name: template, claim_name: claim || null }) });
+    document.getElementById('claim').value = '';
+    setMsg('action', 'created sandbox claim', 'ok');
+    await refresh();
+  } catch (e) {
+    setMsg('action', 'create claim failed: ' + e.message, 'err');
+  }
+}
+
+async function deleteClaim(name) {
+  if (!confirm('Delete ' + name + '?')) return;
+  try {
+    await api(`/api/sandboxclaims/${name}`, { method: 'DELETE' });
+    setMsg('action', `deleted sandbox claim ${name}`, 'ok');
+    await refresh();
+  } catch (e) {
+    setMsg('action', 'delete claim failed: ' + e.message, 'err');
+  }
+}
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>

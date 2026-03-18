@@ -9,7 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOCKER_REGISTRY="${DOCKER_REGISTRY:-docker.io}"
 DOCKERHUB_NAMESPACE="${DOCKERHUB_NAMESPACE:-mylonasc}"
 IMAGE_REPO="${IMAGE_REPO:-magarathea}"
-TAG="${TAG:-0.1.0}"
+TAG="${TAG:-0.3.0}"
 
 BACKEND_IMAGE="${DOCKER_REGISTRY}/${DOCKERHUB_NAMESPACE}/${IMAGE_REPO}:sandboxed-react-agent-backend-${TAG}"
 FRONTEND_IMAGE="${DOCKER_REGISTRY}/${DOCKERHUB_NAMESPACE}/${IMAGE_REPO}:sandboxed-react-agent-frontend-${TAG}"

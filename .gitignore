@@ -6,6 +6,8 @@
 **/*.tfstate.*
 **/planfile*
 
+**/secrets**
+
 # Local Python environments and notebook artifacts
 **/.venv/
 **/.venv-*/

@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any
 
 from assistant_stream import create_run
@@ -77,8 +78,10 @@ def health() -> dict[str, str]:
 
 
 @app.post("/api/chat")
-def chat(payload: ChatRequest) -> dict:
-    return agent.chat(user_message=payload.message, session_id=payload.session_id)
+async def chat(payload: ChatRequest) -> dict:
+    return await asyncio.to_thread(
+        agent.chat, user_message=payload.message, session_id=payload.session_id
+    )
 
 
 @app.post("/api/assistant")

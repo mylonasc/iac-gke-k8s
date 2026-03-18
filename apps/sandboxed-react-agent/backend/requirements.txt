@@ -3,3 +3,4 @@ uvicorn[standard]==0.32.1
 openai==1.57.4
 assistant-stream==0.0.31
 k8s-agent-sandbox
+langgraph>=1.0.0,<2

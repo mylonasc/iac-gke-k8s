@@ -46,6 +46,12 @@ class SandboxManager:
         )
         self.namespace = os.getenv("SANDBOX_NAMESPACE", "alt-default")
         self.server_port = int(os.getenv("SANDBOX_SERVER_PORT", "8888"))
+        self.sandbox_ready_timeout = int(
+            os.getenv("SANDBOX_READY_TIMEOUT_SECONDS", "420")
+        )
+        self.gateway_ready_timeout = int(
+            os.getenv("SANDBOX_GATEWAY_READY_TIMEOUT_SECONDS", "180")
+        )
         self.max_output_chars = int(os.getenv("SANDBOX_MAX_OUTPUT_CHARS", "6000"))
         self.local_timeout_seconds = int(
             os.getenv("SANDBOX_LOCAL_TIMEOUT_SECONDS", "20")
@@ -58,6 +64,8 @@ class SandboxManager:
             "template_name": self.template_name,
             "namespace": self.namespace,
             "server_port": self.server_port,
+            "sandbox_ready_timeout": self.sandbox_ready_timeout,
+            "gateway_ready_timeout": self.gateway_ready_timeout,
             "max_output_chars": self.max_output_chars,
             "local_timeout_seconds": self.local_timeout_seconds,
         }
@@ -69,6 +77,8 @@ class SandboxManager:
         template_name: str | None = None,
         namespace: str | None = None,
         server_port: int | None = None,
+        sandbox_ready_timeout: int | None = None,
+        gateway_ready_timeout: int | None = None,
         max_output_chars: int | None = None,
         local_timeout_seconds: int | None = None,
     ) -> None:
@@ -87,6 +97,14 @@ class SandboxManager:
             if server_port <= 0:
                 raise ValueError("server_port must be > 0")
             self.server_port = server_port
+        if sandbox_ready_timeout is not None:
+            if sandbox_ready_timeout <= 0:
+                raise ValueError("sandbox_ready_timeout must be > 0")
+            self.sandbox_ready_timeout = sandbox_ready_timeout
+        if gateway_ready_timeout is not None:
+            if gateway_ready_timeout <= 0:
+                raise ValueError("gateway_ready_timeout must be > 0")
+            self.gateway_ready_timeout = gateway_ready_timeout
         if max_output_chars is not None:
             if max_output_chars < 100:
                 raise ValueError("max_output_chars must be >= 100")
@@ -208,6 +226,8 @@ class SandboxManager:
                 api_url=self.api_url,
                 namespace=self.namespace,
                 server_port=self.server_port,
+                sandbox_ready_timeout=self.sandbox_ready_timeout,
+                gateway_ready_timeout=self.gateway_ready_timeout,
             ) as sandbox:
                 result = sandbox.run(command)
                 full_stdout = getattr(result, "stdout", "")

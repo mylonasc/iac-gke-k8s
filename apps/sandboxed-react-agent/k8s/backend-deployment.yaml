@@ -7,6 +7,11 @@ metadata:
     app: sandboxed-react-agent-backend
 spec:
   replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       app: sandboxed-react-agent-backend
@@ -20,7 +25,7 @@ spec:
         - name: dockerhub-regcred
       containers:
         - name: backend
-          image: docker.io/mylonasc/magarathea:sandboxed-react-agent-backend-0.1.6
+          image: docker.io/mylonasc/magarathea:sandboxed-react-agent-backend-0.3.0
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
@@ -48,12 +53,14 @@ spec:
               port: 8000
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 10
           livenessProbe:
             httpGet:
               path: /api/health
               port: 8000
             initialDelaySeconds: 15
             periodSeconds: 20
+            timeoutSeconds: 10
           resources:
             requests:
               cpu: 250m

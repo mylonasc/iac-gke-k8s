@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>alt-default ops login</title>
+  <style>
+    :root { --ink: #182025; --muted: #5b6872; --line: #d9e1e5; --card: #ffffff; }
+    body { margin: 0; font-family: ui-sans-serif, -apple-system, Segoe UI, Arial, sans-serif; color: var(--ink); background: linear-gradient(135deg, #edf5f7, #f6f2ed); }
+    .wrap { min-height: 100vh; display: grid; place-items: center; padding: 20px; }
+    .card { width: 100%; max-width: 560px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 22px; }
+    h1 { margin: 0 0 10px; }
+    p { color: var(--muted); margin: 8px 0; }
+    .btn { display: inline-block; margin-top: 10px; border: 1px solid #98a9b5; background: #fff; color: var(--ink); border-radius: 8px; padding: 8px 12px; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="card">
+      <h1>alt-default ops console</h1>
+      <p>Authentication is required before admin controls are visible.</p>
+      {% if oauth_enabled %}
+      <a class="btn" href="{{ login_path }}">Login with Google</a>
+      {% else %}
+      <p>OAuth is not configured yet. Set <code>OAUTH_CLIENT_ID</code> and <code>OAUTH_CLIENT_SECRET</code>.</p>
+      {% endif %}
+    </section>
+  </main>
+</body>
+</html>

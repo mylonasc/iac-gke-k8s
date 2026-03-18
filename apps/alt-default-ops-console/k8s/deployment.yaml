@@ -1,41 +1,42 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: sandboxed-react-agent-frontend
+  name: alt-default-ops-console
   namespace: alt-default
   labels:
-    app: sandboxed-react-agent-frontend
+    app: alt-default-ops-console
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: sandboxed-react-agent-frontend
+      app: alt-default-ops-console
   template:
     metadata:
       labels:
-        app: sandboxed-react-agent-frontend
+        app: alt-default-ops-console
     spec:
+      serviceAccountName: alt-default-ops-controller
       imagePullSecrets:
         - name: dockerhub-regcred
       containers:
-        - name: frontend
-          image: docker.io/mylonasc/magarathea:sandboxed-react-agent-frontend-0.3.0
+        - name: api
+          image: docker.io/mylonasc/magarathea:alt-default-ops-console-0.1.1
           imagePullPolicy: IfNotPresent
-          env:
-            - name: BACKEND_UPSTREAM
-              value: sandboxed-react-agent-backend:80
           ports:
-            - containerPort: 80
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: alt-default-ops-console-config
           readinessProbe:
             httpGet:
-              path: /
-              port: 80
+              path: /api/health
+              port: 8000
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /
-              port: 80
+              path: /api/health
+              port: 8000
             initialDelaySeconds: 15
             periodSeconds: 20
           resources:
