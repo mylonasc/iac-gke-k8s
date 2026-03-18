@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+  namespace: llm-gateway
+data:
+  config.yaml: |
+    model_list:
+      - model_name: gpt-4o-mini-proxy
+        litellm_params:
+          model: openai/gpt-4o-mini
+          api_key: os.environ/OPENAI_API_KEY
+
+      - model_name: qwen2p5-1p5b-l4
+        litellm_params:
+          model: openai/Qwen/Qwen2.5-1.5B-Instruct
+          api_base: http://vllm-l4.llm-gateway.svc.cluster.local:8000/v1
+          api_key: none
+
+      - model_name: qwen2p5-1p5b-t4
+        litellm_params:
+          model: openai/Qwen/Qwen2.5-1.5B-Instruct
+          api_base: http://vllm-t4.llm-gateway.svc.cluster.local:8000/v1
+          api_key: none
+
+    general_settings:
+      master_key: os.environ/LITELLM_MASTER_KEY
+
+    litellm_settings:
+      set_verbose: false
+      drop_params: true

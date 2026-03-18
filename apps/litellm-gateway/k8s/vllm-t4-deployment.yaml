@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-t4
+  namespace: llm-gateway
+  labels:
+    app: vllm-t4
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-t4
+  template:
+    metadata:
+      labels:
+        app: vllm-t4
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-nodepool: gpu-spot-pool-b
+      tolerations:
+        - key: cloud.google.com/gke-spot
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+        - key: gpu-type
+          operator: Exists
+          effect: NoSchedule
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.8.5
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - -m
+            - vllm.entrypoints.openai.api_server
+          args:
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+            - --model
+            - Qwen/Qwen2.5-1.5B-Instruct
+            - --dtype
+            - auto
+            - --gpu-memory-utilization
+            - "0.85"
+            - --max-model-len
+            - "3072"
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-gateway-secrets
+                  key: huggingface-token
+            - name: HF_HOME
+              value: /var/cache/huggingface
+          ports:
+            - containerPort: 8000
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 45
+            periodSeconds: 15
+            failureThreshold: 20
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 90
+            periodSeconds: 20
+            failureThreshold: 10
+          resources:
+            requests:
+              cpu: "2"
+              memory: 8Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "4"
+              memory: 12Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /var/cache/huggingface
+      volumes:
+        - name: hf-cache
+          emptyDir: {}

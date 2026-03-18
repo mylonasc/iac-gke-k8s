@@ -179,6 +179,66 @@
   align-items: start;
 }
 
+.sandbox-template-picker {
+  border: 1px solid #dbe3ee;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.04);
+  padding: 0.7rem;
+  margin-bottom: 0.7rem;
+}
+
+.sandbox-template-title {
+  display: block;
+  font-size: 0.86rem;
+  color: #475569;
+  margin-bottom: 0.45rem;
+}
+
+.sandbox-template-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 0.5rem;
+}
+
+.sandbox-template-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  background: #ffffff;
+  padding: 0.5rem;
+  cursor: pointer;
+}
+
+.sandbox-template-option.selected {
+  border-color: #0f766e;
+  background: #ecfeff;
+}
+
+.sandbox-template-option input {
+  margin-top: 0.2rem;
+}
+
+.option-text {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.option-text strong {
+  font-size: 0.9rem;
+}
+
+.option-text small {
+  color: #475569;
+  font-size: 0.8rem;
+}
+
+.quick-config-feedback {
+  margin: 0.5rem 0 0;
+}
+
 .thinking-sidebar {
   width: 70px;
   position: sticky;
@@ -584,6 +644,10 @@
 
   .sidebar {
     max-height: none;
+  }
+
+  .sandbox-template-options {
+    grid-template-columns: 1fr;
   }
 
   .thread-viewport {

@@ -20,7 +20,7 @@
       <h1>alt-default ops console</h1>
       <p>Authentication is required before admin controls are visible.</p>
       {% if oauth_enabled %}
-      <a class="btn" href="{{ login_path }}">Login with Google</a>
+      <a class="btn" href="{{ login_path }}">Login</a>
       {% else %}
       <p>OAuth is not configured yet. Set <code>OAUTH_CLIENT_ID</code> and <code>OAUTH_CLIENT_SECRET</code>.</p>
       {% endif %}

@@ -135,6 +135,79 @@ resource "kubernetes_manifest" "agent_sandbox_template" {
   ]
 }
 
+resource "kubernetes_manifest" "agent_sandbox_template_pydata" {
+  count = var.enable_agent_sandbox && var.enable_agent_sandbox_runtime && var.enable_agent_sandbox_pydata_template ? 1 : 0
+
+  manifest = {
+    apiVersion = "extensions.agents.x-k8s.io/v1alpha1"
+    kind       = "SandboxTemplate"
+    metadata = {
+      name      = "python-runtime-template-pydata"
+      namespace = local.ns
+    }
+    spec = {
+      podTemplate = {
+        metadata = {
+          labels = {
+            sandbox = "python-sandbox-pydata"
+          }
+        }
+        spec = {
+          runtimeClassName = "gvisor"
+          nodeSelector = {
+            "workload-isolation" = "gvisor"
+          }
+          tolerations = [
+            {
+              key      = "sandbox.gke.io/runtime"
+              operator = "Equal"
+              value    = "gvisor"
+              effect   = "NoSchedule"
+            }
+          ]
+          imagePullSecrets = [
+            {
+              name = "dockerhub-regcred"
+            }
+          ]
+          containers = [
+            {
+              name  = "python-runtime"
+              image = var.agent_sandbox_runtime_image_pydata
+              ports = [
+                {
+                  containerPort = 8888
+                }
+              ]
+              readinessProbe = {
+                httpGet = {
+                  path = "/"
+                  port = 8888
+                }
+                initialDelaySeconds = 0
+                periodSeconds       = 1
+              }
+              resources = {
+                requests = {
+                  cpu               = "250m"
+                  memory            = "512Mi"
+                  ephemeral-storage = "512Mi"
+                }
+              }
+            }
+          ]
+          restartPolicy = "OnFailure"
+        }
+      }
+    }
+  }
+
+  depends_on = [
+    kubernetes_namespace.app,
+    kubernetes_manifest.agent_sandbox_extensions,
+  ]
+}
+
 resource "kubernetes_manifest" "agent_sandbox_warm_pool" {
   count = var.enable_agent_sandbox && var.enable_agent_sandbox_runtime ? 1 : 0
 

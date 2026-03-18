@@ -126,6 +126,12 @@ variable "agent_sandbox_runtime_image" {
   default     = "us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/python-runtime-sandbox:latest-main"
 }
 
+variable "agent_sandbox_runtime_image_pydata" {
+  description = "Container image for pydata-enabled sandbox runtime pods."
+  type        = string
+  default     = "us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/python-runtime-sandbox-pydata:latest-main"
+}
+
 variable "agent_sandbox_router_image" {
   description = "Container image for sandbox router pods."
   type        = string
@@ -148,4 +154,10 @@ variable "enable_agent_sandbox_runtime" {
   description = "When true, manages Agent Sandbox runtime resources (SandboxTemplate, warm pool, router). Keep false for the first apply so CRDs are installed first."
   type        = bool
   default     = false
+}
+
+variable "enable_agent_sandbox_pydata_template" {
+  description = "When true, creates an additional opt-in pydata SandboxTemplate."
+  type        = bool
+  default     = true
 }

@@ -19,6 +19,7 @@ Agent Sandbox resources are defined in `k8s/agent_sandbox.tf` and include:
 - CRDs (`sandboxes`, `sandboxclaims`, `sandboxtemplates`, `sandboxwarmpools`)
 - runtime resources in `alt-default`:
   - `SandboxTemplate` (`python-runtime-template`)
+  - optional `SandboxTemplate` (`python-runtime-template-pydata`)
   - `SandboxWarmPool` (`python-sandbox-warmpool`)
   - router `Service` and `Deployment`
 

@@ -59,6 +59,11 @@ variable "agent_sandbox_runtime_image" {
   type        = string
 }
 
+variable "agent_sandbox_runtime_image_pydata" {
+  description = "Container image for pydata-enabled sandbox runtime pods."
+  type        = string
+}
+
 variable "agent_sandbox_router_image" {
   description = "Container image for sandbox router pods."
   type        = string
@@ -78,6 +83,12 @@ variable "agent_sandbox_router_replicas" {
 
 variable "enable_agent_sandbox_runtime" {
   description = "When true, create Agent Sandbox runtime resources after CRDs are available."
+  type        = bool
+  default     = false
+}
+
+variable "enable_agent_sandbox_pydata_template" {
+  description = "When true, create an additional opt-in pydata SandboxTemplate."
   type        = bool
   default     = false
 }

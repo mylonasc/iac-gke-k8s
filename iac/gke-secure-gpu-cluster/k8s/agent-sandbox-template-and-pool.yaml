@@ -44,3 +44,42 @@ spec:
   replicas: 2
   sandboxTemplateRef:
     name: python-runtime-template
+---
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: python-runtime-template-pydata
+  namespace: alt-default
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        sandbox: python-sandbox-pydata
+    spec:
+      runtimeClassName: gvisor
+      nodeSelector:
+        workload-isolation: gvisor
+      tolerations:
+      - key: sandbox.gke.io/runtime
+        operator: Equal
+        value: gvisor
+        effect: NoSchedule
+      imagePullSecrets:
+      - name: dockerhub-regcred
+      containers:
+      - name: python-runtime
+        image: us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/python-runtime-sandbox-pydata:latest-main
+        ports:
+        - containerPort: 8888
+        readinessProbe:
+          httpGet:
+            path: "/"
+            port: 8888
+          initialDelaySeconds: 0
+          periodSeconds: 1
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "512Mi"
+            ephemeral-storage: "512Mi"
+      restartPolicy: OnFailure

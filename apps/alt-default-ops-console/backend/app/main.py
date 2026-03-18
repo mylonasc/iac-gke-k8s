@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import secrets
 import time
 import uuid
@@ -193,6 +194,38 @@ def _extract_token(
     raise HTTPException(status_code=401, detail="Missing access token")
 
 
+def _extract_token_optional(
+    authorization: str | None,
+    x_forwarded_access_token: str | None,
+    cookie_token: str | None,
+) -> tuple[str, str]:
+    if authorization and authorization.lower().startswith("bearer "):
+        return authorization.split(" ", 1)[1].strip(), "authorization"
+    if x_forwarded_access_token:
+        return x_forwarded_access_token.strip(), "x-forwarded-access-token"
+    if cookie_token:
+        return cookie_token.strip(), "ops_access_token_cookie"
+    return "", "none"
+
+
+def _jwt_segments(token: str) -> dict[str, Any]:
+    parts = token.split(".")
+    if len(parts) != 3:
+        return {"error": "Token is not a JWT with 3 segments"}
+    try:
+        header = jwt.get_unverified_header(token)
+    except Exception as exc:
+        header = {"_error": str(exc)}
+    try:
+        claims = jwt.get_unverified_claims(token)
+    except Exception as exc:
+        claims = {"_error": str(exc)}
+    return {
+        "header": header,
+        "claims": claims,
+    }
+
+
 def _claim_email(claims: dict[str, Any]) -> str:
     value = (
         claims.get("email")
@@ -308,6 +341,46 @@ async def _verify_token(token: str, access_token: str | None = None) -> dict[str
 
     _check_authorization(claims)
     return claims
+
+
+@app.get("/api/token-inspect")
+async def token_inspect(
+    authorization: str | None = Header(default=None),
+    x_forwarded_access_token: str | None = Header(default=None),
+    ops_access_token: str | None = Cookie(default=None),
+    ops_google_access_token: str | None = Cookie(default=None),
+) -> dict[str, Any]:
+    token, source = _extract_token_optional(
+        authorization, x_forwarded_access_token, ops_access_token
+    )
+    if not token:
+        return {
+            "token_found": False,
+            "source": source,
+            "verified": False,
+            "verify_error": "No token was found in Authorization header, X-Forwarded-Access-Token, or ops_access_token cookie",
+            "decoded": {},
+        }
+
+    decoded = _jwt_segments(token)
+    try:
+        claims = await _verify_token(token, access_token=ops_google_access_token)
+        return {
+            "token_found": True,
+            "source": source,
+            "verified": True,
+            "verify_error": "",
+            "decoded": decoded,
+            "verified_claims": claims,
+        }
+    except HTTPException as exc:
+        return {
+            "token_found": True,
+            "source": source,
+            "verified": False,
+            "verify_error": exc.detail,
+            "decoded": decoded,
+        }
 
 
 def _deployment_status(deploy: Any) -> dict[str, Any]:
@@ -721,13 +794,15 @@ async def root(request: Request):
 
 
 @app.get("/admin")
-async def admin(request: Request, claims: dict[str, Any] = Depends(require_auth)):
+async def admin(request: Request):
+    claims = await _optional_auth(request)
     return templates.TemplateResponse(
         "admin.html",
         {
             "request": request,
-            "email": _claim_email(claims),
-            "issuer": claims.get("iss", ""),
+            "email": _claim_email(claims) if claims else "",
+            "issuer": (claims.get("iss", "") if claims else ""),
+            "authorized": bool(claims),
             "namespace": settings.target_namespace,
             "base_path": _normalize_base_path(settings.app_base_path),
         },

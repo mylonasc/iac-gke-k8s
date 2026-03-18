@@ -10,9 +10,11 @@ gpu_machine_type_ng_a = "g2-standard-4"
 gpu_type_ng_b         = "nvidia-tesla-t4"
 gpu_machine_type_ng_b = "n1-standard-4"
 
-enable_agent_sandbox_runtime     = true
-agent_sandbox_warm_pool_replicas = 0
-agent_sandbox_router_replicas    = 0
+enable_agent_sandbox_runtime         = true
+enable_agent_sandbox_pydata_template = true
+agent_sandbox_runtime_image_pydata   = "docker.io/mylonasc/magarathea:python-runtime-sandbox-pydata-0.1.0"
+agent_sandbox_warm_pool_replicas     = 0
+agent_sandbox_router_replicas        = 1
 
 # L4 small setup (4 vCPUs, 16GB RAM)
 # gpu_type = "nvidia-tesla-l4"

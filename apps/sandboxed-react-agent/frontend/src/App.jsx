@@ -25,6 +25,18 @@ const getAppBasePath = () => {
 const DEFAULT_API_BASE = `${getAppBasePath()}/api`;
 const gfmPlugin = typeof remarkGfm === "function" ? remarkGfm : remarkGfm?.default;
 const APP_BASE_PATH = getAppBasePath();
+const SANDBOX_TEMPLATES = [
+  {
+    value: "python-runtime-template",
+    label: "Default Sandbox",
+    description: "Smaller runtime for standard tasks.",
+  },
+  {
+    value: "python-runtime-template-pydata",
+    label: "PyData Sandbox",
+    description: "Extended runtime with numpy/scipy/pandas/polars/matplotlib/yfinance.",
+  },
+];
 
 const resolveAppUrl = (url) => {
   if (typeof url !== "string" || !url) return url;
@@ -424,6 +436,32 @@ function ChatArea({ session, onResetSession, readOnly, apiBase }) {
   );
 }
 
+function SandboxTemplatePicker({ value, onChange, disabled }) {
+  return (
+    <div className="sandbox-template-picker" role="radiogroup" aria-label="Sandbox template">
+      <span className="sandbox-template-title">Runtime</span>
+      <div className="sandbox-template-options">
+        {SANDBOX_TEMPLATES.map((template) => (
+          <label key={template.value} className={`sandbox-template-option ${value === template.value ? "selected" : ""}`}>
+            <input
+              type="radio"
+              name="sandbox-template"
+              value={template.value}
+              checked={value === template.value}
+              onChange={() => onChange(template.value)}
+              disabled={disabled}
+            />
+            <span className="option-text">
+              <strong>{template.label}</strong>
+              <small>{template.description}</small>
+            </span>
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function Sidebar({ sessions, activeSessionId, onSelect, onNew, onShare, shareInFlight, isSharedView }) {
   return (
     <aside className="panel sidebar">
@@ -500,7 +538,17 @@ function SettingsForm({ apiBase, config, setConfig, configLoading, configSaving,
         </label>
         <label>
           Sandbox template name
-          <input type="text" value={config.sandbox_template_name} onChange={(event) => setConfig((prev) => ({ ...prev, sandbox_template_name: event.target.value }))} disabled={configLoading || configSaving} />
+          <input
+            type="text"
+            list="sandbox-template-options"
+            value={config.sandbox_template_name}
+            onChange={(event) => setConfig((prev) => ({ ...prev, sandbox_template_name: event.target.value }))}
+            disabled={configLoading || configSaving}
+          />
+          <datalist id="sandbox-template-options">
+            <option value="python-runtime-template" />
+            <option value="python-runtime-template-pydata" />
+          </datalist>
         </label>
         <label>
           Sandbox namespace
@@ -538,6 +586,7 @@ function App() {
   const [isSharedView, setIsSharedView] = useState(false);
   const [configLoading, setConfigLoading] = useState(false);
   const [configSaving, setConfigSaving] = useState(false);
+  const [templateSaving, setTemplateSaving] = useState(false);
   const [configError, setConfigError] = useState("");
   const [configMessage, setConfigMessage] = useState("");
   const [config, setConfig] = useState({
@@ -724,6 +773,42 @@ function App() {
     }
   }
 
+  async function handleTemplateQuickSelect(templateName) {
+    if (!templateName || templateName === config.sandbox_template_name) return;
+    const previousTemplate = config.sandbox_template_name;
+    const nextConfig = { ...config, sandbox_template_name: templateName };
+    setConfig((prev) => ({ ...prev, sandbox_template_name: templateName }));
+    setTemplateSaving(true);
+    setConfigError("");
+    setConfigMessage("");
+    try {
+      const payload = {
+        model: nextConfig.model,
+        max_tool_calls_per_turn: Number(nextConfig.max_tool_calls_per_turn),
+        sandbox_mode: nextConfig.sandbox_mode,
+        sandbox_api_url: nextConfig.sandbox_api_url,
+        sandbox_template_name: nextConfig.sandbox_template_name,
+        sandbox_namespace: nextConfig.sandbox_namespace,
+        sandbox_server_port: Number(nextConfig.sandbox_server_port),
+        sandbox_max_output_chars: Number(nextConfig.sandbox_max_output_chars),
+        sandbox_local_timeout_seconds: Number(nextConfig.sandbox_local_timeout_seconds),
+      };
+      const response = await fetch(`${apiBase}/config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data?.detail || "Failed to update sandbox template");
+      setConfigMessage(`Runtime switched to ${templateName}.`);
+    } catch (error) {
+      setConfig((prev) => ({ ...prev, sandbox_template_name: previousTemplate }));
+      setConfigError(String(error));
+    } finally {
+      setTemplateSaving(false);
+    }
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -747,12 +832,26 @@ function App() {
           />
           <TransportProvider key={runtimeKey} apiBase={apiBase} session={activeSession}>
             <div className="chat-with-thinking">
-              <ChatArea
-                session={activeSession}
-                onResetSession={handleResetSession}
-                readOnly={isSharedView}
-                apiBase={apiBase}
-              />
+              <div>
+                {!isSharedView ? (
+                  <SandboxTemplatePicker
+                    value={config.sandbox_template_name}
+                    onChange={handleTemplateQuickSelect}
+                    disabled={configLoading || configSaving || templateSaving}
+                  />
+                ) : null}
+                <ChatArea
+                  session={activeSession}
+                  onResetSession={handleResetSession}
+                  readOnly={isSharedView}
+                  apiBase={apiBase}
+                />
+                {!isSharedView && (configError || configMessage) ? (
+                  <p className={configError ? "quick-config-feedback error-text" : "quick-config-feedback success-text"}>
+                    {configError || configMessage}
+                  </p>
+                ) : null}
+              </div>
               <ThinkingSidebar />
             </div>
           </TransportProvider>

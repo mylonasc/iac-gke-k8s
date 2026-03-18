@@ -327,11 +327,13 @@ module "k8s" {
   k8s_namespace = var.k8s_namespace
   environment   = var.environment
 
-  enable_agent_sandbox             = var.enable_agent_sandbox
-  agent_sandbox_version            = var.agent_sandbox_version
-  agent_sandbox_runtime_image      = var.agent_sandbox_runtime_image
-  agent_sandbox_router_image       = var.agent_sandbox_router_image
-  agent_sandbox_warm_pool_replicas = var.agent_sandbox_warm_pool_replicas
-  agent_sandbox_router_replicas    = var.agent_sandbox_router_replicas
-  enable_agent_sandbox_runtime     = var.enable_agent_sandbox_runtime
+  enable_agent_sandbox                 = var.enable_agent_sandbox
+  agent_sandbox_version                = var.agent_sandbox_version
+  agent_sandbox_runtime_image          = var.agent_sandbox_runtime_image
+  agent_sandbox_runtime_image_pydata   = var.agent_sandbox_runtime_image_pydata
+  agent_sandbox_router_image           = var.agent_sandbox_router_image
+  agent_sandbox_warm_pool_replicas     = var.agent_sandbox_warm_pool_replicas
+  agent_sandbox_router_replicas        = var.agent_sandbox_router_replicas
+  enable_agent_sandbox_runtime         = var.enable_agent_sandbox_runtime
+  enable_agent_sandbox_pydata_template = var.enable_agent_sandbox_pydata_template
 }

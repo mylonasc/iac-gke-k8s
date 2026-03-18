@@ -1,0 +1,30 @@
+config:
+  existingSecret: oauth2-proxy-secrets
+
+extraArgs:
+  - --provider=oidc
+  - --oidc-issuer-url=https://auth.example.com/dex
+  - --redirect-url=https://app.example.com/oauth2/callback
+
+  - --http-address=0.0.0.0:4180
+  - --reverse-proxy=true
+  - --proxy-prefix=/oauth2
+
+  - --scope=openid profile email groups
+
+  - --set-xauthrequest=true
+  - --set-authorization-header=true
+  - --pass-access-token=true
+  - --pass-user-headers=true
+
+  - --upstream=static://200
+  - --email-domain=*
+
+  - --cookie-secure=true
+  - --cookie-httponly=true
+  - --cookie-samesite=lax
+  - --cookie-refresh=1h
+  - --cookie-expire=8h
+
+service:
+  portNumber: 4180

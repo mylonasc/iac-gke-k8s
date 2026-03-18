@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-t4
+  namespace: llm-gateway
+  labels:
+    app: vllm-t4
+spec:
+  selector:
+    app: vllm-t4
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>alt-default ops admin</title>
   <style>
-    :root { --ink: #182025; --muted: #5b6872; --line: #d9e1e5; --ok: #0f8b4c; --err: #b52020; --card: #ffffff; }
+    :root { --ink: #182025; --muted: #5b6872; --line: #d9e1e5; --ok: #0f8b4c; --err: #b52020; --warn: #8f5a00; --card: #ffffff; }
     body { margin: 0; font-family: ui-sans-serif, -apple-system, Segoe UI, Arial, sans-serif; color: var(--ink); background: linear-gradient(135deg, #edf5f7, #f6f2ed); }
     .wrap { max-width: 1100px; margin: 0 auto; padding: 20px; }
     .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin-bottom: 14px; }
@@ -14,9 +14,11 @@
     .muted { color: var(--muted); }
     .ok { color: var(--ok); }
     .err { color: var(--err); }
+    .warn { color: var(--warn); }
     table { width: 100%; border-collapse: collapse; }
     th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); font-size: 0.92rem; }
     input { padding: 6px 8px; border: 1px solid #b9c7d0; border-radius: 8px; }
+    pre { margin: 0; max-height: 320px; overflow: auto; background: #f7fbfd; border: 1px solid var(--line); border-radius: 8px; padding: 10px; font-size: 0.82rem; }
   </style>
 </head>
 <body>
@@ -26,9 +28,19 @@
       <div class="row" style="margin-bottom: 8px;">
         <button class="btn" onclick="logoutGoogle()">Logout</button>
       </div>
+      {% if authorized %}
       <div class="muted">signed in as {{ email }} via {{ issuer }}</div>
+      {% else %}
+      <div class="warn">Token is present but not authorized for admin actions. Inspect decoded token below.</div>
+      {% endif %}
       <div id="meta" class="muted"></div>
       <div id="action" class="muted"></div>
+    </div>
+
+    <div class="card">
+      <h2>Token Inspector</h2>
+      <p class="muted">Decoded token details are shown here even when authorization fails.</p>
+      <pre id="token"></pre>
     </div>
 
     <div class="card">
@@ -42,7 +54,7 @@
     <div class="card">
       <h2>Sandbox Claims</h2>
       <div class="row" style="margin-bottom: 10px;">
-        <input id="template" value="python-runtime-template" placeholder="template" />
+        <input id="template" value="python-runtime-template" placeholder="python-runtime-template or python-runtime-template-pydata" />
         <input id="claim" placeholder="optional claim name" />
         <button class="btn" onclick="createClaim()">Create claim</button>
       </div>
@@ -84,6 +96,7 @@ function setMsg(id, msg, cls) {
 }
 
 async function refresh() {
+  await refreshTokenInspector();
   try {
     const ov = await api('/api/overview');
     const now = new Date().toLocaleTimeString();
@@ -93,6 +106,16 @@ async function refresh() {
     renderPods(ov.pods || []);
   } catch (e) {
     setMsg('action', 'refresh failed: ' + e.message, 'err');
+  }
+}
+
+async function refreshTokenInspector() {
+  const tokenEl = document.getElementById('token');
+  try {
+    const info = await api('/api/token-inspect');
+    tokenEl.textContent = JSON.stringify(info, null, 2);
+  } catch (e) {
+    tokenEl.textContent = JSON.stringify({ error: e.message }, null, 2);
   }
 }
 

@@ -3,6 +3,9 @@
 > `https://oauth2-proxy.github.io/oauth2-proxy/`
 > and `https://kubernetes.github.io/ingress-nginx/examples/auth/oauth-external-auth/`.
 
+> Dex-specific quick path in this repo:
+> `../dex/README.md` and `oauth2-proxy-values.dex.example.yaml`
+
 * **Ingress A (no auth annotations):** routes `https://yourdomain.com/oauth2/*` → `oauth2-proxy`
 * **Ingress B (protected):** routes `https://yourdomain.com/*` → your app, and uses `auth-url` / `auth-signin` to bounce users to `/oauth2/start`
 
@@ -111,6 +114,13 @@ Install:
 helm install oauth2-proxy oauth2-proxy/oauth2-proxy \
   -n oauth2-proxy \
   -f oauth2-proxy-values.yaml
+```
+
+If `Deployment`/`Service` `oauth2-proxy` already exist from a non-Helm apply,
+remove them before Helm install/upgrade:
+
+```bash
+kubectl -n oauth2-proxy delete deployment oauth2-proxy service oauth2-proxy
 ```
 
 Notes:

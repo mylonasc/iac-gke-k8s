@@ -20,7 +20,7 @@ spec:
         - name: dockerhub-regcred
       containers:
         - name: api
-          image: docker.io/mylonasc/magarathea:alt-default-ops-console-0.1.1
+          image: docker.io/mylonasc/magarathea:alt-default-ops-console-0.1.2
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000

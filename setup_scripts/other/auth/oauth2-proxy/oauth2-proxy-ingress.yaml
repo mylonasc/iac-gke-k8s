@@ -21,5 +21,4 @@ spec:
           service:
             name: oauth2-proxy
             port:
-              number: 80
-
+              name: http

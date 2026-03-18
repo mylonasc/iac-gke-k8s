@@ -96,6 +96,7 @@ To render diagrams on demand:
   - `sandbox-router-svc.alt-default.svc.cluster.local:8080`
 - Sandbox template exists:
   - `python-runtime-template` in namespace `alt-default`
+  - optional advanced template: `python-runtime-template-pydata`
 - ingress-nginx and oauth2-proxy already configured for your host.
 
 Quick check:
@@ -103,6 +104,7 @@ Quick check:
 ```bash
 kubectl get svc -n alt-default sandbox-router-svc
 kubectl get sandboxtemplate -n alt-default python-runtime-template
+kubectl get sandboxtemplate -n alt-default python-runtime-template-pydata
 kubectl get pods -n agent-sandbox-system
 ```
 
