@@ -2,6 +2,8 @@ import os
 from pathlib import Path
 import shutil
 import json
+import asyncio
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -22,6 +24,7 @@ def setup_function() -> None:
     with agent.session_store._connect() as connection:
         connection.execute("DELETE FROM sessions")
         connection.execute("DELETE FROM assets")
+        connection.execute("DELETE FROM sandbox_leases")
     shutil.rmtree(os.environ["ASSET_STORE_PATH"], ignore_errors=True)
 
 
@@ -46,6 +49,63 @@ def test_config_roundtrip() -> None:
     assert update_payload["sandbox"]["mode"] == "local"
 
 
+def test_config_updates_sandbox_lifecycle_mode() -> None:
+    response = client.post(
+        "/api/config",
+        json={
+            "sandbox_execution_model": "session",
+            "sandbox_session_idle_ttl_seconds": 900,
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["sandbox"]["execution_model"] == "session"
+    assert payload["sandbox"]["session_idle_ttl_seconds"] == 900
+
+
+def test_sandbox_lifecycle_endpoints_roundtrip(monkeypatch) -> None:
+    fake_lease = {
+        "lease_id": "lease-123",
+        "scope_type": "session",
+        "scope_key": "s1",
+        "status": "ready",
+        "claim_name": "sandbox-claim-abc",
+        "template_name": "python-runtime-template-small",
+        "namespace": "alt-default",
+        "metadata": {},
+        "created_at": "2026-03-20T10:00:00+00:00",
+        "last_used_at": "2026-03-20T10:01:00+00:00",
+        "expires_at": "2026-03-20T10:31:00+00:00",
+        "released_at": None,
+        "last_error": None,
+    }
+
+    monkeypatch.setattr(agent, "list_sandboxes", lambda: [fake_lease])
+    monkeypatch.setattr(
+        agent,
+        "get_sandbox",
+        lambda lease_id: fake_lease if lease_id == "lease-123" else None,
+    )
+    monkeypatch.setattr(
+        agent, "release_sandbox", lambda lease_id: lease_id == "lease-123"
+    )
+
+    listed = client.get("/api/sandboxes")
+    assert listed.status_code == 200
+    assert listed.json()["sandboxes"][0]["lease_id"] == "lease-123"
+
+    fetched = client.get("/api/sandboxes/lease-123")
+    assert fetched.status_code == 200
+    assert fetched.json()["claim_name"] == "sandbox-claim-abc"
+
+    released = client.post("/api/sandboxes/lease-123/release")
+    assert released.status_code == 200
+    assert released.json()["released"] is True
+
+    missing = client.get("/api/sandboxes/does-not-exist")
+    assert missing.status_code == 404
+
+
 def test_reset_session_endpoint() -> None:
     session = agent.create_session()
 
@@ -55,6 +115,15 @@ def test_reset_session_endpoint() -> None:
 
     missing = client.post(f"/api/sessions/{session.session_id}/reset")
     assert missing.status_code == 404
+
+
+def test_session_sandbox_endpoint() -> None:
+    session = agent.create_session()
+    response = client.get(f"/api/sessions/{session.session_id}/sandbox")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["session_id"] == session.session_id
+    assert payload["sandbox"]["has_active_lease"] is False
 
 
 def test_sessions_list_and_share() -> None:
@@ -177,6 +246,142 @@ def test_asset_endpoints_serve_uploaded_file() -> None:
     assert "attachment" in download.headers.get("content-disposition", "").lower()
 
 
+def test_transport_uses_server_session_messages_as_source_of_truth(monkeypatch) -> None:
+    session = agent.create_session(title="asset persistence")
+    session.ui_messages = [
+        {
+            "id": "u-old",
+            "role": "user",
+            "content": [{"type": "text", "text": "create image"}],
+        },
+        {
+            "id": "a-old",
+            "role": "assistant",
+            "status": {"type": "complete"},
+            "content": [
+                {
+                    "type": "tool-call",
+                    "toolCallId": "tool-old",
+                    "toolName": "sandbox_exec_python",
+                    "argsText": "{}",
+                    "result": {
+                        "ok": True,
+                        "assets": [
+                            {
+                                "asset_id": "asset-old",
+                                "filename": "chart.png",
+                                "mime_type": "image/png",
+                                "view_url": "/api/assets/asset-old",
+                                "download_url": "/api/assets/asset-old/download",
+                            }
+                        ],
+                    },
+                },
+                {"type": "image", "image": "/api/assets/asset-old"},
+            ],
+        },
+    ]
+    agent._persist_session(session)
+
+    async def fake_run_graph(messages, session_id):
+        return {
+            "session_id": session_id,
+            "messages": list(messages) + [{"role": "assistant", "content": "ok"}],
+            "pending_tool_calls": [],
+            "turn_tool_calls": [],
+            "tool_events": [],
+            "tool_call_count": 0,
+            "final_reply": "ok",
+            "error": "",
+            "limit_reached": False,
+        }
+
+    monkeypatch.setattr(agent, "_run_agent_graph_async", fake_run_graph)
+
+    payload = SimpleNamespace(
+        commands=[
+            SimpleNamespace(
+                type="add-message",
+                message=SimpleNamespace(
+                    parts=[SimpleNamespace(type="text", text="continue")],
+                    content=[],
+                    id="u-new",
+                ),
+            )
+        ],
+        state={
+            "session_id": session.session_id,
+            "messages": [
+                {
+                    "id": "client-only",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "truncated"}],
+                }
+            ],
+            "tool_updates": [],
+        },
+    )
+    controller = SimpleNamespace(state={"messages": [], "tool_updates": []})
+
+    asyncio.run(agent.run_assistant_transport(payload, controller))
+
+    fetched = client.get(f"/api/sessions/{session.session_id}")
+    assert fetched.status_code == 200
+    messages = fetched.json()["messages"]
+    old_assistant = next(m for m in messages if m.get("id") == "a-old")
+    part_types = [part.get("type") for part in old_assistant.get("content", [])]
+    assert "tool-call" in part_types
+    assert "image" in part_types
+
+
+def test_shared_markdown_includes_tool_asset_links() -> None:
+    session = agent.create_session(title="markdown assets")
+    session.ui_messages = [
+        {
+            "id": "a-assets",
+            "role": "assistant",
+            "status": {"type": "complete"},
+            "content": [
+                {
+                    "type": "tool-call",
+                    "toolCallId": "tool-asset",
+                    "toolName": "sandbox_exec_python",
+                    "argsText": "{}",
+                    "result": {
+                        "ok": True,
+                        "assets": [
+                            {
+                                "asset_id": "asset-png",
+                                "filename": "plot.png",
+                                "mime_type": "image/png",
+                                "view_url": "/api/assets/asset-png",
+                                "download_url": "/api/assets/asset-png/download",
+                            },
+                            {
+                                "asset_id": "asset-csv",
+                                "filename": "report.csv",
+                                "mime_type": "text/csv",
+                                "view_url": "/api/assets/asset-csv",
+                                "download_url": "/api/assets/asset-csv/download",
+                            },
+                        ],
+                    },
+                }
+            ],
+        }
+    ]
+    agent._persist_session(session)
+    share_id = agent.create_share(session.session_id)
+    assert share_id is not None
+
+    markdown_response = client.get(f"/api/public/{share_id}/markdown")
+    assert markdown_response.status_code == 200
+    markdown = markdown_response.text
+    assert "#### Tool assets" in markdown
+    assert "![plot.png](/api/assets/asset-png)" in markdown
+    assert "[report.csv](/api/assets/asset-csv/download)" in markdown
+
+
 def test_python_tool_auto_exposes_detected_image_path() -> None:
     agent.sandbox_manager.mode = "local"
     code = (
@@ -244,7 +449,7 @@ def test_assistant_transport_emits_image_asset_in_message(monkeypatch) -> None:
             )
         return FakeCompletion(FakeMessage("Plot generated and attached."))
 
-    monkeypatch.setattr(agent.client.chat.completions, "create", fake_create)
+    monkeypatch.setattr(agent.async_client.chat.completions, "create", fake_create)
 
     response = client.post(
         "/api/assistant",

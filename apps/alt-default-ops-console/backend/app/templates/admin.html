@@ -17,7 +17,7 @@
     .warn { color: var(--warn); }
     table { width: 100%; border-collapse: collapse; }
     th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); font-size: 0.92rem; }
-    input { padding: 6px 8px; border: 1px solid #b9c7d0; border-radius: 8px; }
+    input, select { padding: 6px 8px; border: 1px solid #b9c7d0; border-radius: 8px; }
     pre { margin: 0; max-height: 320px; overflow: auto; background: #f7fbfd; border: 1px solid var(--line); border-radius: 8px; padding: 10px; font-size: 0.82rem; }
   </style>
 </head>
@@ -54,7 +54,7 @@
     <div class="card">
       <h2>Sandbox Claims</h2>
       <div class="row" style="margin-bottom: 10px;">
-        <input id="template" value="python-runtime-template" placeholder="python-runtime-template or python-runtime-template-pydata" />
+        <select id="template"></select>
         <input id="claim" placeholder="optional claim name" />
         <button class="btn" onclick="createClaim()">Create claim</button>
       </div>
@@ -65,7 +65,44 @@
     </div>
 
     <div class="card">
+      <h2>Sandbox Warm Pools</h2>
+      <div class="row" style="margin-bottom: 10px;">
+        <input id="warmPoolName" value="python-sandbox-warmpool" placeholder="warm pool name" />
+        <select id="warmPoolTemplate"></select>
+        <input id="warmPoolReplicas" type="number" min="0" max="5" value="1" />
+        <button class="btn" onclick="upsertWarmPool()">Start / Update warm pool</button>
+      </div>
+      <table>
+        <thead><tr><th>Name</th><th>Template</th><th>Ready</th><th>Replicas</th><th>Actions</th></tr></thead>
+        <tbody id="warmPools"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>Node Inventory</h2>
+      <div id="nodeSummary" class="muted" style="margin-bottom: 10px;">No node data yet.</div>
+      <table>
+        <thead><tr><th>Name</th><th>Ready</th><th>Instance Type</th><th>Node Pool</th><th>Pods</th><th>Pod Phases</th></tr></thead>
+        <tbody id="nodes"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
       <h2>Pods</h2>
+      <div class="row" style="margin-bottom: 10px;">
+        <label>
+          Node
+          <select id="podNodeFilter" onchange="applyPodFilters()">
+            <option value="">All nodes</option>
+          </select>
+        </label>
+        <label>
+          Status
+          <select id="podStatusFilter" onchange="applyPodFilters()">
+            <option value="">All statuses</option>
+          </select>
+        </label>
+      </div>
       <table>
         <thead><tr><th>Name</th><th>Phase</th><th>Node</th><th>Ready</th></tr></thead>
         <tbody id="pods"></tbody>
@@ -75,6 +112,8 @@
 
 <script>
 const BASE = "{{ base_path }}";
+let allPods = [];
+let availableTemplates = [];
 
 function withBase(path) {
   return `${BASE}${path}`;
@@ -101,12 +140,40 @@ async function refresh() {
     const ov = await api('/api/overview');
     const now = new Date().toLocaleTimeString();
     setMsg('meta', 'mode: ' + (ov.cluster_mode || 'unknown') + ' | namespace: ' + (ov.namespace || '{{ namespace }}') + ' | last refresh: ' + now, 'muted');
+    updateTemplateSelectors(ov.sandboxtemplates || []);
     renderDeployments(ov.deployments || []);
     renderClaims(ov.sandboxclaims || []);
+    renderWarmPools(ov.sandboxwarmpools || []);
+    renderNodes(ov.nodes || [], ov.node_summary || {});
     renderPods(ov.pods || []);
   } catch (e) {
     setMsg('action', 'refresh failed: ' + e.message, 'err');
   }
+}
+
+function updateTemplateSelectors(items) {
+  const templates = (items || []).filter(Boolean);
+  availableTemplates = templates;
+  const claimSelect = document.getElementById('template');
+  const warmPoolSelect = document.getElementById('warmPoolTemplate');
+
+  [claimSelect, warmPoolSelect].forEach((selectEl) => {
+    const current = selectEl.value;
+    selectEl.innerHTML = '';
+    templates.forEach((template) => {
+      const option = document.createElement('option');
+      option.value = template;
+      option.textContent = template;
+      selectEl.appendChild(option);
+    });
+    if (templates.includes(current)) {
+      selectEl.value = current;
+    } else if (templates.includes('python-runtime-template')) {
+      selectEl.value = 'python-runtime-template';
+    } else if (templates.length > 0) {
+      selectEl.value = templates[0];
+    }
+  });
 }
 
 async function refreshTokenInspector() {
@@ -144,14 +211,87 @@ function renderClaims(items) {
   });
 }
 
-function renderPods(items) {
-  const tbody = document.getElementById('pods');
+function renderWarmPools(items) {
+  const tbody = document.getElementById('warmPools');
   tbody.innerHTML = '';
-  items.forEach(p => {
+  items.forEach((pool) => {
+    const name = typeof pool === 'string' ? pool : (pool.name || 'unknown');
+    const template = typeof pool === 'string' ? '' : (pool.template || '');
+    const ready = typeof pool === 'string' ? '' : (pool.ready ?? '');
+    const replicas = typeof pool === 'string' ? '' : (pool.replicas ?? '');
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${p.name}</td><td>${p.phase}</td><td>${p.node || ''}</td><td>${p.ready ? 'yes' : 'no'}</td>`;
+    tr.innerHTML = `<td>${name}</td><td>${template}</td><td>${ready}</td><td>${replicas}</td><td><button class="btn" onclick="scaleWarmPool('${name}',0)">0</button> <button class="btn" onclick="scaleWarmPool('${name}',1)">1</button> <button class="btn" onclick="scaleWarmPool('${name}',3)">3</button> <button class="btn" onclick="scaleWarmPool('${name}',5)">5</button></td>`;
     tbody.appendChild(tr);
   });
+}
+
+function renderNodes(items, summary) {
+  const tbody = document.getElementById('nodes');
+  tbody.innerHTML = '';
+  const nodeSummary = document.getElementById('nodeSummary');
+
+  const typeText = (summary.types || []).map((t) => `${t.name}: ${t.count}`).join(', ') || 'n/a';
+  const poolText = (summary.pools || []).map((p) => `${p.name}: ${p.count}`).join(', ') || 'n/a';
+  nodeSummary.textContent = `Nodes: ${summary.total || 0} total (${summary.ready || 0} ready) | Types: ${typeText} | Pools: ${poolText}`;
+
+  items.forEach((node) => {
+    const phaseCounts = node.phase_counts || {};
+    const phaseText = Object.keys(phaseCounts).sort().map((key) => `${key}:${phaseCounts[key]}`).join(', ');
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${node.name || ''}</td><td>${node.ready ? 'yes' : 'no'}</td><td>${node.instance_type || ''}</td><td>${node.node_pool || ''}</td><td>${node.pod_count ?? 0}</td><td>${phaseText || '-'}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+function renderPods(items) {
+  allPods = items || [];
+  renderPodFilters(allPods);
+  applyPodFilters();
+}
+
+function renderPodFilters(items) {
+  const nodeFilter = document.getElementById('podNodeFilter');
+  const statusFilter = document.getElementById('podStatusFilter');
+  const currentNode = nodeFilter.value;
+  const currentStatus = statusFilter.value;
+
+  const nodes = Array.from(new Set(items.map((p) => p.node || '').filter(Boolean))).sort();
+  const statuses = Array.from(new Set(items.map((p) => p.phase || '').filter(Boolean))).sort();
+
+  nodeFilter.innerHTML = '<option value="">All nodes</option>';
+  nodes.forEach((node) => {
+    const option = document.createElement('option');
+    option.value = node;
+    option.textContent = node;
+    nodeFilter.appendChild(option);
+  });
+
+  statusFilter.innerHTML = '<option value="">All statuses</option>';
+  statuses.forEach((status) => {
+    const option = document.createElement('option');
+    option.value = status;
+    option.textContent = status;
+    statusFilter.appendChild(option);
+  });
+
+  if (nodes.includes(currentNode)) nodeFilter.value = currentNode;
+  if (statuses.includes(currentStatus)) statusFilter.value = currentStatus;
+}
+
+function applyPodFilters() {
+  const tbody = document.getElementById('pods');
+  const selectedNode = document.getElementById('podNodeFilter').value;
+  const selectedStatus = document.getElementById('podStatusFilter').value;
+
+  tbody.innerHTML = '';
+  allPods
+    .filter((pod) => !selectedNode || (pod.node || '') === selectedNode)
+    .filter((pod) => !selectedStatus || (pod.phase || '') === selectedStatus)
+    .forEach((pod) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${pod.name}</td><td>${pod.phase}</td><td>${pod.node || ''}</td><td>${pod.ready ? 'yes' : 'no'}</td>`;
+      tbody.appendChild(tr);
+    });
 }
 
 async function scale(name, replicas) {
@@ -167,6 +307,10 @@ async function scale(name, replicas) {
 async function createClaim() {
   const template = document.getElementById('template').value.trim();
   const claim = document.getElementById('claim').value.trim();
+  if (!availableTemplates.includes(template)) {
+    setMsg('action', 'select a valid sandbox template', 'err');
+    return;
+  }
   try {
     await api('/api/sandboxclaims', { method: 'POST', body: JSON.stringify({ template_name: template, claim_name: claim || null }) });
     document.getElementById('claim').value = '';
@@ -185,6 +329,43 @@ async function deleteClaim(name) {
     await refresh();
   } catch (e) {
     setMsg('action', 'delete claim failed: ' + e.message, 'err');
+  }
+}
+
+async function upsertWarmPool() {
+  const warmPoolName = document.getElementById('warmPoolName').value.trim();
+  const templateName = document.getElementById('warmPoolTemplate').value.trim();
+  const replicas = Number(document.getElementById('warmPoolReplicas').value);
+  if (!availableTemplates.includes(templateName)) {
+    setMsg('action', 'select a valid sandbox template', 'err');
+    return;
+  }
+  if (!warmPoolName || !templateName || Number.isNaN(replicas)) {
+    setMsg('action', 'warm pool name, template and replicas are required', 'err');
+    return;
+  }
+  try {
+    await api('/api/sandboxwarmpools', {
+      method: 'POST',
+      body: JSON.stringify({ warm_pool_name: warmPoolName, template_name: templateName, replicas }),
+    });
+    setMsg('action', `updated warm pool ${warmPoolName} to ${replicas}`, 'ok');
+    await refresh();
+  } catch (e) {
+    setMsg('action', 'warm pool update failed: ' + e.message, 'err');
+  }
+}
+
+async function scaleWarmPool(name, replicas) {
+  try {
+    await api(`/api/sandboxwarmpools/${name}/scale`, {
+      method: 'POST',
+      body: JSON.stringify({ replicas }),
+    });
+    setMsg('action', `scaled warm pool ${name} to ${replicas}`, 'ok');
+    await refresh();
+  } catch (e) {
+    setMsg('action', 'warm pool scale failed: ' + e.message, 'err');
   }
 }
 

@@ -18,10 +18,15 @@ Agent Sandbox resources are defined in `k8s/agent_sandbox.tf` and include:
 - controller namespace/service account/service/roles/bindings
 - CRDs (`sandboxes`, `sandboxclaims`, `sandboxtemplates`, `sandboxwarmpools`)
 - runtime resources in `alt-default`:
+  - `SandboxTemplate` (`python-runtime-template-small`)
   - `SandboxTemplate` (`python-runtime-template`)
+  - `SandboxTemplate` (`python-runtime-template-large`)
   - optional `SandboxTemplate` (`python-runtime-template-pydata`)
   - `SandboxWarmPool` (`python-sandbox-warmpool`)
   - router `Service` and `Deployment`
+
+Router deployment intentionally runs on the regular cluster pool so gVisor pool
+capacity is preserved for sandbox runtime pods.
 
 ## Apply flow
 

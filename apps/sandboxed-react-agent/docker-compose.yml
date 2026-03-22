@@ -9,15 +9,28 @@ services:
       AGENT_MAX_TOOL_CALLS_PER_TURN: ${AGENT_MAX_TOOL_CALLS_PER_TURN:-4}
       SANDBOX_MODE: ${SANDBOX_MODE:-local}
       SANDBOX_API_URL: ${SANDBOX_API_URL:-http://host.docker.internal:8080}
-      SANDBOX_TEMPLATE_NAME: ${SANDBOX_TEMPLATE_NAME:-python-runtime-template}
+      SANDBOX_TEMPLATE_NAME: ${SANDBOX_TEMPLATE_NAME:-python-runtime-template-small}
       SANDBOX_NAMESPACE: ${SANDBOX_NAMESPACE:-alt-default}
       SANDBOX_SERVER_PORT: ${SANDBOX_SERVER_PORT:-8888}
       SANDBOX_MAX_OUTPUT_CHARS: ${SANDBOX_MAX_OUTPUT_CHARS:-6000}
       SANDBOX_LOCAL_TIMEOUT_SECONDS: ${SANDBOX_LOCAL_TIMEOUT_SECONDS:-20}
+      SANDBOX_EXECUTION_MODEL: ${SANDBOX_EXECUTION_MODEL:-session}
+      SANDBOX_SESSION_IDLE_TTL_SECONDS: ${SANDBOX_SESSION_IDLE_TTL_SECONDS:-1800}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      LOG_COMMAND_PREVIEW_CHARS: ${LOG_COMMAND_PREVIEW_CHARS:-200}
+      TRACING_ENABLED: ${TRACING_ENABLED:-0}
+      TRACING_SAMPLE_RATIO: ${TRACING_SAMPLE_RATIO:-0.1}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-sandboxed-react-agent-backend}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     expose:
       - "8000"
     volumes:
       - backend_data:/app/data
+      - ${HOME}/.kube:/root/.kube:ro
+      - ${HOME}/.config/gcloud:/root/.config/gcloud:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"]
       interval: 10s

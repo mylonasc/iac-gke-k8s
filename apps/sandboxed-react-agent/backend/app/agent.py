@@ -1,4 +1,6 @@
 import asyncio
+import copy
+import inspect
 import json
 import os
 import re
@@ -12,6 +14,7 @@ from langgraph.graph import END, StateGraph
 from openai import AsyncOpenAI
 
 from .asset_manager import AssetManager
+from .sandbox_lifecycle import SandboxLifecycleService
 from .sandbox_manager import SandboxManager
 from .session_store import SessionStore
 
@@ -20,6 +23,7 @@ SYSTEM_PROMPT = (
     "You are a helpful coding agent. "
     "When the user asks to run code or inspect runtime behavior, prefer tools. "
     "Keep responses concise and include key findings from tool outputs. "
+    "When writing math in markdown, always use dollar-delimited LaTeX: $...$ for inline and $$...$$ for blocks; never use \\( ... \\) or \\[ ... \\]. "
     "For simple computations, run one tool call at most, then provide the final answer. "
     "When producing files or images in python/shell tools, you MUST call expose_asset('path/to/file') "
     "inside sandbox_exec_python before finishing. If you save a plot/file and do not expose it, "
@@ -102,6 +106,8 @@ class AgentGraphState(TypedDict):
 
 
 class SandboxedReactAgent:
+    """Main orchestration layer for model calls, tools, and session state."""
+
     def __init__(self) -> None:
         self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
         self.max_tool_calls_per_turn = int(
@@ -110,10 +116,26 @@ class SandboxedReactAgent:
         self.async_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         self.sandbox_manager = SandboxManager()
         self.session_store = SessionStore()
+        self.sandbox_lifecycle = SandboxLifecycleService(
+            sandbox_manager=self.sandbox_manager,
+            session_store=self.session_store,
+        )
         self.asset_manager = AssetManager(self.session_store)
         self.sessions: dict[str, SessionState] = {}
+        self._tool_event_listener: Any = None
         self._agent_graph = self._build_agent_graph()
         self._load_sessions_from_store()
+
+    async def _notify_tool_event(self, event: dict[str, Any]) -> None:
+        listener = self._tool_event_listener
+        if listener is None:
+            return
+        try:
+            maybe = listener(event)
+            if inspect.isawaitable(maybe):
+                await maybe
+        except Exception:
+            return
 
     def _session_to_dict(self, session: SessionState) -> dict[str, Any]:
         return {
@@ -173,7 +195,7 @@ class SandboxedReactAgent:
     ) -> None:
         state_messages = controller.state.get("messages") if controller.state else None
         if isinstance(state_messages, list):
-            session.ui_messages = state_messages
+            session.ui_messages = copy.deepcopy(state_messages)
 
     def _finalize_assistant_message_status(
         self, controller: RunController, assistant_index: int | None
@@ -288,6 +310,59 @@ class SandboxedReactAgent:
             }
         )
 
+    def _ensure_tool_parts_persisted(
+        self, assistant_message: dict[str, Any], tool_events: list[dict[str, Any]]
+    ) -> None:
+        content = assistant_message.get("content")
+        if not isinstance(content, list):
+            return
+
+        existing_tool_ids = {
+            str(part.get("toolCallId") or "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "tool-call"
+        }
+
+        existing_images = {
+            str(part.get("image") or "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "image"
+        }
+
+        for event in tool_events:
+            tool_call_id = str(event.get("tool_call_id") or "")
+            tool_name = str(event.get("tool_name") or "tool")
+            args_text = str(event.get("args_text") or "{}")
+            parsed_args = (
+                event.get("args") if isinstance(event.get("args"), dict) else {}
+            )
+            parsed_result = event.get("result")
+            is_error = bool(event.get("is_error"))
+
+            if tool_call_id and tool_call_id not in existing_tool_ids:
+                content.append(
+                    {
+                        "type": "tool-call",
+                        "toolCallId": tool_call_id,
+                        "toolName": tool_name,
+                        "argsText": args_text,
+                        "args": parsed_args,
+                        "result": parsed_result,
+                        **({"isError": True} if is_error else {}),
+                    }
+                )
+                existing_tool_ids.add(tool_call_id)
+
+            for asset in event.get("stored_assets", []) or []:
+                view_url = str(asset.get("view_url") or "")
+                if (
+                    view_url
+                    and str(asset.get("mime_type", "")).startswith("image/")
+                    and view_url not in existing_images
+                ):
+                    content.append({"type": "image", "image": view_url})
+                    existing_images.add(view_url)
+
     async def _stream_text_to_ui(
         self,
         controller: RunController,
@@ -304,10 +379,13 @@ class SandboxedReactAgent:
             await asyncio.sleep(delay_seconds)
 
     def get_runtime_config(self) -> dict[str, Any]:
+        """Return current model and sandbox runtime configuration."""
+        sandbox_config = self.sandbox_manager.get_config()
+        sandbox_config.update(self.sandbox_lifecycle.get_config())
         return {
             "model": self.model,
             "max_tool_calls_per_turn": self.max_tool_calls_per_turn,
-            "sandbox": self.sandbox_manager.get_config(),
+            "sandbox": sandbox_config,
         }
 
     def update_runtime_config(
@@ -321,6 +399,8 @@ class SandboxedReactAgent:
         sandbox_server_port: int | None = None,
         sandbox_max_output_chars: int | None = None,
         sandbox_local_timeout_seconds: int | None = None,
+        sandbox_execution_model: str | None = None,
+        sandbox_session_idle_ttl_seconds: int | None = None,
     ) -> dict[str, Any]:
         if model is not None:
             self.model = model
@@ -337,6 +417,10 @@ class SandboxedReactAgent:
             server_port=sandbox_server_port,
             max_output_chars=sandbox_max_output_chars,
             local_timeout_seconds=sandbox_local_timeout_seconds,
+        )
+        self.sandbox_lifecycle.update_config(
+            execution_model=sandbox_execution_model,
+            session_idle_ttl_seconds=sandbox_session_idle_ttl_seconds,
         )
 
         return self.get_runtime_config()
@@ -368,17 +452,39 @@ class SandboxedReactAgent:
         name: str,
         arguments_json: str,
     ) -> tuple[str, list[dict[str, Any]]]:
-        parsed = json.loads(arguments_json or "{}")
+        """Execute a tool call and return payload plus stored asset metadata."""
+        try:
+            parsed = json.loads(arguments_json or "{}")
+        except json.JSONDecodeError as exc:
+            return (
+                self._tool_error_output(
+                    tool_name=name,
+                    error=f"Invalid tool arguments JSON: {exc.msg}",
+                ),
+                [],
+            )
+
+        if not isinstance(parsed, dict):
+            return (
+                self._tool_error_output(
+                    tool_name=name,
+                    error="Invalid tool arguments payload type",
+                ),
+                [],
+            )
+
         result = None
         if name == "sandbox_exec_python":
             code = parsed.get("code", "")
-            result = self.sandbox_manager.exec_python(code)
+            result = self.sandbox_lifecycle.exec_python(session_id, code)
         elif name == "sandbox_exec_shell":
             command = parsed.get("command", "")
-            result = self.sandbox_manager.exec_shell(command)
+            result = self.sandbox_lifecycle.exec_shell(session_id, command)
         else:
             return (
-                json.dumps({"ok": False, "error": f"Unsupported tool: {name}"}),
+                self._tool_error_output(
+                    tool_name=name, error=f"Unsupported tool: {name}"
+                ),
                 [],
             )
 
@@ -402,7 +508,10 @@ class SandboxedReactAgent:
             "ok": result.ok,
             "stdout": result.stdout,
             "stderr": result.stderr,
+            "exit_code": result.exit_code,
             "error": result.error,
+            "lease_id": result.lease_id,
+            "claim_name": result.claim_name,
             "assets": [
                 {
                     "asset_id": asset["asset_id"],
@@ -415,6 +524,22 @@ class SandboxedReactAgent:
             ],
         }
         return json.dumps(payload, ensure_ascii=True), stored_assets
+
+    def _tool_error_output(self, *, tool_name: str, error: str) -> str:
+        return json.dumps(
+            {
+                "tool": tool_name,
+                "ok": False,
+                "stdout": "",
+                "stderr": "",
+                "exit_code": None,
+                "error": error,
+                "lease_id": None,
+                "claim_name": None,
+                "assets": [],
+            },
+            ensure_ascii=True,
+        )
 
     async def _run_tool_async(
         self,
@@ -444,13 +569,91 @@ class SandboxedReactAgent:
             temperature=0.2,
         )
 
+    async def _create_completion_streaming_async(
+        self, messages: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        stream = await self.async_client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            tools=TOOLS,
+            tool_choice="auto",
+            temperature=0.2,
+            stream=True,
+        )
+
+        text_chunks: list[str] = []
+        tool_calls_by_index: dict[int, dict[str, Any]] = {}
+
+        async for chunk in stream:
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            delta = getattr(choices[0], "delta", None)
+            if delta is None:
+                continue
+
+            delta_text = getattr(delta, "content", None)
+            if isinstance(delta_text, str) and delta_text:
+                text_chunks.append(delta_text)
+                await self._notify_tool_event(
+                    {
+                        "phase": "model_token",
+                        "text": delta_text,
+                    }
+                )
+
+            for tc in getattr(delta, "tool_calls", None) or []:
+                index = int(getattr(tc, "index", 0) or 0)
+                entry = tool_calls_by_index.setdefault(
+                    index,
+                    {
+                        "id": "",
+                        "type": "function",
+                        "function": {"name": "", "arguments": ""},
+                    },
+                )
+
+                tc_id = getattr(tc, "id", None)
+                if isinstance(tc_id, str) and tc_id:
+                    entry["id"] = tc_id
+
+                tc_type = getattr(tc, "type", None)
+                if isinstance(tc_type, str) and tc_type:
+                    entry["type"] = tc_type
+
+                fn = getattr(tc, "function", None)
+                if fn is None:
+                    continue
+                fn_name = getattr(fn, "name", None)
+                if isinstance(fn_name, str) and fn_name:
+                    entry["function"]["name"] += fn_name
+                fn_args = getattr(fn, "arguments", None)
+                if isinstance(fn_args, str) and fn_args:
+                    entry["function"]["arguments"] += fn_args
+
+        return {
+            "content": "".join(text_chunks),
+            "tool_calls": [
+                tool_calls_by_index[index]
+                for index in sorted(tool_calls_by_index.keys())
+            ],
+        }
+
     async def _graph_model_node(self, state: AgentGraphState) -> AgentGraphState:
-        completion = await self._create_completion_async(state["messages"])
-        assistant_message = completion.choices[0].message
-        tool_calls = assistant_message.tool_calls or []
+        tool_calls: list[Any] = []
+        final_text = ""
+
+        if self._tool_event_listener is not None:
+            streamed = await self._create_completion_streaming_async(state["messages"])
+            final_text = str(streamed.get("content") or "")
+            tool_calls = streamed.get("tool_calls") or []
+        else:
+            completion = await self._create_completion_async(state["messages"])
+            assistant_message = completion.choices[0].message
+            final_text = assistant_message.content or ""
+            tool_calls = assistant_message.tool_calls or []
 
         if not tool_calls:
-            final_text = assistant_message.content or ""
             return {
                 **state,
                 "messages": state["messages"]
@@ -461,14 +664,29 @@ class SandboxedReactAgent:
 
         assistant_payload = {
             "role": "assistant",
-            "content": assistant_message.content or "",
+            "content": final_text,
             "tool_calls": [
                 {
-                    "id": tc.id,
-                    "type": "function",
+                    "id": (
+                        tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", "")
+                    ),
+                    "type": (
+                        tc.get("type")
+                        if isinstance(tc, dict)
+                        else getattr(tc, "type", "function")
+                    )
+                    or "function",
                     "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
+                        "name": (
+                            (tc.get("function") or {}).get("name")
+                            if isinstance(tc, dict)
+                            else getattr(getattr(tc, "function", None), "name", "")
+                        ),
+                        "arguments": (
+                            (tc.get("function") or {}).get("arguments")
+                            if isinstance(tc, dict)
+                            else getattr(getattr(tc, "function", None), "arguments", "")
+                        ),
                     },
                 }
                 for tc in tool_calls
@@ -490,7 +708,7 @@ class SandboxedReactAgent:
         error_text = state.get("error", "")
         final_reply = state.get("final_reply", "")
 
-        for tc in pending_tool_calls:
+        for idx, tc in enumerate(pending_tool_calls):
             tool_name = tc.get("function", {}).get("name", "")
             args_text = tc.get("function", {}).get("arguments", "{}")
             tool_call_id = tc.get("id") or f"tool_{uuid.uuid4().hex}"
@@ -499,14 +717,68 @@ class SandboxedReactAgent:
                 limit_reached = True
                 error_text = "Tool-calling loop exhausted max tool calls"
                 final_reply = "I hit the tool-calling safety limit for this turn."
+                for skipped_tc in pending_tool_calls[idx:]:
+                    skipped_tool = skipped_tc.get("function", {}).get("name", "")
+                    skipped_args = skipped_tc.get("function", {}).get("arguments", "{}")
+                    skipped_id = skipped_tc.get("id") or f"tool_{uuid.uuid4().hex}"
+                    skipped_output = self._tool_error_output(
+                        tool_name=skipped_tool,
+                        error="Skipped because tool-calling safety limit was reached",
+                    )
+                    try:
+                        skipped_result: Any = json.loads(skipped_output)
+                    except json.JSONDecodeError:
+                        skipped_result = skipped_output
+
+                    turn_tool_calls.append(
+                        {
+                            "tool": skipped_tool,
+                            "arguments": skipped_args,
+                            "result": skipped_output,
+                        }
+                    )
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": skipped_id,
+                            "content": skipped_output,
+                        }
+                    )
+                    tool_events.append(
+                        {
+                            "tool_call_id": skipped_id,
+                            "tool_name": skipped_tool,
+                            "args_text": skipped_args,
+                            "args": {},
+                            "result": skipped_result,
+                            "is_error": True,
+                            "stored_assets": [],
+                        }
+                    )
                 break
 
-            output, stored_assets = await self._run_tool_async(
-                session_id=state["session_id"],
-                tool_call_id=tool_call_id,
-                name=tool_name,
-                arguments_json=args_text,
+            await self._notify_tool_event(
+                {
+                    "phase": "start",
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_name,
+                    "args_text": args_text,
+                }
             )
+
+            try:
+                output, stored_assets = await self._run_tool_async(
+                    session_id=state["session_id"],
+                    tool_call_id=tool_call_id,
+                    name=tool_name,
+                    arguments_json=args_text,
+                )
+            except Exception as exc:
+                output = self._tool_error_output(
+                    tool_name=tool_name,
+                    error=f"Tool execution failed: {exc}",
+                )
+                stored_assets = []
             tool_call_count += 1
 
             turn_tool_calls.append(
@@ -540,6 +812,18 @@ class SandboxedReactAgent:
             )
             tool_events.append(
                 {
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_name,
+                    "args_text": args_text,
+                    "args": parsed_args,
+                    "result": parsed_result,
+                    "is_error": is_error,
+                    "stored_assets": stored_assets,
+                }
+            )
+            await self._notify_tool_event(
+                {
+                    "phase": "end",
                     "tool_call_id": tool_call_id,
                     "tool_name": tool_name,
                     "args_text": args_text,
@@ -682,9 +966,7 @@ class SandboxedReactAgent:
 
         session = self.get_or_create_session(existing_session_id)
         controller.state["session_id"] = session.session_id
-
-        if len(controller.state["messages"]) == 0 and session.ui_messages:
-            controller.state["messages"] = session.ui_messages
+        controller.state["messages"] = copy.deepcopy(session.ui_messages)
 
         user_inputs: list[tuple[list[dict[str, str]], str | None]] = []
         for command in payload.commands:
@@ -703,6 +985,8 @@ class SandboxedReactAgent:
 
         for normalized_parts, message_id in user_inputs:
             assistant_index: int | None = None
+            tool_part_index_by_call: dict[str, int] = {}
+            model_text_streamed = False
             try:
                 user_ui_message = self._new_user_ui_message(
                     normalized_parts, message_id=message_id
@@ -749,6 +1033,7 @@ class SandboxedReactAgent:
                 assistant_index = len(session.ui_messages)
                 controller.state["messages"].append(assistant_ui_message)
                 session.ui_messages.append(assistant_ui_message)
+                assert assistant_index is not None
 
                 self._append_tool_update(
                     controller,
@@ -764,9 +1049,109 @@ class SandboxedReactAgent:
                     delay_seconds=0.01,
                 )
 
-                graph_result = await self._run_agent_graph_async(
-                    session.messages, session.session_id
-                )
+                async def _live_tool_listener(event: dict[str, Any]) -> None:
+                    nonlocal model_text_streamed
+                    if assistant_index is None:
+                        return
+                    phase = str(event.get("phase") or "")
+
+                    if phase == "model_token":
+                        token = str(event.get("text") or "")
+                        if token:
+                            controller.state["messages"][assistant_index]["content"][1][
+                                "text"
+                            ] += token
+                            model_text_streamed = True
+                        return
+
+                    tool_name = str(event.get("tool_name") or "tool")
+                    tool_call_id = str(
+                        event.get("tool_call_id") or f"tool_{uuid.uuid4().hex}"
+                    )
+
+                    if phase == "start":
+                        args_text = str(event.get("args_text") or "{}")
+                        part_index = len(
+                            controller.state["messages"][assistant_index]["content"]
+                        )
+                        controller.state["messages"][assistant_index]["content"].append(
+                            {
+                                "type": "tool-call",
+                                "toolCallId": tool_call_id,
+                                "toolName": tool_name,
+                                "argsText": args_text,
+                                "args": {},
+                            }
+                        )
+                        tool_part_index_by_call[tool_call_id] = part_index
+                        self._append_tool_update(
+                            controller,
+                            stage="sandbox",
+                            status="running",
+                            detail=f"Waiting for claim/runtime for {tool_name}",
+                            tool=tool_name,
+                        )
+                        await self._stream_text_to_ui(
+                            controller,
+                            assistant_index=assistant_index,
+                            part_index=0,
+                            text=f"Waiting for sandbox claim/runtime: {tool_name}\n",
+                            delay_seconds=0.01,
+                        )
+                        return
+
+                    if phase != "end":
+                        return
+
+                    part_index = tool_part_index_by_call.get(tool_call_id)
+                    if part_index is not None:
+                        part = controller.state["messages"][assistant_index]["content"][
+                            part_index
+                        ]
+                        part["args"] = (
+                            event.get("args")
+                            if isinstance(event.get("args"), dict)
+                            else {}
+                        )
+                        part["result"] = event.get("result")
+                        if bool(event.get("is_error")):
+                            part["isError"] = True
+
+                    for asset in event.get("stored_assets", []) or []:
+                        if str(asset.get("mime_type", "")).startswith("image/"):
+                            controller.state["messages"][assistant_index][
+                                "content"
+                            ].append({"type": "image", "image": asset["view_url"]})
+
+                    result = event.get("result")
+                    claim_name = ""
+                    if isinstance(result, dict):
+                        claim_name = str(result.get("claim_name") or "")
+
+                    if claim_name:
+                        self._append_tool_update(
+                            controller,
+                            stage="sandbox",
+                            status="completed",
+                            detail=f"Claim ready: {claim_name}",
+                            tool=tool_name,
+                        )
+                        await self._stream_text_to_ui(
+                            controller,
+                            assistant_index=assistant_index,
+                            part_index=0,
+                            text=f"Claim ready: {claim_name}\n",
+                            delay_seconds=0.01,
+                        )
+
+                previous_listener = self._tool_event_listener
+                self._tool_event_listener = _live_tool_listener
+                try:
+                    graph_result = await self._run_agent_graph_async(
+                        session.messages, session.session_id
+                    )
+                finally:
+                    self._tool_event_listener = previous_listener
                 session.messages = graph_result["messages"]
                 tool_events = graph_result.get("tool_events", [])
                 session.tool_calls += len(tool_events)
@@ -785,6 +1170,10 @@ class SandboxedReactAgent:
                     tool_call_id = str(
                         event.get("tool_call_id") or f"tool_{uuid.uuid4().hex}"
                     )
+
+                    if tool_call_id in tool_part_index_by_call:
+                        continue
+
                     args_text = str(event.get("args_text") or "{}")
                     parsed_args = (
                         event.get("args") if isinstance(event.get("args"), dict) else {}
@@ -837,15 +1226,16 @@ class SandboxedReactAgent:
                     assistant_index=assistant_index,
                     part_index=0,
                     text="Generating final response...\n",
-                    delay_seconds=0.01,
+                    delay_seconds=0.001,
                 )
-                await self._stream_text_to_ui(
-                    controller,
-                    assistant_index=assistant_index,
-                    part_index=1,
-                    text=final_text,
-                    delay_seconds=0.008,
-                )
+                if not model_text_streamed:
+                    await self._stream_text_to_ui(
+                        controller,
+                        assistant_index=assistant_index,
+                        part_index=1,
+                        text=final_text,
+                        delay_seconds=0.001,
+                    )
 
                 controller.state["messages"][assistant_index]["status"] = {
                     "type": "complete"
@@ -866,6 +1256,14 @@ class SandboxedReactAgent:
 
                 session.updated_at = _now_iso()
                 self._sync_session_ui_from_controller(session, controller)
+                if assistant_index is not None and 0 <= assistant_index < len(
+                    session.ui_messages
+                ):
+                    assistant_message = session.ui_messages[assistant_index]
+                    if isinstance(assistant_message, dict):
+                        self._ensure_tool_parts_persisted(
+                            assistant_message, tool_events
+                        )
                 self._normalize_session_ui_messages(session)
                 await self._persist_session_async(session)
             except Exception as exc:
@@ -898,6 +1296,7 @@ class SandboxedReactAgent:
                 await self._persist_session_async(session)
 
     def get_state_summary(self) -> dict[str, Any]:
+        """Provide aggregate state information for diagnostics endpoints."""
         return {
             "session_count": len(self.sessions),
             "sessions": [
@@ -919,17 +1318,31 @@ class SandboxedReactAgent:
                 "api_url": self.sandbox_manager.api_url,
                 "template_name": self.sandbox_manager.template_name,
                 "namespace": self.sandbox_manager.namespace,
-                "execution_model": "ephemeral-per-tool-call",
+                "execution_model": self.sandbox_lifecycle.execution_model,
             },
             "runtime_config": self.get_runtime_config(),
         }
 
     def reset_session(self, session_id: str) -> bool:
+        """Reset a session and release any scope-bound sandbox lease."""
         if session_id not in self.sessions:
             return False
+        self.sandbox_lifecycle.release_scope("session", session_id)
         del self.sessions[session_id]
         self.session_store.delete_session(session_id)
         return True
+
+    def list_sandboxes(self) -> list[dict[str, Any]]:
+        """Return active sandbox leases for lifecycle inspection APIs."""
+        return self.sandbox_lifecycle.list_sandboxes()
+
+    def get_sandbox(self, lease_id: str) -> dict[str, Any] | None:
+        """Fetch one sandbox lease by id."""
+        return self.sandbox_lifecycle.get_sandbox(lease_id)
+
+    def release_sandbox(self, lease_id: str) -> bool:
+        """Release an active sandbox lease by id."""
+        return self.sandbox_lifecycle.release_sandbox(lease_id)
 
     def list_sessions(self) -> list[dict[str, Any]]:
         sessions = sorted(
@@ -944,6 +1357,7 @@ class SandboxedReactAgent:
                 "tool_calls": session.tool_calls,
                 "share_id": session.share_id,
                 "preview": self._session_preview(session),
+                "sandbox": self.get_session_sandbox(session.session_id),
             }
             for session in sessions
         ]
@@ -972,6 +1386,37 @@ class SandboxedReactAgent:
             "updated_at": session.updated_at,
             "share_id": session.share_id,
             "messages": session.ui_messages,
+            "sandbox": self.get_session_sandbox(session_id),
+        }
+
+    def get_session_sandbox(self, session_id: str) -> dict[str, Any]:
+        lease = self.sandbox_lifecycle.get_active_scope_lease("session", session_id)
+        if not lease:
+            return {
+                "has_active_lease": False,
+                "has_active_claim": False,
+                "lease_id": None,
+                "claim_name": None,
+                "status": None,
+                "template_name": None,
+                "namespace": None,
+                "created_at": None,
+                "last_used_at": None,
+                "expires_at": None,
+            }
+
+        claim_name = lease.get("claim_name")
+        return {
+            "has_active_lease": True,
+            "has_active_claim": bool(claim_name),
+            "lease_id": lease.get("lease_id"),
+            "claim_name": claim_name,
+            "status": lease.get("status"),
+            "template_name": lease.get("template_name"),
+            "namespace": lease.get("namespace"),
+            "created_at": lease.get("created_at"),
+            "last_used_at": lease.get("last_used_at"),
+            "expires_at": lease.get("expires_at"),
         }
 
     def create_share(self, session_id: str) -> str | None:
@@ -1040,8 +1485,9 @@ class SandboxedReactAgent:
                     args_text = part.get("argsText") or json.dumps(
                         part.get("args", {}), ensure_ascii=True, indent=2
                     )
+                    result_payload = part.get("result", "(pending)")
                     result_text = json.dumps(
-                        part.get("result", "(pending)"), ensure_ascii=True, indent=2
+                        result_payload, ensure_ascii=True, indent=2
                     )
                     lines.extend(
                         [
@@ -1055,6 +1501,29 @@ class SandboxedReactAgent:
                             "",
                         ]
                     )
+
+                    assets = []
+                    if isinstance(result_payload, dict):
+                        maybe_assets = result_payload.get("assets")
+                        if isinstance(maybe_assets, list):
+                            assets = [a for a in maybe_assets if isinstance(a, dict)]
+
+                    if assets:
+                        lines.append("#### Tool assets")
+                        lines.append("")
+                        for asset in assets:
+                            filename = str(asset.get("filename") or "asset")
+                            view_url = str(asset.get("view_url") or "")
+                            download_url = str(asset.get("download_url") or view_url)
+                            mime_type = str(asset.get("mime_type") or "")
+
+                            if view_url and mime_type.startswith("image/"):
+                                lines.append(f"![{filename}]({view_url})")
+                            if download_url:
+                                lines.append(f"- [{filename}]({download_url})")
+                            elif view_url:
+                                lines.append(f"- [{filename}]({view_url})")
+                        lines.append("")
 
             lines.extend(["---", ""])
 

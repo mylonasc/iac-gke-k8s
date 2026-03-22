@@ -20,6 +20,7 @@ if ! kubectl -n "${NAMESPACE}" get secret dockerhub-regcred >/dev/null 2>&1; the
   echo "         Image pulls may fail for private DockerHub images."
 fi
 
+kubectl apply -f "${K8S_DIR}/backend-pvc.yaml"
 kubectl apply -f "${K8S_DIR}/backend-deployment.yaml"
 kubectl apply -f "${K8S_DIR}/backend-service.yaml"
 kubectl apply -f "${K8S_DIR}/backend-sandbox-rbac.yaml"

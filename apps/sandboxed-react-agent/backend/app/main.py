@@ -1,13 +1,18 @@
 import asyncio
+import logging
+import time
+import uuid
 from typing import Any
 
 from assistant_stream import create_run
 from assistant_stream.serialization import DataStreamResponse
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from .agent import SandboxedReactAgent
+from .logging_config import bind_context, configure_logging
+from .tracing import init_tracing
 
 
 class ChatRequest(BaseModel):
@@ -25,6 +30,8 @@ class ConfigUpdateRequest(BaseModel):
     sandbox_server_port: int | None = Field(default=None, ge=1, le=65535)
     sandbox_max_output_chars: int | None = Field(default=None, ge=100, le=100000)
     sandbox_local_timeout_seconds: int | None = Field(default=None, ge=1, le=600)
+    sandbox_execution_model: str | None = None
+    sandbox_session_idle_ttl_seconds: int | None = Field(default=None, ge=1, le=86400)
 
 
 class MessagePart(BaseModel):
@@ -68,20 +75,88 @@ class SessionCreateRequest(BaseModel):
     title: str | None = None
 
 
+class SandboxReleaseResponse(BaseModel):
+    lease_id: str
+    released: bool
+
+
+configure_logging()
+logger = logging.getLogger(__name__)
 agent = SandboxedReactAgent()
 app = FastAPI(title="sandboxed-react-agent-backend", version="0.1.0")
+init_tracing(app)
+
+
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
+    request_start = time.perf_counter()
+    client_ip = request.client.host if request.client else "unknown"
+
+    with bind_context(request_id=request_id):
+        logger.info(
+            "request.start",
+            extra={
+                "event": "request.start",
+                "method": request.method,
+                "path": request.url.path,
+                "client_ip": client_ip,
+                "user_agent": request.headers.get("user-agent", ""),
+            },
+        )
+        try:
+            response = await call_next(request)
+        except Exception:
+            elapsed_ms = int((time.perf_counter() - request_start) * 1000)
+            logger.exception(
+                "request.error",
+                extra={
+                    "event": "request.error",
+                    "method": request.method,
+                    "path": request.url.path,
+                    "duration_ms": elapsed_ms,
+                },
+            )
+            raise
+
+        elapsed_ms = int((time.perf_counter() - request_start) * 1000)
+        response.headers["x-request-id"] = request_id
+        logger.info(
+            "request.end",
+            extra={
+                "event": "request.end",
+                "method": request.method,
+                "path": request.url.path,
+                "status_code": response.status_code,
+                "duration_ms": elapsed_ms,
+            },
+        )
+        return response
 
 
 @app.get("/api/health")
-def health() -> dict[str, str]:
+async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
 @app.post("/api/chat")
 async def chat(payload: ChatRequest) -> dict:
-    return await asyncio.to_thread(
-        agent.chat, user_message=payload.message, session_id=payload.session_id
+    with bind_context(session_id=payload.session_id):
+        result = await asyncio.to_thread(
+            agent.chat, user_message=payload.message, session_id=payload.session_id
+        )
+
+    logger.info(
+        "chat.completed",
+        extra={
+            "event": "chat.completed",
+            "session_id": result.get("session_id"),
+            "has_error": bool(result.get("error")),
+            "tool_call_count": len(result.get("tool_calls") or []),
+            "reply_len": len(result.get("reply") or ""),
+        },
     )
+    return result
 
 
 @app.post("/api/assistant")
@@ -106,7 +181,7 @@ def get_config() -> dict:
 @app.post("/api/config")
 def update_config(payload: ConfigUpdateRequest) -> dict:
     try:
-        return agent.update_runtime_config(
+        result = agent.update_runtime_config(
             model=payload.model,
             max_tool_calls_per_turn=payload.max_tool_calls_per_turn,
             sandbox_mode=payload.sandbox_mode,
@@ -116,8 +191,26 @@ def update_config(payload: ConfigUpdateRequest) -> dict:
             sandbox_server_port=payload.sandbox_server_port,
             sandbox_max_output_chars=payload.sandbox_max_output_chars,
             sandbox_local_timeout_seconds=payload.sandbox_local_timeout_seconds,
+            sandbox_execution_model=payload.sandbox_execution_model,
+            sandbox_session_idle_ttl_seconds=payload.sandbox_session_idle_ttl_seconds,
         )
+        logger.info(
+            "config.updated",
+            extra={
+                "event": "config.updated",
+                "updated_fields": [
+                    key
+                    for key, value in payload.model_dump().items()
+                    if value is not None
+                ],
+            },
+        )
+        return result
     except ValueError as exc:
+        logger.warning(
+            "config.update_failed",
+            extra={"event": "config.update_failed", "error": str(exc)},
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -152,6 +245,17 @@ def get_session(session_id: str) -> dict[str, Any]:
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     return session
+
+
+@app.get("/api/sessions/{session_id}/sandbox")
+def get_session_sandbox(session_id: str) -> dict[str, Any]:
+    session = agent.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {
+        "session_id": session_id,
+        "sandbox": agent.get_session_sandbox(session_id),
+    }
 
 
 @app.post("/api/sessions/{session_id}/share")
@@ -200,3 +304,27 @@ def download_asset(asset_id: str):
         media_type=asset["mime_type"],
         filename=asset["filename"],
     )
+
+
+@app.get("/api/sandboxes")
+def list_sandboxes() -> dict[str, Any]:
+    """List active sandbox lease records."""
+    return {"sandboxes": agent.list_sandboxes()}
+
+
+@app.get("/api/sandboxes/{lease_id}")
+def get_sandbox(lease_id: str) -> dict[str, Any]:
+    """Fetch one sandbox lease record by id."""
+    sandbox = agent.get_sandbox(lease_id)
+    if not sandbox:
+        raise HTTPException(status_code=404, detail="Sandbox lease not found")
+    return sandbox
+
+
+@app.post("/api/sandboxes/{lease_id}/release", response_model=SandboxReleaseResponse)
+def release_sandbox(lease_id: str) -> SandboxReleaseResponse:
+    """Release a currently active sandbox lease."""
+    released = agent.release_sandbox(lease_id)
+    if not released:
+        raise HTTPException(status_code=404, detail="Sandbox lease not found")
+    return SandboxReleaseResponse(lease_id=lease_id, released=True)

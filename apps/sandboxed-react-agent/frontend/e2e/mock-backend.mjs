@@ -48,7 +48,7 @@ const server = http.createServer(async (req, res) => {
       sandbox: {
         mode: "local",
         api_url: "",
-        template_name: "python-runtime-template",
+        template_name: "python-runtime-template-small",
         namespace: "alt-default",
         server_port: 8888,
         max_output_chars: 6000,
@@ -66,7 +66,7 @@ const server = http.createServer(async (req, res) => {
       sandbox: {
         mode: body.sandbox_mode || "local",
         api_url: body.sandbox_api_url || "",
-        template_name: body.sandbox_template_name || "python-runtime-template",
+        template_name: body.sandbox_template_name || "python-runtime-template-small",
         namespace: body.sandbox_namespace || "alt-default",
         server_port: Number(body.sandbox_server_port || 8888),
         max_output_chars: Number(body.sandbox_max_output_chars || 6000),

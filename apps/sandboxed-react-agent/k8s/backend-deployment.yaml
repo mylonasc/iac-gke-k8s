@@ -21,11 +21,24 @@ spec:
         app: sandboxed-react-agent-backend
     spec:
       serviceAccountName: default-ksa
+      tolerations:
+        - key: purpose
+          operator: Equal
+          value: general-apps
+          effect: NoSchedule
+        - key: purpose
+          operator: Equal
+          value: general-apps-small
+          effect: NoSchedule
+        - key: cloud.google.com/gke-spot
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
       imagePullSecrets:
         - name: dockerhub-regcred
       containers:
         - name: backend
-          image: docker.io/mylonasc/magarathea:sandboxed-react-agent-backend-0.3.0
+          image: docker.io/mylonasc/magarathea:sandboxed-react-agent-backend-0.4.6
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
@@ -39,32 +52,82 @@ spec:
               value: gpt-4o-mini
             - name: SANDBOX_MODE
               value: cluster
+            - name: SESSION_STORE_PATH
+              value: /app/data/sessions.db
+            - name: ASSET_STORE_PATH
+              value: /app/data/assets
             - name: SANDBOX_API_URL
               value: http://sandbox-router-svc.alt-default.svc.cluster.local:8080
             - name: SANDBOX_TEMPLATE_NAME
-              value: python-runtime-template
+              value: python-runtime-template-small
             - name: SANDBOX_NAMESPACE
               value: alt-default
+            - name: SANDBOX_EXECUTION_MODEL
+              value: session
+            - name: SANDBOX_SESSION_IDLE_TTL_SECONDS
+              value: "1800"
             - name: AGENT_MAX_TOOL_CALLS_PER_TURN
               value: "4"
+            - name: LOG_LEVEL
+              value: INFO
+            - name: LOG_FORMAT
+              value: json
+            - name: LOG_COMMAND_PREVIEW_CHARS
+              value: "200"
+            - name: TRACING_ENABLED
+              value: "0"
+            - name: TRACING_SAMPLE_RATIO
+              value: "0.1"
+            - name: OTEL_SERVICE_NAME
+              value: sandboxed-react-agent-backend
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: ""
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
           readinessProbe:
             httpGet:
               path: /api/health
               port: 8000
-            initialDelaySeconds: 5
+            initialDelaySeconds: 0
             periodSeconds: 10
-            timeoutSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 24
           livenessProbe:
             httpGet:
               path: /api/health
               port: 8000
-            initialDelaySeconds: 15
+            initialDelaySeconds: 0
             periodSeconds: 20
-            timeoutSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
           resources:
             requests:
-              cpu: 250m
-              memory: 256Mi
+              cpu: 100m
+              memory: 128Mi
             limits:
               cpu: "1"
               memory: 1Gi
+          volumeMounts:
+            - name: app-data
+              mountPath: /app/data
+      volumes:
+        - name: app-data
+          persistentVolumeClaim:
+            claimName: sandboxed-react-agent-backend-data

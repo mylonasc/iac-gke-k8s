@@ -100,6 +100,16 @@ class CreateClaimRequest(BaseModel):
     claim_name: str | None = None
 
 
+class WarmPoolUpsertRequest(BaseModel):
+    warm_pool_name: str = Field(default="python-sandbox-warmpool", min_length=1)
+    template_name: str = Field(default="python-runtime-template", min_length=1)
+    replicas: int = Field(default=1, ge=0, le=5)
+
+
+class WarmPoolScaleRequest(BaseModel):
+    replicas: int = Field(ge=0, le=5)
+
+
 settings = Settings()
 
 
@@ -142,6 +152,12 @@ mock_state: dict[str, Any] = {
     },
     "claims": [],
     "sandboxes": [],
+    "warm_pools": {
+        "python-sandbox-warmpool": {
+            "replicas": 2,
+            "template": "python-runtime-template",
+        }
+    },
 }
 
 app = FastAPI(title="alt-default-ops-console", version="0.1.0")
@@ -405,9 +421,86 @@ def _pod_status(pod: Any) -> dict[str, Any]:
     }
 
 
+def _warm_pool_status(warm_pool: dict[str, Any]) -> dict[str, Any]:
+    metadata = warm_pool.get("metadata") or {}
+    spec = warm_pool.get("spec") or {}
+    status = warm_pool.get("status") or {}
+    template_ref = spec.get("sandboxTemplateRef") or {}
+    return {
+        "name": metadata.get("name"),
+        "replicas": int(spec.get("replicas") or 0),
+        "template": template_ref.get("name") or "",
+        "ready": int(status.get("readyReplicas") or 0),
+    }
+
+
+def _node_ready(node: Any) -> bool:
+    for condition in node.status.conditions or []:
+        if condition.type == "Ready":
+            return str(condition.status).lower() == "true"
+    return False
+
+
+def _node_instance_type(node: Any) -> str:
+    labels = node.metadata.labels or {}
+    return (
+        labels.get("node.kubernetes.io/instance-type")
+        or labels.get("beta.kubernetes.io/instance-type")
+        or "unknown"
+    )
+
+
+def _node_pool(node: Any) -> str:
+    labels = node.metadata.labels or {}
+    return labels.get("cloud.google.com/gke-nodepool") or "unknown"
+
+
+def _node_summary(nodes: list[dict[str, Any]]) -> dict[str, Any]:
+    type_counts: dict[str, int] = {}
+    pool_counts: dict[str, int] = {}
+    ready_count = 0
+    for node in nodes:
+        if node.get("ready"):
+            ready_count += 1
+        node_type = str(node.get("instance_type") or "unknown")
+        node_pool = str(node.get("node_pool") or "unknown")
+        type_counts[node_type] = type_counts.get(node_type, 0) + 1
+        pool_counts[node_pool] = pool_counts.get(node_pool, 0) + 1
+    return {
+        "total": len(nodes),
+        "ready": ready_count,
+        "types": [
+            {"name": name, "count": count}
+            for name, count in sorted(type_counts.items(), key=lambda x: x[0])
+        ],
+        "pools": [
+            {"name": name, "count": count}
+            for name, count in sorted(pool_counts.items(), key=lambda x: x[0])
+        ],
+    }
+
+
 def _overview_data() -> dict[str, Any]:
     ns = settings.target_namespace
     if use_mock_cluster:
+        mock_nodes = [
+            {
+                "name": "mock-node-local-a",
+                "ready": True,
+                "instance_type": "e2-standard-4",
+                "node_pool": "default-pool",
+                "pod_count": 2,
+                "phase_counts": {"Running": 2},
+            },
+            {
+                "name": "mock-node-local-b",
+                "ready": True,
+                "instance_type": "e2-standard-2",
+                "node_pool": "gvisor-sandbox-pool",
+                "pod_count": 1,
+                "phase_counts": {"Running": 1},
+            },
+        ]
         return {
             "cluster_mode": "mock",
             "namespace": ns,
@@ -430,8 +523,23 @@ def _overview_data() -> dict[str, Any]:
             "services": ["alt-default-ops-console"],
             "sandboxclaims": sorted(mock_state["claims"]),
             "sandboxes": sorted(mock_state["sandboxes"]),
-            "sandboxwarmpools": ["python-sandbox-warmpool"],
-            "sandboxtemplates": ["python-runtime-template"],
+            "sandboxwarmpools": [
+                {
+                    "name": name,
+                    "replicas": int(state.get("replicas") or 0),
+                    "template": str(state.get("template") or ""),
+                    "ready": int(state.get("replicas") or 0),
+                }
+                for name, state in sorted(mock_state["warm_pools"].items())
+            ],
+            "sandboxtemplates": [
+                "python-runtime-template-small",
+                "python-runtime-template",
+                "python-runtime-template-large",
+                "python-runtime-template-pydata",
+            ],
+            "nodes": mock_nodes,
+            "node_summary": _node_summary(mock_nodes),
         }
 
     if not apps_api or not core_api or not custom_api:
@@ -440,6 +548,10 @@ def _overview_data() -> dict[str, Any]:
     deployments = apps_api.list_namespaced_deployment(namespace=ns).items
     pods = core_api.list_namespaced_pod(namespace=ns).items
     services = core_api.list_namespaced_service(namespace=ns).items
+    try:
+        nodes = core_api.list_node().items
+    except ApiException:
+        nodes = []
 
     claims = custom_api.list_namespaced_custom_object(
         group="extensions.agents.x-k8s.io",
@@ -466,6 +578,40 @@ def _overview_data() -> dict[str, Any]:
         plural="sandboxtemplates",
     ).get("items", [])
 
+    pod_count_by_node: dict[str, int] = {}
+    phase_counts_by_node: dict[str, dict[str, int]] = {}
+    for pod in pods:
+        node_name = str(pod.spec.node_name or "unscheduled")
+        phase = str(pod.status.phase or "Unknown")
+        pod_count_by_node[node_name] = pod_count_by_node.get(node_name, 0) + 1
+        phase_counts = phase_counts_by_node.setdefault(node_name, {})
+        phase_counts[phase] = phase_counts.get(phase, 0) + 1
+
+    node_rows = [
+        {
+            "name": node.metadata.name,
+            "ready": _node_ready(node),
+            "instance_type": _node_instance_type(node),
+            "node_pool": _node_pool(node),
+            "pod_count": int(pod_count_by_node.get(node.metadata.name, 0)),
+            "phase_counts": phase_counts_by_node.get(node.metadata.name, {}),
+        }
+        for node in nodes
+    ]
+
+    if not node_rows and pod_count_by_node:
+        node_rows = [
+            {
+                "name": name,
+                "ready": False,
+                "instance_type": "unknown",
+                "node_pool": "unknown",
+                "pod_count": int(count),
+                "phase_counts": phase_counts_by_node.get(name, {}),
+            }
+            for name, count in sorted(pod_count_by_node.items(), key=lambda x: x[0])
+        ]
+
     return {
         "cluster_mode": "live",
         "namespace": ns,
@@ -476,8 +622,15 @@ def _overview_data() -> dict[str, Any]:
         "services": sorted((s.metadata.name for s in services)),
         "sandboxclaims": [c.get("metadata", {}).get("name") for c in claims],
         "sandboxes": [s.get("metadata", {}).get("name") for s in sandboxes],
-        "sandboxwarmpools": [w.get("metadata", {}).get("name") for w in warm_pools],
-        "sandboxtemplates": [t.get("metadata", {}).get("name") for t in templates],
+        "sandboxwarmpools": sorted(
+            (_warm_pool_status(w) for w in warm_pools),
+            key=lambda x: str(x.get("name") or ""),
+        ),
+        "sandboxtemplates": sorted(
+            [t.get("metadata", {}).get("name") for t in templates if t.get("metadata")]
+        ),
+        "nodes": sorted(node_rows, key=lambda x: str(x.get("name") or "")),
+        "node_summary": _node_summary(node_rows),
     }
 
 
@@ -714,6 +867,135 @@ async def delete_sandbox_claim(
             ) from exc
         raise HTTPException(status_code=exc.status or 500, detail=exc.body) from exc
     return {"deleted": claim_name}
+
+
+@app.post("/api/sandboxwarmpools")
+async def upsert_sandbox_warm_pool(
+    payload: WarmPoolUpsertRequest,
+    _: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
+    ns = settings.target_namespace
+    warm_pool_name = payload.warm_pool_name.strip()
+
+    if use_mock_cluster:
+        mock_state["warm_pools"][warm_pool_name] = {
+            "replicas": payload.replicas,
+            "template": payload.template_name,
+        }
+        return {
+            "warm_pool": warm_pool_name,
+            "replicas": payload.replicas,
+            "template": payload.template_name,
+            "created": True,
+        }
+
+    if not custom_api:
+        raise HTTPException(status_code=500, detail="Kubernetes API is not initialized")
+
+    body = {
+        "apiVersion": "extensions.agents.x-k8s.io/v1alpha1",
+        "kind": "SandboxWarmPool",
+        "metadata": {"name": warm_pool_name, "namespace": ns},
+        "spec": {
+            "replicas": payload.replicas,
+            "sandboxTemplateRef": {"name": payload.template_name},
+        },
+    }
+
+    created = False
+    try:
+        custom_api.get_namespaced_custom_object(
+            group="extensions.agents.x-k8s.io",
+            version="v1alpha1",
+            namespace=ns,
+            plural="sandboxwarmpools",
+            name=warm_pool_name,
+        )
+    except ApiException as exc:
+        if exc.status == 404:
+            try:
+                custom_api.create_namespaced_custom_object(
+                    group="extensions.agents.x-k8s.io",
+                    version="v1alpha1",
+                    namespace=ns,
+                    plural="sandboxwarmpools",
+                    body=body,
+                )
+                created = True
+            except ApiException as create_exc:
+                raise HTTPException(
+                    status_code=create_exc.status or 500, detail=create_exc.body
+                ) from create_exc
+        else:
+            raise HTTPException(status_code=exc.status or 500, detail=exc.body) from exc
+
+    if not created:
+        patch_body = {
+            "spec": {
+                "replicas": payload.replicas,
+                "sandboxTemplateRef": {"name": payload.template_name},
+            }
+        }
+        try:
+            custom_api.patch_namespaced_custom_object(
+                group="extensions.agents.x-k8s.io",
+                version="v1alpha1",
+                namespace=ns,
+                plural="sandboxwarmpools",
+                name=warm_pool_name,
+                body=patch_body,
+            )
+        except ApiException as exc:
+            raise HTTPException(status_code=exc.status or 500, detail=exc.body) from exc
+
+    return {
+        "warm_pool": warm_pool_name,
+        "replicas": payload.replicas,
+        "template": payload.template_name,
+        "created": created,
+    }
+
+
+@app.post("/api/sandboxwarmpools/{warm_pool_name}/scale")
+async def scale_sandbox_warm_pool(
+    warm_pool_name: str,
+    payload: WarmPoolScaleRequest,
+    _: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
+    ns = settings.target_namespace
+
+    if use_mock_cluster:
+        warm_pool = mock_state["warm_pools"].get(warm_pool_name)
+        if not warm_pool:
+            raise HTTPException(status_code=404, detail="SandboxWarmPool not found")
+        warm_pool["replicas"] = payload.replicas
+        return {
+            "warm_pool": warm_pool_name,
+            "replicas": payload.replicas,
+            "template": str(warm_pool.get("template") or ""),
+        }
+
+    if not custom_api:
+        raise HTTPException(status_code=500, detail="Kubernetes API is not initialized")
+
+    patch_body = {"spec": {"replicas": payload.replicas}}
+    try:
+        custom_api.patch_namespaced_custom_object(
+            group="extensions.agents.x-k8s.io",
+            version="v1alpha1",
+            namespace=ns,
+            plural="sandboxwarmpools",
+            name=warm_pool_name,
+            body=patch_body,
+        )
+    except ApiException as exc:
+        if exc.status == 404:
+            raise HTTPException(
+                status_code=404, detail="SandboxWarmPool not found"
+            ) from exc
+        raise HTTPException(status_code=exc.status or 500, detail=exc.body) from exc
+
+    return {"warm_pool": warm_pool_name, "replicas": payload.replicas}
 
 
 @app.post("/api/deployments/{deployment_name}/scale")

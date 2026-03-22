@@ -427,6 +427,10 @@
   margin-top: 0.3rem;
 }
 
+.tool-context {
+  margin-top: 0.35rem;
+}
+
 .tool-block strong {
   font-size: 0.8rem;
   color: #334155;

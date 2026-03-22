@@ -16,3 +16,7 @@ backend/**/*.py[cod]
 
 # Docker Compose local override
 docker-compose.override.yml
+
+# Local helper state
+.sandbox-router-port-forward.pid
+.sandbox-router-port-forward.log

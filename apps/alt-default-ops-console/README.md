@@ -5,8 +5,12 @@ FastAPI app to inspect and control selected resources in namespace `alt-default`
 It provides:
 
 - simple web view for deployments, pods, and sandbox claims
+- template-safe dropdowns for sandbox claim and warm-pool actions
+- pod filtering by node and phase/status
+- node inventory with ready count and instance-type breakdown
 - API endpoints to scale managed deployments up/down
 - API endpoints to create/delete Agent Sandbox claims
+- API endpoints to create/scale Agent Sandbox warm pools
 - JWT validation (signature + issuer + audience + expiry) before allowing access
 
 ## What it controls
@@ -17,7 +21,8 @@ It provides:
   - `sandbox-router-deployment`
 - Agent Sandbox resources in `alt-default`:
   - `SandboxClaim` create/delete
-  - `Sandbox`, `SandboxTemplate`, `SandboxWarmPool` read/list
+  - `SandboxWarmPool` create/scale/read
+  - `Sandbox`, `SandboxTemplate` read/list
 
 ## Files
 
@@ -142,6 +147,26 @@ Delete sandbox claim:
 curl -X DELETE \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
   "https://magarathea.ddns.net/alt-default-ops/api/sandboxclaims/<claim-name>"
+```
+
+Upsert warm pool:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"warm_pool_name":"python-sandbox-warmpool","template_name":"python-runtime-template","replicas":3}' \
+  "https://magarathea.ddns.net/alt-default-ops/api/sandboxwarmpools"
+```
+
+Scale warm pool:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"replicas":5}' \
+  "https://magarathea.ddns.net/alt-default-ops/api/sandboxwarmpools/python-sandbox-warmpool/scale"
 ```
 
 ## Remove

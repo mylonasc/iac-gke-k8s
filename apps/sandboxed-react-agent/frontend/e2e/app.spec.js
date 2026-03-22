@@ -22,7 +22,7 @@ test.beforeEach(async ({ page }) => {
           sandbox: {
             mode: "local",
             api_url: "",
-            template_name: "python-runtime-template",
+            template_name: "python-runtime-template-small",
             namespace: "alt-default",
             server_port: 8888,
             max_output_chars: 6000,
@@ -42,7 +42,7 @@ test.beforeEach(async ({ page }) => {
         sandbox: {
           mode: "local",
           api_url: "",
-          template_name: "python-runtime-template",
+          template_name: "python-runtime-template-small",
           namespace: "alt-default",
           server_port: 8888,
           max_output_chars: 6000,

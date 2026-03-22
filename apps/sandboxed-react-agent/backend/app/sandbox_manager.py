@@ -1,37 +1,61 @@
 import json
+import logging
 import os
 import shlex
 import subprocess
 import sys
 import textwrap
+import time
 from dataclasses import dataclass
 from typing import Sequence
 
 from k8s_agent_sandbox import SandboxClient
 
+from .logging_config import get_request_id
+
+
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class SandboxExecutionResult:
+    """Normalized execution result shared across local and cluster runtimes."""
+
     tool_name: str
     ok: bool
     stdout: str
     stderr: str
+    exit_code: int | None = None
     error: str | None = None
     assets: list[dict[str, str]] | None = None
+    lease_id: str | None = None
+    claim_name: str | None = None
 
     def as_tool_payload(self) -> str:
+        """Serialize the result into a stable JSON payload for tool responses."""
         payload = {
             "tool": self.tool_name,
             "ok": self.ok,
             "stdout": self.stdout,
             "stderr": self.stderr,
+            "exit_code": self.exit_code,
             "error": self.error,
             "assets": self.assets or [],
+            "lease_id": self.lease_id,
+            "claim_name": self.claim_name,
         }
         return json.dumps(payload, ensure_ascii=True)
 
 
 class SandboxManager:
+    """Executes python/shell workloads in local or cluster-backed sandboxes.
+
+    The manager offers synchronous execution methods and focuses on command
+    translation, output normalization, asset extraction, and logging.
+    Lifecycle orchestration (lease reuse/release) is delegated to
+    ``SandboxLifecycleService``.
+    """
+
     def __init__(self) -> None:
         self.mode = os.getenv("SANDBOX_MODE", "cluster").strip().lower()
         if self.mode not in {"cluster", "local"}:
@@ -42,7 +66,7 @@ class SandboxManager:
             "http://sandbox-router-svc.alt-default.svc.cluster.local:8080",
         )
         self.template_name = os.getenv(
-            "SANDBOX_TEMPLATE_NAME", "python-runtime-template"
+            "SANDBOX_TEMPLATE_NAME", "python-runtime-template-small"
         )
         self.namespace = os.getenv("SANDBOX_NAMESPACE", "alt-default")
         self.server_port = int(os.getenv("SANDBOX_SERVER_PORT", "8888"))
@@ -56,8 +80,27 @@ class SandboxManager:
         self.local_timeout_seconds = int(
             os.getenv("SANDBOX_LOCAL_TIMEOUT_SECONDS", "20")
         )
+        self.command_preview_chars = int(os.getenv("LOG_COMMAND_PREVIEW_CHARS", "200"))
+        logger.info(
+            "sandbox_manager.initialized",
+            extra={
+                "event": "sandbox_manager.initialized",
+                "sandbox_mode": self.mode,
+                "sandbox_api_url": self.api_url,
+                "sandbox_template_name": self.template_name,
+                "sandbox_namespace": self.namespace,
+                "sandbox_server_port": self.server_port,
+            },
+        )
+
+    def _command_preview(self, command: str) -> str:
+        """Return a bounded preview for logging potentially long commands."""
+        if len(command) <= self.command_preview_chars:
+            return command
+        return command[: self.command_preview_chars] + "..."
 
     def get_config(self) -> dict[str, str | int]:
+        """Return current sandbox manager runtime settings."""
         return {
             "mode": self.mode,
             "api_url": self.api_url,
@@ -82,6 +125,7 @@ class SandboxManager:
         max_output_chars: int | None = None,
         local_timeout_seconds: int | None = None,
     ) -> None:
+        """Apply runtime configuration updates with basic validation."""
         if mode is not None:
             normalized = mode.strip().lower()
             if normalized not in {"cluster", "local"}:
@@ -115,11 +159,13 @@ class SandboxManager:
             self.local_timeout_seconds = local_timeout_seconds
 
     def _truncate(self, value: str) -> str:
+        """Trim stdout/stderr to configured maximum output length."""
         if len(value) <= self.max_output_chars:
             return value
         return value[: self.max_output_chars] + "\n...[truncated]"
 
     def _extract_asset_markers(self, stdout: str) -> tuple[str, list[dict[str, str]]]:
+        """Extract and remove asset marker lines emitted by sandbox helpers."""
         assets: list[dict[str, str]] = []
         cleaned_lines: list[str] = []
         for line in stdout.splitlines():
@@ -148,6 +194,7 @@ class SandboxManager:
         return cleaned_stdout, assets
 
     def _build_python_script(self, code: str) -> str:
+        """Wrap user python code with helper utilities and auto-asset behavior."""
         encoded = json.dumps(code)
         return textwrap.dedent(
             f"""
@@ -219,8 +266,93 @@ class SandboxManager:
             """
         ).strip()
 
-    def _run_cluster(self, command: str, tool_name: str) -> SandboxExecutionResult:
+    def _cluster_result_from_execution(
+        self,
+        *,
+        tool_name: str,
+        result: object,
+        lease_id: str | None = None,
+        claim_name: str | None = None,
+    ) -> SandboxExecutionResult:
+        """Convert low-level cluster execution output into normalized result."""
+        full_stdout = str(getattr(result, "stdout", "") or "")
+        clean_stdout, assets = self._extract_asset_markers(full_stdout)
+        stdout = self._truncate(clean_stdout)
+        stderr = self._truncate(str(getattr(result, "stderr", "") or ""))
+        exit_code = int(getattr(result, "exit_code", -1))
+        ok = exit_code == 0
+        if not ok:
+            stderr = self._truncate(f"exit code {exit_code}\n{stderr}".rstrip())
+
+        return SandboxExecutionResult(
+            tool_name=tool_name,
+            ok=ok,
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+            assets=assets,
+            lease_id=lease_id,
+            claim_name=claim_name,
+        )
+
+    def _execute_cluster_with_client(
+        self,
+        *,
+        sandbox: SandboxClient,
+        command: str,
+        tool_name: str,
+        lease_id: str | None = None,
+        claim_name: str | None = None,
+    ) -> SandboxExecutionResult:
+        """Execute a command using an already-initialized sandbox client."""
+        result = sandbox.run(command)
+        return self._cluster_result_from_execution(
+            tool_name=tool_name,
+            result=result,
+            lease_id=lease_id,
+            claim_name=claim_name,
+        )
+
+    def _run_cluster(
+        self,
+        command: str,
+        tool_name: str,
+        *,
+        lease_id: str | None = None,
+        claim_name: str | None = None,
+        sandbox: SandboxClient | None = None,
+    ) -> SandboxExecutionResult:
+        """Execute a command in cluster mode using a fresh or provided client."""
+        started = time.perf_counter()
+        exec_result: SandboxExecutionResult | None = None
+        logger.info(
+            "sandbox.cluster.start",
+            extra={
+                "event": "sandbox.cluster.start",
+                "tool_name": tool_name,
+                "sandbox_mode": self.mode,
+                "sandbox_api_url": self.api_url,
+                "sandbox_template_name": self.template_name,
+                "sandbox_namespace": self.namespace,
+                "request_id": get_request_id(),
+                "lease_id": lease_id,
+                "claim_name": claim_name,
+                "command_preview": self._command_preview(command),
+                "command_len": len(command),
+            },
+        )
         try:
+            if sandbox is not None:
+                effective_claim = claim_name or getattr(sandbox, "claim_name", None)
+                exec_result = self._execute_cluster_with_client(
+                    sandbox=sandbox,
+                    command=command,
+                    tool_name=tool_name,
+                    lease_id=lease_id,
+                    claim_name=effective_claim,
+                )
+                return exec_result
+
             with SandboxClient(
                 template_name=self.template_name,
                 api_url=self.api_url,
@@ -228,31 +360,88 @@ class SandboxManager:
                 server_port=self.server_port,
                 sandbox_ready_timeout=self.sandbox_ready_timeout,
                 gateway_ready_timeout=self.gateway_ready_timeout,
-            ) as sandbox:
-                result = sandbox.run(command)
-                full_stdout = getattr(result, "stdout", "")
-                clean_stdout, assets = self._extract_asset_markers(full_stdout)
-                stdout = self._truncate(clean_stdout)
-                stderr = self._truncate(getattr(result, "stderr", ""))
-                return SandboxExecutionResult(
-                    tool_name=tool_name,
-                    ok=True,
-                    stdout=stdout,
-                    stderr=stderr,
-                    assets=assets,
+            ) as owned_sandbox:
+                effective_claim = claim_name or getattr(
+                    owned_sandbox, "claim_name", None
                 )
+                exec_result = self._execute_cluster_with_client(
+                    sandbox=owned_sandbox,
+                    command=command,
+                    tool_name=tool_name,
+                    lease_id=lease_id,
+                    claim_name=effective_claim,
+                )
+                return exec_result
+
         except Exception as exc:
-            return SandboxExecutionResult(
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            logger.exception(
+                "sandbox.cluster.error",
+                extra={
+                    "event": "sandbox.cluster.error",
+                    "tool_name": tool_name,
+                    "sandbox_mode": self.mode,
+                    "request_id": get_request_id(),
+                    "lease_id": lease_id,
+                    "claim_name": claim_name,
+                    "duration_ms": elapsed_ms,
+                    "error": str(exc),
+                },
+            )
+            exec_result = SandboxExecutionResult(
                 tool_name=tool_name,
                 ok=False,
                 stdout="",
                 stderr="",
+                exit_code=None,
                 error=str(exc),
+                lease_id=lease_id,
+                claim_name=claim_name,
+            )
+            return exec_result
+        finally:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            logger.info(
+                "sandbox.cluster.end",
+                extra={
+                    "event": "sandbox.cluster.end",
+                    "tool_name": tool_name,
+                    "sandbox_mode": self.mode,
+                    "request_id": get_request_id(),
+                    "lease_id": lease_id,
+                    "claim_name": claim_name,
+                    "duration_ms": elapsed_ms,
+                    "ok": exec_result.ok if exec_result else False,
+                    "stdout_len": len(exec_result.stdout) if exec_result else 0,
+                    "stderr_len": len(exec_result.stderr) if exec_result else 0,
+                    "exit_code": exec_result.exit_code if exec_result else None,
+                    "asset_count": len(exec_result.assets or []) if exec_result else 0,
+                    "error": exec_result.error if exec_result else "unknown",
+                },
             )
 
     def _run_local(
         self, command: str | Sequence[str], tool_name: str, shell: bool
     ) -> SandboxExecutionResult:
+        """Execute a local command and normalize outputs consistently."""
+        started = time.perf_counter()
+        exec_result: SandboxExecutionResult | None = None
+        if isinstance(command, str):
+            preview_source = command
+        else:
+            preview_source = " ".join(str(part) for part in command)
+        logger.info(
+            "sandbox.local.start",
+            extra={
+                "event": "sandbox.local.start",
+                "tool_name": tool_name,
+                "sandbox_mode": self.mode,
+                "request_id": get_request_id(),
+                "command_preview": self._command_preview(preview_source),
+                "command_len": len(preview_source),
+                "shell": shell,
+            },
+        )
         try:
             completed = subprocess.run(
                 command,
@@ -270,13 +459,15 @@ class SandboxManager:
                 stderr = self._truncate(
                     f"exit code {completed.returncode}\n{stderr}".rstrip()
                 )
-            return SandboxExecutionResult(
+            exec_result = SandboxExecutionResult(
                 tool_name=tool_name,
                 ok=completed.returncode == 0,
                 stdout=stdout,
                 stderr=stderr,
+                exit_code=completed.returncode,
                 assets=assets,
             )
+            return exec_result
         except subprocess.TimeoutExpired as exc:
             stdout_value = exc.stdout or ""
             stderr_value = exc.stderr or ""
@@ -286,23 +477,65 @@ class SandboxManager:
                 stderr_value = stderr_value.decode(errors="replace")
             stdout = self._truncate(stdout_value)
             stderr = self._truncate(stderr_value)
-            return SandboxExecutionResult(
+            exec_result = SandboxExecutionResult(
                 tool_name=tool_name,
                 ok=False,
                 stdout=stdout,
                 stderr=stderr,
+                exit_code=None,
                 error=f"Local execution timed out after {self.local_timeout_seconds}s",
             )
+            return exec_result
         except Exception as exc:
-            return SandboxExecutionResult(
+            logger.exception(
+                "sandbox.local.error",
+                extra={
+                    "event": "sandbox.local.error",
+                    "tool_name": tool_name,
+                    "sandbox_mode": self.mode,
+                    "request_id": get_request_id(),
+                    "error": str(exc),
+                },
+            )
+            exec_result = SandboxExecutionResult(
                 tool_name=tool_name,
                 ok=False,
                 stdout="",
                 stderr="",
+                exit_code=None,
                 error=str(exc),
+            )
+            return exec_result
+        finally:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            logger.info(
+                "sandbox.local.end",
+                extra={
+                    "event": "sandbox.local.end",
+                    "tool_name": tool_name,
+                    "sandbox_mode": self.mode,
+                    "request_id": get_request_id(),
+                    "duration_ms": elapsed_ms,
+                    "ok": exec_result.ok if exec_result else False,
+                    "stdout_len": len(exec_result.stdout) if exec_result else 0,
+                    "stderr_len": len(exec_result.stderr) if exec_result else 0,
+                    "exit_code": exec_result.exit_code if exec_result else None,
+                    "asset_count": len(exec_result.assets or []) if exec_result else 0,
+                    "error": exec_result.error if exec_result else "unknown",
+                },
             )
 
     def exec_python(self, code: str) -> SandboxExecutionResult:
+        """Execute Python in local mode or in an ephemeral cluster sandbox."""
+        logger.info(
+            "sandbox.exec_python",
+            extra={
+                "event": "sandbox.exec_python",
+                "sandbox_mode": self.mode,
+                "request_id": get_request_id(),
+                "code_len": len(code),
+            },
+        )
         script = self._build_python_script(code)
         if self.mode == "local":
             command = [sys.executable, "-c", script]
@@ -315,7 +548,37 @@ class SandboxManager:
         command = f"python -c {shlex.quote(script)}"
         return self._run_cluster(command=command, tool_name="sandbox_exec_python")
 
+    def exec_python_with_sandbox(
+        self,
+        code: str,
+        *,
+        sandbox: SandboxClient,
+        lease_id: str,
+        claim_name: str | None,
+    ) -> SandboxExecutionResult:
+        """Execute Python against an existing lease-backed cluster sandbox."""
+        script = self._build_python_script(code)
+        command = f"python -c {shlex.quote(script)}"
+        return self._run_cluster(
+            command=command,
+            tool_name="sandbox_exec_python",
+            lease_id=lease_id,
+            claim_name=claim_name,
+            sandbox=sandbox,
+        )
+
     def exec_shell(self, shell_command: str) -> SandboxExecutionResult:
+        """Execute shell in local mode or in an ephemeral cluster sandbox."""
+        logger.info(
+            "sandbox.exec_shell",
+            extra={
+                "event": "sandbox.exec_shell",
+                "sandbox_mode": self.mode,
+                "request_id": get_request_id(),
+                "command_len": len(shell_command),
+                "command_preview": self._command_preview(shell_command),
+            },
+        )
         if self.mode == "local":
             return self._run_local(
                 command=shell_command,
@@ -324,5 +587,22 @@ class SandboxManager:
             )
 
         return self._run_cluster(command=shell_command, tool_name="sandbox_exec_shell")
+
+    def exec_shell_with_sandbox(
+        self,
+        shell_command: str,
+        *,
+        sandbox: SandboxClient,
+        lease_id: str,
+        claim_name: str | None,
+    ) -> SandboxExecutionResult:
+        """Execute shell against an existing lease-backed cluster sandbox."""
+        return self._run_cluster(
+            command=shell_command,
+            tool_name="sandbox_exec_shell",
+            lease_id=lease_id,
+            claim_name=claim_name,
+            sandbox=sandbox,
+        )
 
     ASSET_MARKER = "__ASSET__"

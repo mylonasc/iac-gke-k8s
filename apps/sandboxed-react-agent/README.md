@@ -51,6 +51,7 @@ To render diagrams on demand:
 - 🛣️ **Sandbox Router (`sandbox-router-svc`, `sandbox-router-deployment`)**
   - Receives backend execution requests and forwards them to a concrete sandbox runtime.
   - Handles routing against claim/sandbox lifecycle resources.
+  - Runs on the regular cluster node pool so gVisor nodes are reserved for sandbox runtimes.
 - 🧱 **Agent Sandbox CRDs and runtime resources**
   - `SandboxTemplate` defines sandbox pod spec (runtime image, probes, constraints).
   - `SandboxWarmPool` optionally keeps pre-warmed sandboxes to reduce cold starts.
@@ -95,15 +96,19 @@ To render diagrams on demand:
 - Router service reachable in namespace `alt-default`:
   - `sandbox-router-svc.alt-default.svc.cluster.local:8080`
 - Sandbox template exists:
-  - `python-runtime-template` in namespace `alt-default`
-  - optional advanced template: `python-runtime-template-pydata`
+  - `python-runtime-template-small` (higher density, faster scheduling under intermittent load)
+  - `python-runtime-template` (balanced)
+  - `python-runtime-template-large` (higher resource envelope)
+  - `python-runtime-template-pydata` (opt-in extended stack)
 - ingress-nginx and oauth2-proxy already configured for your host.
 
 Quick check:
 
 ```bash
 kubectl get svc -n alt-default sandbox-router-svc
+kubectl get sandboxtemplate -n alt-default python-runtime-template-small
 kubectl get sandboxtemplate -n alt-default python-runtime-template
+kubectl get sandboxtemplate -n alt-default python-runtime-template-large
 kubectl get sandboxtemplate -n alt-default python-runtime-template-pydata
 kubectl get pods -n agent-sandbox-system
 ```
@@ -111,6 +116,56 @@ kubectl get pods -n agent-sandbox-system
 ## Run locally with Docker Compose
 
 This runs frontend + backend on your machine and exposes the app at `http://localhost:8080`.
+
+### Unified local control script
+
+Use the helper script for local lifecycle, mode switching, and router forwarding:
+
+```bash
+./apps/sandboxed-react-agent/dev-sandbox.sh help
+```
+
+Common flows:
+
+```bash
+# Start compose with local tool execution
+./apps/sandboxed-react-agent/dev-sandbox.sh up local
+
+# Start router port-forward for cluster-connected testing
+./apps/sandboxed-react-agent/dev-sandbox.sh port-forward start
+
+# Switch backend at runtime to cluster mode (no compose restart)
+./apps/sandboxed-react-agent/dev-sandbox.sh mode cluster http://host.docker.internal:18080
+
+# Switch sandbox sizing profile quickly
+./apps/sandboxed-react-agent/dev-sandbox.sh template python-runtime-template-small
+
+# Inspect runtime config and health
+./apps/sandboxed-react-agent/dev-sandbox.sh status
+
+# Tail local backend logs
+./apps/sandboxed-react-agent/dev-sandbox.sh logs backend --follow
+
+# Tail backend/router logs in Kubernetes
+./apps/sandboxed-react-agent/dev-sandbox.sh logs backend-k8s --follow
+./apps/sandboxed-react-agent/dev-sandbox.sh logs router-k8s --follow
+
+# Stop compose
+./apps/sandboxed-react-agent/dev-sandbox.sh down
+
+# Stop router port-forward
+./apps/sandboxed-react-agent/dev-sandbox.sh port-forward stop
+```
+
+`port-forward start` now checks router readiness and, by default, auto-scales
+`sandbox-router-deployment` from `0` to `1` replica when needed for interactive testing.
+
+Template presets for app-level experimentation:
+
+- `python-runtime-template-small` (`150m` CPU / `256Mi` memory request)
+- `python-runtime-template` (`250m` CPU / `512Mi` memory request)
+- `python-runtime-template-large` (`500m` CPU / `1Gi` memory request)
+- `python-runtime-template-pydata` (pydata runtime image)
 
 ### Option A: local-only tool execution
 
@@ -125,10 +180,13 @@ cp apps/sandboxed-react-agent/.env.local.example apps/sandboxed-react-agent/.env
 3. Start:
 
 ```bash
-./apps/sandboxed-react-agent/run-local.sh
+./apps/sandboxed-react-agent/dev-sandbox.sh up local
 ```
 
 ### Option B: cluster-connected tool execution
+
+This mode expects your local kube context to have permissions to create
+`sandboxclaims.extensions.agents.x-k8s.io` in `alt-default`.
 
 1. Forward the cluster sandbox router to your local machine:
 
@@ -147,13 +205,13 @@ cp apps/sandboxed-react-agent/.env.cluster.example apps/sandboxed-react-agent/.e
 4. Start:
 
 ```bash
-./apps/sandboxed-react-agent/run-cluster.sh
+./apps/sandboxed-react-agent/dev-sandbox.sh up cluster
 ```
 
 Stop either mode:
 
 ```bash
-./apps/sandboxed-react-agent/stop-local.sh
+./apps/sandboxed-react-agent/dev-sandbox.sh down
 ```
 
 ### Local checks
@@ -162,6 +220,101 @@ Stop either mode:
 curl -sS http://localhost:8080/api/health
 curl -sS http://localhost:8080/api/state
 ```
+
+### Backend logging and tracing
+
+Backend now emits structured JSON logs with request correlation and runtime metadata.
+Every log event includes pod/container identity fields and request context when available.
+
+Logged context fields include:
+
+- `request_id`
+- `session_id` (when known)
+- `pod_name`, `pod_namespace`, `node_name`
+- trace ids (`trace_id`, `span_id`) when tracing is enabled
+
+Useful commands:
+
+```bash
+# Local compose backend logs
+./apps/sandboxed-react-agent/dev-sandbox.sh logs backend --follow
+
+# Kubernetes backend/router logs
+./apps/sandboxed-react-agent/dev-sandbox.sh logs backend-k8s --follow
+./apps/sandboxed-react-agent/dev-sandbox.sh logs router-k8s --follow
+```
+
+If you use `jq`, filtering by request id is straightforward:
+
+```bash
+./apps/sandboxed-react-agent/dev-sandbox.sh logs backend --follow | jq 'select(.request_id=="<request-id>")'
+```
+
+Tracing is optional and disabled by default. To enable OpenTelemetry export,
+set these env vars for backend runtime:
+
+- `TRACING_ENABLED=1`
+- `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector-host>:4318/v1/traces`
+- optional: `TRACING_SAMPLE_RATIO=0.1`, `OTEL_SERVICE_NAME=sandboxed-react-agent-backend`
+
+### Interactive notebook workflow
+
+Notebook path:
+
+- `apps/sandboxed-react-agent/notebooks/sandbox_agent_and_sandbox_playground.ipynb`
+
+It includes:
+
+- Agent path testing through backend (`/api/chat`) with runtime mode switching (`local`/`cluster`).
+- Direct `SandboxClient` calls to the router for raw sandbox command execution.
+
+Typical setup:
+
+```bash
+# Terminal 1: run app locally
+./apps/sandboxed-react-agent/dev-sandbox.sh up local
+
+# Terminal 2: expose sandbox router from cluster
+./apps/sandboxed-react-agent/dev-sandbox.sh port-forward start
+```
+
+Then open the notebook and run cells top-to-bottom.
+
+For agent cluster-mode through docker compose, use router URL
+`http://host.docker.internal:18080` (the backend service is inside a container).
+On Linux this is mapped in `docker-compose.yml` via `extra_hosts`.
+The backend container also mounts your host kube and gcloud config so
+`k8s-agent-sandbox` can create `SandboxClaim` resources.
+
+If direct `SandboxClient` calls in notebook fail with `Connection refused`:
+
+```bash
+./apps/sandboxed-react-agent/dev-sandbox.sh port-forward status
+./apps/sandboxed-react-agent/dev-sandbox.sh port-forward restart
+```
+
+If port-forward fails with no ready endpoints, your runtime may be in idle-at-zero mode.
+Scale the router deployment and retry:
+
+```bash
+kubectl -n alt-default scale deployment/sandbox-router-deployment --replicas=1
+./apps/sandboxed-react-agent/dev-sandbox.sh port-forward restart
+```
+
+If `/api/chat` tool calls fail with `Invalid kube-config file. No configuration found.`,
+restart compose so the `host.docker.internal` mapping is applied in the backend container,
+then switch mode to cluster again:
+
+```bash
+./apps/sandboxed-react-agent/dev-sandbox.sh down
+./apps/sandboxed-react-agent/dev-sandbox.sh up local
+./apps/sandboxed-react-agent/dev-sandbox.sh mode cluster http://host.docker.internal:18080
+```
+
+Also verify the notebook kernel network location:
+
+- host kernel: use `DIRECT_ROUTER_URL=http://127.0.0.1:18080`
+- containerized kernel: use `DIRECT_ROUTER_URL=http://host.docker.internal:18080`
 
 ## Build and publish images (DockerHub)
 
@@ -265,11 +418,16 @@ Configurable settings include:
 - Tool safety limit per turn (`max_tool_calls_per_turn`)
 - Sandbox mode (`local` or `cluster`)
 - Sandbox router/template/namespace and execution limits
+- Sandbox execution model (`ephemeral` or `session`)
+- Session sandbox idle TTL (`sandbox_session_idle_ttl_seconds`)
 
 The panel calls backend API endpoints:
 
 - `GET /api/config`
 - `POST /api/config`
+- `GET /api/sandboxes`
+- `GET /api/sandboxes/{lease_id}`
+- `POST /api/sandboxes/{lease_id}/release`
 
 ## Kubernetes notes
 
@@ -322,6 +480,7 @@ Optional cleanup of Docker pull secret too:
 ## Notes and limitations
 
 - This is an example implementation for rapid iteration.
-- Session state is in-memory; scaling backend replicas requires shared session storage.
+- Session state is cached in memory and persisted in local SQLite; scaling backend replicas still requires shared storage.
+- In `session` sandbox execution mode, tool calls in the same session reuse one sandbox lease until TTL expiry or explicit release.
 - In `local` mode, tool commands run in the backend container and are not isolated like Agent Sandbox.
 - Add rate limiting, authz, and prompt/tool guardrails before production usage.

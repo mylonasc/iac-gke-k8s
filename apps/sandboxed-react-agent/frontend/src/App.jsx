@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
 import {
   AssistantRuntimeProvider,
   AttachmentPrimitive,
@@ -13,6 +15,7 @@ import {
   useMessagePartText,
   useAssistantTransportRuntime,
 } from "@assistant-ui/react";
+import "katex/dist/katex.min.css";
 import "./App.css";
 
 const getAppBasePath = () => {
@@ -24,12 +27,24 @@ const getAppBasePath = () => {
 
 const DEFAULT_API_BASE = `${getAppBasePath()}/api`;
 const gfmPlugin = typeof remarkGfm === "function" ? remarkGfm : remarkGfm?.default;
+const mathPlugin = typeof remarkMath === "function" ? remarkMath : remarkMath?.default;
+const katexPlugin = typeof rehypeKatex === "function" ? rehypeKatex : rehypeKatex?.default;
 const APP_BASE_PATH = getAppBasePath();
 const SANDBOX_TEMPLATES = [
   {
+    value: "python-runtime-template-small",
+    label: "Small Sandbox",
+    description: "Low-footprint runtime for better pod packing and lower startup contention.",
+  },
+  {
     value: "python-runtime-template",
-    label: "Default Sandbox",
-    description: "Smaller runtime for standard tasks.",
+    label: "Balanced Sandbox",
+    description: "Default runtime for standard tasks.",
+  },
+  {
+    value: "python-runtime-template-large",
+    label: "Large Sandbox",
+    description: "Higher CPU and memory request for heavier tasks.",
   },
   {
     value: "python-runtime-template-pydata",
@@ -141,10 +156,12 @@ function MarkdownPart({ text, isRunning }) {
   const value = `${text || ""}${isRunning ? "\n\n●" : ""}`;
   const lineCount = useMemo(() => (value.match(/\n/g)?.length || 0) + 1, [value]);
   const isLong = lineCount > 10;
-  const markdownNode = gfmPlugin ? (
-    <ReactMarkdown remarkPlugins={[gfmPlugin]}>{value}</ReactMarkdown>
-  ) : (
-    <ReactMarkdown>{value}</ReactMarkdown>
+  const remarkPlugins = [gfmPlugin, mathPlugin].filter(Boolean);
+  const rehypePlugins = [katexPlugin].filter(Boolean);
+  const markdownNode = (
+    <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins}>
+      {value}
+    </ReactMarkdown>
   );
 
   if (!isLong) {
@@ -182,12 +199,25 @@ function ToolCallPart(props) {
   const resultText =
     props.result === undefined ? "(pending)" : JSON.stringify(props.result, null, 2);
   const assets = Array.isArray(props.result?.assets) ? props.result.assets : [];
+  const claimName = props.result?.claim_name || "";
+  const leaseId = props.result?.lease_id || "";
 
   return (
     <details className="tool-call" open={false}>
       <summary>
         <code>{props.toolName}</code>
       </summary>
+      <div className="tool-context">
+        {props.result === undefined ? (
+          <span className="badge running">Waiting for sandbox claim/runtime...</span>
+        ) : claimName ? (
+          <span className="badge completed">Claim ready: {claimName}</span>
+        ) : leaseId ? (
+          <span className="badge completed">Lease: {leaseId}</span>
+        ) : (
+          <span className="badge">No claim metadata</span>
+        )}
+      </div>
       <div className="tool-block">
         <strong>Arguments</strong>
         <pre>{argsText}</pre>
@@ -398,6 +428,33 @@ function Composer({ readOnly }) {
 }
 
 function ChatArea({ session, onResetSession, readOnly, apiBase }) {
+  const sandbox = session?.sandbox || {};
+  const activeClaim = sandbox.has_active_claim ? sandbox.claim_name : null;
+  const leaseStatus = sandbox?.status || null;
+  const waitingSince = sandbox?.created_at ? Date.parse(sandbox.created_at) : Number.NaN;
+  const waitingSeconds = Number.isFinite(waitingSince)
+    ? Math.max(0, Math.floor((Date.now() - waitingSince) / 1000))
+    : null;
+
+  let claimBadgeClass = "";
+  let claimBadgeText = "Claim: none";
+  if (leaseStatus === "pending") {
+    claimBadgeClass = "running";
+    claimBadgeText =
+      waitingSeconds !== null
+        ? `Claim: acquiring (${waitingSeconds}s)`
+        : "Claim: acquiring";
+  } else if (leaseStatus === "ready" && activeClaim) {
+    claimBadgeClass = "completed";
+    claimBadgeText = `Claim ready: ${activeClaim}`;
+  } else if (leaseStatus === "ready") {
+    claimBadgeClass = "running";
+    claimBadgeText = "Claim: binding runtime";
+  } else if (leaseStatus) {
+    claimBadgeClass = "error";
+    claimBadgeText = `Claim status: ${leaseStatus}`;
+  }
+
   return (
     <section className="panel chat-panel">
       <div className="chat-header">
@@ -418,6 +475,11 @@ function ChatArea({ session, onResetSession, readOnly, apiBase }) {
                 Reset Session
               </button>
             </>
+          ) : null}
+          {!readOnly ? (
+            <span className={`badge ${claimBadgeClass}`.trim()}>
+              {claimBadgeText}
+            </span>
           ) : null}
         </div>
       </div>
@@ -547,6 +609,8 @@ function SettingsForm({ apiBase, config, setConfig, configLoading, configSaving,
           />
           <datalist id="sandbox-template-options">
             <option value="python-runtime-template" />
+            <option value="python-runtime-template-small" />
+            <option value="python-runtime-template-large" />
             <option value="python-runtime-template-pydata" />
           </datalist>
         </label>
@@ -594,7 +658,7 @@ function App() {
     max_tool_calls_per_turn: 4,
     sandbox_mode: "local",
     sandbox_api_url: "",
-    sandbox_template_name: "python-runtime-template",
+    sandbox_template_name: "python-runtime-template-small",
     sandbox_namespace: "alt-default",
     sandbox_server_port: 8888,
     sandbox_max_output_chars: 6000,
@@ -680,6 +744,24 @@ function App() {
     return () => window.clearInterval(timer);
   }, [isSharedView, loadSessions, tab]);
 
+  useEffect(() => {
+    if (isSharedView || tab !== "chat" || !activeSession?.session_id) return undefined;
+    const sessionId = activeSession.session_id;
+    const timer = window.setInterval(() => {
+      fetch(`${apiBase}/sessions/${sessionId}/sandbox`)
+        .then((response) => (response.ok ? response.json() : null))
+        .then((data) => {
+          if (!data?.sandbox) return;
+          setActiveSession((prev) => {
+            if (!prev || prev.session_id !== sessionId) return prev;
+            return { ...prev, sandbox: data.sandbox };
+          });
+        })
+        .catch(() => undefined);
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [activeSession?.session_id, apiBase, isSharedView, tab]);
+
   async function handleShare(sessionId) {
     setShareInFlight(true);
     try {
@@ -723,7 +805,7 @@ function App() {
         max_tool_calls_per_turn: Number(data.max_tool_calls_per_turn ?? 4),
         sandbox_mode: data?.sandbox?.mode || "local",
         sandbox_api_url: data?.sandbox?.api_url || "",
-        sandbox_template_name: data?.sandbox?.template_name || "python-runtime-template",
+        sandbox_template_name: data?.sandbox?.template_name || "python-runtime-template-small",
         sandbox_namespace: data?.sandbox?.namespace || "alt-default",
         sandbox_server_port: Number(data?.sandbox?.server_port ?? 8888),
         sandbox_max_output_chars: Number(data?.sandbox?.max_output_chars ?? 6000),
