@@ -10,6 +10,10 @@
     .wrap { max-width: 1100px; margin: 0 auto; padding: 20px; }
     .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin-bottom: 14px; }
     .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
+    .metric { border: 1px solid var(--line); border-radius: 10px; padding: 10px; background: #fbfeff; }
+    .metric .k { display: block; color: var(--muted); font-size: 0.82rem; }
+    .metric .v { font-size: 1.25rem; font-weight: 600; }
     .btn { border: 1px solid #98a9b5; background: #fff; color: var(--ink); border-radius: 8px; padding: 6px 10px; cursor: pointer; text-decoration: none; }
     .muted { color: var(--muted); }
     .ok { color: var(--ok); }
@@ -88,6 +92,24 @@
     </div>
 
     <div class="card">
+      <h2>Resource and Cost Snapshot</h2>
+      <div class="grid" id="resourceMetrics"></div>
+      <div id="costSummary" class="muted" style="margin-top: 10px;">No cost estimate yet.</div>
+      <table style="margin-top: 8px;">
+        <thead><tr><th>Node Type</th><th>Spot</th><th>Count</th><th>Hourly Each (USD)</th><th>Hourly Total (USD)</th></tr></thead>
+        <tbody id="nodeCostBreakdown"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>Persistent Volume Claims</h2>
+      <table>
+        <thead><tr><th>Name</th><th>Status</th><th>Storage Class</th><th>Requested</th><th>Access Modes</th><th>Volume</th></tr></thead>
+        <tbody id="pvcs"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
       <h2>Pods</h2>
       <div class="row" style="margin-bottom: 10px;">
         <label>
@@ -145,10 +167,18 @@ async function refresh() {
     renderClaims(ov.sandboxclaims || []);
     renderWarmPools(ov.sandboxwarmpools || []);
     renderNodes(ov.nodes || [], ov.node_summary || {});
+    renderResourceSummary(ov.resource_summary || {});
+    renderCostEstimate(ov.cost_estimate || {});
+    renderPvcs(ov.pvcs || []);
     renderPods(ov.pods || []);
   } catch (e) {
     setMsg('action', 'refresh failed: ' + e.message, 'err');
   }
+}
+
+function money(value) {
+  if (typeof value !== 'number' || Number.isNaN(value)) return 'n/a';
+  return `$${value.toFixed(4)}`;
 }
 
 function updateTemplateSelectors(items) {
@@ -239,6 +269,43 @@ function renderNodes(items, summary) {
     const phaseText = Object.keys(phaseCounts).sort().map((key) => `${key}:${phaseCounts[key]}`).join(', ');
     const tr = document.createElement('tr');
     tr.innerHTML = `<td>${node.name || ''}</td><td>${node.ready ? 'yes' : 'no'}</td><td>${node.instance_type || ''}</td><td>${node.node_pool || ''}</td><td>${node.pod_count ?? 0}</td><td>${phaseText || '-'}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+function renderResourceSummary(summary) {
+  const metrics = document.getElementById('resourceMetrics');
+  const rows = [
+    { key: 'Running nodes', value: `${summary.running_nodes ?? 0}` },
+    { key: 'Total nodes', value: `${summary.total_nodes ?? 0}` },
+    { key: 'PVCs (Bound)', value: `${summary.bound_pvcs ?? 0}` },
+    { key: 'PVCs (Pending)', value: `${summary.pending_pvcs ?? 0}` },
+    { key: 'PVC Requested GiB', value: `${(summary.pvc_requested_gib ?? 0).toFixed ? summary.pvc_requested_gib.toFixed(2) : summary.pvc_requested_gib ?? 0}` },
+  ];
+  metrics.innerHTML = rows.map((r) => `<div class="metric"><span class="k">${r.key}</span><span class="v">${r.value}</span></div>`).join('');
+}
+
+function renderCostEstimate(cost) {
+  const summaryEl = document.getElementById('costSummary');
+  const tbody = document.getElementById('nodeCostBreakdown');
+  const nodeRows = cost.node_breakdown || [];
+
+  summaryEl.textContent = `Estimated hourly cost (${cost.region || 'region-unknown'}): total ${money(cost.total_hourly_usd)} = nodes ${money(cost.node_hourly_total_usd)} + PVCs ${money(cost.pvc_hourly_total_usd)} + GKE fee ${money(cost.gke_cluster_fee_hourly_usd)}`;
+  tbody.innerHTML = '';
+  nodeRows.forEach((row) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${row.instance_type || 'unknown'}</td><td>${row.spot ? 'yes' : 'no'}</td><td>${row.count ?? 0}</td><td>${money(row.hourly_each_usd)}</td><td>${money(row.hourly_total_usd)}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+function renderPvcs(items) {
+  const tbody = document.getElementById('pvcs');
+  tbody.innerHTML = '';
+  items.forEach((pvc) => {
+    const tr = document.createElement('tr');
+    const modes = (pvc.access_modes || []).join(', ');
+    tr.innerHTML = `<td>${pvc.name || ''}</td><td>${pvc.status || ''}</td><td>${pvc.storage_class || ''}</td><td>${pvc.requested || ''}</td><td>${modes}</td><td>${pvc.volume || ''}</td>`;
     tbody.appendChild(tr);
   });
 }

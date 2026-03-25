@@ -113,6 +113,29 @@ class WarmPoolScaleRequest(BaseModel):
 settings = Settings()
 
 
+# Price references (USD) for europe-west4 (Netherlands), sourced from
+# Google Cloud pricing pages and Cloud Billing SKU catalog.
+# - E2 core on-demand: 0.02401338 / vCPU-hour
+# - E2 RAM on-demand: 0.00321816 / GiB-hour
+# - E2 core spot: 0.0095 / vCPU-hour
+# - E2 RAM spot: 0.001272 / GiB-hour
+# - GKE cluster management fee: 0.10 / cluster-hour
+# - PD Standard: 0.044 / GiB-month
+# - PD Balanced: 0.11 / GiB-month
+_E2_CORE_ONDEMAND_USD_PER_HOUR = 0.02401338
+_E2_RAM_ONDEMAND_USD_PER_GIB_HOUR = 0.00321816
+_E2_CORE_SPOT_USD_PER_HOUR = 0.0095
+_E2_RAM_SPOT_USD_PER_GIB_HOUR = 0.001272
+_GKE_CLUSTER_FEE_USD_PER_HOUR = 0.10
+_MONTH_HOURS = 730.0
+_PVC_USD_PER_GIB_MONTH_BY_CLASS = {
+    "standard": 0.044,
+    "standard-rwo": 0.044,
+    "balanced": 0.11,
+    "balanced-rwo": 0.11,
+}
+
+
 def _normalize_base_path(path: str) -> str:
     value = path.strip()
     if not value or value == "/":
@@ -455,6 +478,173 @@ def _node_pool(node: Any) -> str:
     return labels.get("cloud.google.com/gke-nodepool") or "unknown"
 
 
+def _node_is_spot(node: Any) -> bool:
+    labels = node.metadata.labels or {}
+    value = str(labels.get("cloud.google.com/gke-spot") or "").strip().lower()
+    return value == "true"
+
+
+def _e2_machine_shape(instance_type: str) -> tuple[int, float] | None:
+    machine = instance_type.strip().lower()
+    if machine == "e2-medium":
+        return (2, 4.0)
+    if machine == "e2-small":
+        return (2, 2.0)
+    if machine == "e2-micro":
+        return (2, 1.0)
+    if machine.startswith("e2-standard-"):
+        try:
+            cores = int(machine.split("e2-standard-", 1)[1])
+            if cores > 0:
+                return (cores, float(cores * 4))
+        except Exception:
+            return None
+    return None
+
+
+def _estimate_node_hourly_cost_usd(instance_type: str, is_spot: bool) -> float | None:
+    shape = _e2_machine_shape(instance_type)
+    if not shape:
+        return None
+    cores, memory_gib = shape
+    if is_spot:
+        return (cores * _E2_CORE_SPOT_USD_PER_HOUR) + (
+            memory_gib * _E2_RAM_SPOT_USD_PER_GIB_HOUR
+        )
+    return (cores * _E2_CORE_ONDEMAND_USD_PER_HOUR) + (
+        memory_gib * _E2_RAM_ONDEMAND_USD_PER_GIB_HOUR
+    )
+
+
+def _parse_quantity_gib(quantity: str | None) -> float:
+    if not quantity:
+        return 0.0
+    raw = str(quantity).strip()
+    if not raw:
+        return 0.0
+    units = [
+        ("Ki", 1.0 / (1024 * 1024)),
+        ("Mi", 1.0 / 1024),
+        ("Gi", 1.0),
+        ("Ti", 1024.0),
+        ("Pi", 1024.0 * 1024.0),
+        ("Ei", 1024.0 * 1024.0 * 1024.0),
+        ("K", 1.0 / (1000 * 1000)),
+        ("M", 1.0 / 1000),
+        ("G", 1.0),
+        ("T", 1000.0),
+        ("P", 1000.0 * 1000.0),
+        ("E", 1000.0 * 1000.0 * 1000.0),
+    ]
+    for suffix, factor in units:
+        if raw.endswith(suffix):
+            number = raw[: -len(suffix)]
+            try:
+                return float(number) * factor
+            except Exception:
+                return 0.0
+    try:
+        return float(raw) / (1024.0**3)
+    except Exception:
+        return 0.0
+
+
+def _pvc_cost_rate_usd_per_gib_hour(storage_class: str) -> float | None:
+    key = storage_class.strip().lower()
+    monthly = _PVC_USD_PER_GIB_MONTH_BY_CLASS.get(key)
+    if monthly is not None:
+        return monthly / _MONTH_HOURS
+    if "standard" in key:
+        return _PVC_USD_PER_GIB_MONTH_BY_CLASS["standard"] / _MONTH_HOURS
+    if "balanced" in key:
+        return _PVC_USD_PER_GIB_MONTH_BY_CLASS["balanced"] / _MONTH_HOURS
+    return None
+
+
+def _pvc_storage_class(pvc: Any) -> str:
+    if pvc.spec.storage_class_name:
+        return str(pvc.spec.storage_class_name)
+    annotations = pvc.metadata.annotations or {}
+    return str(annotations.get("volume.beta.kubernetes.io/storage-class") or "")
+
+
+def _cost_estimate(
+    nodes: list[dict[str, Any]], pvcs: list[dict[str, Any]], cluster_count: int = 1
+) -> dict[str, Any]:
+    node_breakdown: dict[tuple[str, bool], dict[str, Any]] = {}
+    node_total = 0.0
+
+    for node in nodes:
+        instance_type = str(node.get("instance_type") or "unknown")
+        is_spot = bool(node.get("spot"))
+        hourly_each = _estimate_node_hourly_cost_usd(instance_type, is_spot)
+        key = (instance_type, is_spot)
+        entry = node_breakdown.setdefault(
+            key,
+            {
+                "instance_type": instance_type,
+                "spot": is_spot,
+                "count": 0,
+                "hourly_each_usd": hourly_each,
+                "hourly_total_usd": 0.0,
+            },
+        )
+        entry["count"] = int(entry["count"] or 0) + 1
+        if hourly_each is not None:
+            entry["hourly_total_usd"] = (
+                float(entry["hourly_total_usd"] or 0.0) + hourly_each
+            )
+            node_total += hourly_each
+
+    pvc_breakdown: list[dict[str, Any]] = []
+    pvc_total = 0.0
+    for pvc in pvcs:
+        storage_class = str(pvc.get("storage_class") or "")
+        size_gib = float(pvc.get("requested_gib") or 0.0)
+        hourly_rate = _pvc_cost_rate_usd_per_gib_hour(storage_class)
+        hourly_total = (hourly_rate * size_gib) if hourly_rate is not None else None
+        pvc_breakdown.append(
+            {
+                "name": str(pvc.get("name") or ""),
+                "storage_class": storage_class,
+                "requested_gib": size_gib,
+                "hourly_usd": hourly_total,
+            }
+        )
+        if hourly_total is not None:
+            pvc_total += hourly_total
+
+    gke_fee = float(max(cluster_count, 0)) * _GKE_CLUSTER_FEE_USD_PER_HOUR
+    total = node_total + pvc_total + gke_fee
+
+    return {
+        "currency": "USD",
+        "period": "hour",
+        "region": "europe-west4",
+        "node_hourly_total_usd": node_total,
+        "pvc_hourly_total_usd": pvc_total,
+        "gke_cluster_fee_hourly_usd": gke_fee,
+        "total_hourly_usd": total,
+        "node_breakdown": sorted(
+            node_breakdown.values(),
+            key=lambda x: (str(x.get("instance_type") or ""), bool(x.get("spot"))),
+        ),
+        "pvc_breakdown": sorted(
+            pvc_breakdown,
+            key=lambda x: str(x.get("name") or ""),
+        ),
+        "pricing_source": {
+            "compute": "https://cloud.google.com/compute/all-pricing",
+            "gke": "https://cloud.google.com/kubernetes-engine/pricing",
+        },
+        "notes": [
+            "Estimate includes nodes, PVC capacity, and one GKE cluster management fee.",
+            "Unknown machine/storage classes are excluded from numeric totals.",
+            "Prices are list prices for europe-west4 and may differ with discounts or custom contracts.",
+        ],
+    }
+
+
 def _node_summary(nodes: list[dict[str, Any]]) -> dict[str, Any]:
     type_counts: dict[str, int] = {}
     pool_counts: dict[str, int] = {}
@@ -540,6 +730,35 @@ def _overview_data() -> dict[str, Any]:
             ],
             "nodes": mock_nodes,
             "node_summary": _node_summary(mock_nodes),
+            "pvcs": [
+                {
+                    "name": "sandboxed-react-agent-backend-data",
+                    "status": "Bound",
+                    "storage_class": "standard",
+                    "requested": "5Gi",
+                    "requested_gib": 5.0,
+                    "access_modes": ["ReadWriteOnce"],
+                    "volume": "pvc-mock-123",
+                }
+            ],
+            "resource_summary": {
+                "running_nodes": sum(1 for n in mock_nodes if n.get("ready")),
+                "total_nodes": len(mock_nodes),
+                "bound_pvcs": 1,
+                "pending_pvcs": 0,
+                "pvc_requested_gib": 5.0,
+            },
+            "cost_estimate": _cost_estimate(
+                nodes=[{**node, "spot": False} for node in mock_nodes],
+                pvcs=[
+                    {
+                        "name": "sandboxed-react-agent-backend-data",
+                        "storage_class": "standard",
+                        "requested_gib": 5.0,
+                    }
+                ],
+                cluster_count=1,
+            ),
         }
 
     if not apps_api or not core_api or not custom_api:
@@ -548,6 +767,10 @@ def _overview_data() -> dict[str, Any]:
     deployments = apps_api.list_namespaced_deployment(namespace=ns).items
     pods = core_api.list_namespaced_pod(namespace=ns).items
     services = core_api.list_namespaced_service(namespace=ns).items
+    try:
+        pvcs = core_api.list_namespaced_persistent_volume_claim(namespace=ns).items
+    except ApiException:
+        pvcs = []
     try:
         nodes = core_api.list_node().items
     except ApiException:
@@ -593,6 +816,7 @@ def _overview_data() -> dict[str, Any]:
             "ready": _node_ready(node),
             "instance_type": _node_instance_type(node),
             "node_pool": _node_pool(node),
+            "spot": _node_is_spot(node),
             "pod_count": int(pod_count_by_node.get(node.metadata.name, 0)),
             "phase_counts": phase_counts_by_node.get(node.metadata.name, {}),
         }
@@ -606,11 +830,41 @@ def _overview_data() -> dict[str, Any]:
                 "ready": False,
                 "instance_type": "unknown",
                 "node_pool": "unknown",
+                "spot": False,
                 "pod_count": int(count),
                 "phase_counts": phase_counts_by_node.get(name, {}),
             }
             for name, count in sorted(pod_count_by_node.items(), key=lambda x: x[0])
         ]
+
+    pvc_rows = [
+        {
+            "name": pvc.metadata.name,
+            "status": str(pvc.status.phase or ""),
+            "storage_class": _pvc_storage_class(pvc),
+            "requested": str(
+                (pvc.spec.resources.requests or {}).get("storage") or "0Gi"
+            ),
+            "requested_gib": _parse_quantity_gib(
+                str((pvc.spec.resources.requests or {}).get("storage") or "0Gi")
+            ),
+            "access_modes": list(pvc.spec.access_modes or []),
+            "volume": str(pvc.spec.volume_name or ""),
+        }
+        for pvc in pvcs
+    ]
+
+    resource_summary = {
+        "running_nodes": sum(1 for node in node_rows if node.get("ready")),
+        "total_nodes": len(node_rows),
+        "bound_pvcs": sum(1 for pvc in pvc_rows if pvc.get("status") == "Bound"),
+        "pending_pvcs": sum(1 for pvc in pvc_rows if pvc.get("status") == "Pending"),
+        "pvc_requested_gib": sum(
+            float(pvc.get("requested_gib") or 0.0) for pvc in pvc_rows
+        ),
+    }
+
+    cost_estimate = _cost_estimate(node_rows, pvc_rows, cluster_count=1)
 
     return {
         "cluster_mode": "live",
@@ -631,6 +885,9 @@ def _overview_data() -> dict[str, Any]:
         ),
         "nodes": sorted(node_rows, key=lambda x: str(x.get("name") or "")),
         "node_summary": _node_summary(node_rows),
+        "pvcs": sorted(pvc_rows, key=lambda x: str(x.get("name") or "")),
+        "resource_summary": resource_summary,
+        "cost_estimate": cost_estimate,
     }
 
 

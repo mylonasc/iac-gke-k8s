@@ -8,6 +8,8 @@ It provides:
 - template-safe dropdowns for sandbox claim and warm-pool actions
 - pod filtering by node and phase/status
 - node inventory with ready count and instance-type breakdown
+- resource snapshot for running nodes and PVCs
+- hourly cost estimate for nodes, PVC capacity, and GKE cluster fee
 - API endpoints to scale managed deployments up/down
 - API endpoints to create/delete Agent Sandbox claims
 - API endpoints to create/scale Agent Sandbox warm pools
@@ -168,6 +170,17 @@ curl -X POST \
   -d '{"replicas":5}' \
   "https://magarathea.ddns.net/alt-default-ops/api/sandboxwarmpools/python-sandbox-warmpool/scale"
 ```
+
+## Cost estimate notes
+
+- `/api/overview` includes a lightweight hourly estimate derived from live node and PVC inventory.
+- The estimate currently uses `europe-west4` list prices and includes:
+  - Compute Engine E2 core and RAM rates (on-demand + spot)
+  - Persistent Disk class rates (`standard`, `balanced`)
+  - GKE cluster management fee ($0.10/hour)
+- Source references:
+  - https://cloud.google.com/compute/all-pricing
+  - https://cloud.google.com/kubernetes-engine/pricing
 
 ## Remove
 

@@ -11,7 +11,7 @@ metadata:
   namespace: alt-default
 rules:
   - apiGroups: [""]
-    resources: ["pods", "services", "endpoints", "events"]
+    resources: ["pods", "services", "endpoints", "events", "persistentvolumeclaims"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["apps"]
     resources: ["deployments", "deployments/scale", "replicasets"]

@@ -30,6 +30,7 @@ const gfmPlugin = typeof remarkGfm === "function" ? remarkGfm : remarkGfm?.defau
 const mathPlugin = typeof remarkMath === "function" ? remarkMath : remarkMath?.default;
 const katexPlugin = typeof rehypeKatex === "function" ? rehypeKatex : rehypeKatex?.default;
 const APP_BASE_PATH = getAppBasePath();
+const THEME_STORAGE_KEY = "sandboxed-react-agent-theme";
 const SANDBOX_TEMPLATES = [
   {
     value: "python-runtime-template-small",
@@ -158,8 +159,34 @@ function MarkdownPart({ text, isRunning }) {
   const isLong = lineCount > 10;
   const remarkPlugins = [gfmPlugin, mathPlugin].filter(Boolean);
   const rehypePlugins = [katexPlugin].filter(Boolean);
+  const markdownComponents = useMemo(
+    () => ({
+      code({ inline, className, children, ...props }) {
+        if (inline) {
+          return (
+            <code className={className} {...props}>
+              {children}
+            </code>
+          );
+        }
+        const content = String(children || "").replace(/\n$/, "");
+        return (
+          <pre className="markdown-code-block">
+            <code className={className || "language-text"} {...props}>
+              {content}
+            </code>
+          </pre>
+        );
+      },
+    }),
+    []
+  );
   const markdownNode = (
-    <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins}>
+    <ReactMarkdown
+      remarkPlugins={remarkPlugins}
+      rehypePlugins={rehypePlugins}
+      components={markdownComponents}
+    >
       {value}
     </ReactMarkdown>
   );
@@ -198,6 +225,27 @@ function ToolCallPart(props) {
   const argsText = props.argsText || JSON.stringify(props.args || {}, null, 2);
   const resultText =
     props.result === undefined ? "(pending)" : JSON.stringify(props.result, null, 2);
+  const parsedArgs = useMemo(() => {
+    if (props.args && typeof props.args === "object") return props.args;
+    try {
+      return JSON.parse(argsText || "{}");
+    } catch {
+      return {};
+    }
+  }, [argsText, props.args]);
+  const commandText =
+    typeof parsedArgs?.command === "string"
+      ? parsedArgs.command
+      : typeof parsedArgs?.code === "string"
+        ? parsedArgs.code
+        : "";
+  const commandLabel = typeof parsedArgs?.command === "string" ? "Command" : "Code";
+  const commandLanguage = typeof parsedArgs?.command === "string" ? "bash" : "python";
+
+  const stdout = typeof props.result?.stdout === "string" ? props.result.stdout : "";
+  const stderr = typeof props.result?.stderr === "string" ? props.result.stderr : "";
+  const toolError = typeof props.result?.error === "string" ? props.result.error : "";
+  const exitCode = props.result?.exit_code;
   const assets = Array.isArray(props.result?.assets) ? props.result.assets : [];
   const claimName = props.result?.claim_name || "";
   const leaseId = props.result?.lease_id || "";
@@ -219,13 +267,55 @@ function ToolCallPart(props) {
         )}
       </div>
       <div className="tool-block">
-        <strong>Arguments</strong>
-        <pre>{argsText}</pre>
+        <strong>{commandText ? commandLabel : "Arguments"}</strong>
+        {commandText ? (
+          <pre className="tool-code-block">
+            <code className={`language-${commandLanguage}`}>{commandText}</code>
+          </pre>
+        ) : (
+          <pre className="tool-code-block">
+            <code className="language-json">{argsText}</code>
+          </pre>
+        )}
       </div>
-      <div className="tool-block">
-        <strong>Result</strong>
-        <pre>{resultText}</pre>
-      </div>
+      {stdout ? (
+        <div className="tool-block">
+          <strong>Stdout</strong>
+          <pre className="tool-output-block">
+            <code className="language-text">{stdout}</code>
+          </pre>
+        </div>
+      ) : null}
+      {stderr ? (
+        <div className="tool-block">
+          <strong>Stderr</strong>
+          <pre className="tool-output-block error">
+            <code className="language-text">{stderr}</code>
+          </pre>
+        </div>
+      ) : null}
+      {toolError ? (
+        <div className="tool-block">
+          <strong>Error</strong>
+          <pre className="tool-output-block error">
+            <code className="language-text">{toolError}</code>
+          </pre>
+        </div>
+      ) : null}
+      {props.result !== undefined && exitCode !== undefined && exitCode !== null ? (
+        <div className="tool-block">
+          <strong>Exit code</strong>
+          <code>{String(exitCode)}</code>
+        </div>
+      ) : null}
+      {!stdout && !stderr && !toolError ? (
+        <div className="tool-block">
+          <strong>Result</strong>
+          <pre className="tool-code-block">
+            <code className="language-json">{resultText}</code>
+          </pre>
+        </div>
+      ) : null}
       {assets.length > 0 ? (
         <div className="tool-block">
           <strong>Assets</strong>
@@ -664,6 +754,42 @@ function App() {
     sandbox_max_output_chars: 6000,
     sandbox_local_timeout_seconds: 20,
   });
+  const [theme, setTheme] = useState(() => {
+    if (typeof window === "undefined") return "light";
+    const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (storedTheme === "light" || storedTheme === "dark") return storedTheme;
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  });
+  const [isMobile, setIsMobile] = useState(() =>
+    typeof window !== "undefined" ? window.matchMedia("(max-width: 760px)").matches : false
+  );
+  const [showMobileThreads, setShowMobileThreads] = useState(false);
+  const [showMobileRuntime, setShowMobileRuntime] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const media = window.matchMedia("(max-width: 760px)");
+    const onChange = (event) => setIsMobile(event.matches);
+    setIsMobile(media.matches);
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  }, []);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    document.documentElement.setAttribute("data-theme", theme);
+    document.documentElement.style.colorScheme = theme;
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+    }
+  }, [theme]);
+
+  useEffect(() => {
+    if (!isMobile) {
+      setShowMobileThreads(false);
+      setShowMobileRuntime(false);
+    }
+  }, [isMobile]);
 
   const apiBase = useMemo(() => {
     const configured = import.meta.env.VITE_API_BASE;
@@ -895,27 +1021,78 @@ function App() {
     <main className="app-shell">
       <header className="topbar">
         <h1>Sandboxed React Agent</h1>
-        <nav className="tabs">
-          <button type="button" onClick={() => setTab("chat")} className={`tab ${tab === "chat" ? "active" : ""}`}>Chat</button>
-          <button type="button" onClick={() => setTab("settings")} className={`tab ${tab === "settings" ? "active" : ""}`}>Settings</button>
-        </nav>
+        <div className="topbar-actions">
+          <nav className="tabs">
+            <button type="button" onClick={() => setTab("chat")} className={`tab ${tab === "chat" ? "active" : ""}`}>Chat</button>
+            <button type="button" onClick={() => setTab("settings")} className={`tab ${tab === "settings" ? "active" : ""}`}>Settings</button>
+          </nav>
+          <button
+            type="button"
+            className="btn theme-toggle"
+            onClick={() => setTheme((prev) => (prev === "dark" ? "light" : "dark"))}
+          >
+            {theme === "dark" ? "Light mode" : "Dark mode"}
+          </button>
+        </div>
       </header>
 
       {tab === "chat" ? (
-        <div className="workspace">
-          <Sidebar
-            sessions={sessions}
-            activeSessionId={activeSession?.session_id}
-            onSelect={(sessionId) => loadSession(sessionId).catch(() => undefined)}
-            onNew={() => createSession().catch(() => undefined)}
-            onShare={handleShare}
-            shareInFlight={shareInFlight}
-            isSharedView={isSharedView}
-          />
+        <div>
+          {isMobile ? (
+            <div className="mobile-controls">
+              <button
+                type="button"
+                className={`btn ${showMobileThreads ? "primary" : ""}`.trim()}
+                onClick={() => setShowMobileThreads((prev) => !prev)}
+              >
+                {showMobileThreads ? "Hide Threads" : "Threads"}
+              </button>
+              {!isSharedView ? (
+                <button
+                  type="button"
+                  className={`btn ${showMobileRuntime ? "primary" : ""}`.trim()}
+                  onClick={() => setShowMobileRuntime((prev) => !prev)}
+                >
+                  {showMobileRuntime ? "Hide Runtime" : "Runtime"}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+          <div className="workspace">
+            {!isMobile ? (
+              <Sidebar
+                sessions={sessions}
+                activeSessionId={activeSession?.session_id}
+                onSelect={(sessionId) => loadSession(sessionId).catch(() => undefined)}
+                onNew={() => createSession().catch(() => undefined)}
+                onShare={handleShare}
+                shareInFlight={shareInFlight}
+                isSharedView={isSharedView}
+              />
+            ) : null}
+            {isMobile && showMobileThreads ? (
+              <div className="mobile-sheet">
+                <Sidebar
+                  sessions={sessions}
+                  activeSessionId={activeSession?.session_id}
+                  onSelect={(sessionId) => {
+                    loadSession(sessionId).catch(() => undefined);
+                    setShowMobileThreads(false);
+                  }}
+                  onNew={() => {
+                    createSession().catch(() => undefined);
+                    setShowMobileThreads(false);
+                  }}
+                  onShare={handleShare}
+                  shareInFlight={shareInFlight}
+                  isSharedView={isSharedView}
+                />
+              </div>
+            ) : null}
           <TransportProvider key={runtimeKey} apiBase={apiBase} session={activeSession}>
             <div className="chat-with-thinking">
               <div>
-                {!isSharedView ? (
+                {!isSharedView && (!isMobile || showMobileRuntime) ? (
                   <SandboxTemplatePicker
                     value={config.sandbox_template_name}
                     onChange={handleTemplateQuickSelect}
@@ -937,6 +1114,7 @@ function App() {
               <ThinkingSidebar />
             </div>
           </TransportProvider>
+          </div>
         </div>
       ) : (
         <SettingsForm
