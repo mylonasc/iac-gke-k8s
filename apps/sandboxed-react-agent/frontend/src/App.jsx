@@ -31,6 +31,8 @@ const mathPlugin = typeof remarkMath === "function" ? remarkMath : remarkMath?.d
 const katexPlugin = typeof rehypeKatex === "function" ? rehypeKatex : rehypeKatex?.default;
 const APP_BASE_PATH = getAppBasePath();
 const THEME_STORAGE_KEY = "sandboxed-react-agent-theme";
+const AUTH_TOKEN_STORAGE_KEY =
+  import.meta.env.VITE_AUTH_TOKEN_STORAGE_KEY || "sandboxed-react-agent-auth-token";
 const SANDBOX_TEMPLATES = [
   {
     value: "python-runtime-template-small",
@@ -63,6 +65,43 @@ const resolveAppUrl = (url) => {
     return APP_BASE_PATH ? `${APP_BASE_PATH}${url}` : url;
   }
   return url;
+};
+
+const getMediaQueryMatches = (query, fallback = false) => {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return fallback;
+  }
+  return window.matchMedia(query).matches;
+};
+
+const getAuthToken = () => {
+  if (typeof window === "undefined") return "";
+  const staticToken = import.meta.env.VITE_AUTH_TOKEN || "";
+  if (staticToken) return staticToken;
+  if (typeof window.__AUTH_TOKEN__ === "string" && window.__AUTH_TOKEN__.trim()) {
+    return window.__AUTH_TOKEN__.trim();
+  }
+  const localToken = window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) || "";
+  if (localToken.trim()) return localToken.trim();
+  const sessionToken = window.sessionStorage.getItem(AUTH_TOKEN_STORAGE_KEY) || "";
+  return sessionToken.trim();
+};
+
+const withAuthHeaders = (headersInit) => {
+  const headers = new Headers(headersInit || {});
+  const token = getAuthToken();
+  if (token && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+  return headers;
+};
+
+const apiFetch = (input, init = {}) => {
+  return fetch(input, {
+    ...init,
+    credentials: init.credentials || "include",
+    headers: withAuthHeaders(init.headers),
+  });
 };
 
 const fileToDataUrl = (file) =>
@@ -247,13 +286,40 @@ function ToolCallPart(props) {
   const toolError = typeof props.result?.error === "string" ? props.result.error : "";
   const exitCode = props.result?.exit_code;
   const assets = Array.isArray(props.result?.assets) ? props.result.assets : [];
+  const hasHtmlWidget = assets.some((asset) => String(asset?.mime_type || "").startsWith("text/html"));
+  const displayToolName = hasHtmlWidget
+    ? "UI Widget"
+    : props.toolName === "sandbox_exec_python"
+      ? "Python"
+      : props.toolName === "sandbox_exec_shell"
+        ? "Shell"
+        : props.toolName;
+  const [maximizedWidget, setMaximizedWidget] = useState(null);
   const claimName = props.result?.claim_name || "";
   const leaseId = props.result?.lease_id || "";
+
+  useEffect(() => {
+    if (!maximizedWidget || typeof window === "undefined" || typeof document === "undefined") {
+      return undefined;
+    }
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") {
+        setMaximizedWidget(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [maximizedWidget]);
 
   return (
     <details className="tool-call" open={false}>
       <summary>
-        <code>{props.toolName}</code>
+        <code>{displayToolName}</code>
       </summary>
       <div className="tool-context">
         {props.result === undefined ? (
@@ -329,6 +395,35 @@ function ToolCallPart(props) {
                     className="tool-asset-image"
                   />
                 ) : null}
+                {String(asset.mime_type || "").startsWith("text/html") ? (
+                  <div className="tool-widget-wrap">
+                    <div className="tool-widget-label">Interactive widget preview</div>
+                    <iframe
+                      src={resolveAppUrl(asset.view_url)}
+                      title={asset.filename || "Generated widget"}
+                      className="tool-widget-frame"
+                      loading="lazy"
+                      sandbox="allow-scripts allow-downloads"
+                      referrerPolicy="no-referrer"
+                    />
+                    <div className="tool-widget-actions">
+                      <button
+                        type="button"
+                        className="btn tiny"
+                        onClick={() => setMaximizedWidget(asset)}
+                      >
+                        Expand
+                      </button>
+                      <a
+                        href={resolveAppUrl(asset.view_url)}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Open
+                      </a>
+                    </div>
+                  </div>
+                ) : null}
                 <a
                   href={resolveAppUrl(asset.download_url || asset.view_url)}
                   target="_blank"
@@ -339,6 +434,46 @@ function ToolCallPart(props) {
               </li>
             ))}
           </ul>
+        </div>
+      ) : null}
+      {maximizedWidget ? (
+        <div
+          className="widget-modal-backdrop"
+          onClick={() => setMaximizedWidget(null)}
+          role="presentation"
+        >
+          <div className="widget-modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+            <div className="widget-modal-header">
+              <strong>{maximizedWidget.filename || "UI Widget"}</strong>
+              <div className="widget-modal-actions">
+                <a
+                  href={resolveAppUrl(maximizedWidget.view_url)}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Open
+                </a>
+                <a
+                  href={resolveAppUrl(maximizedWidget.download_url || maximizedWidget.view_url)}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Download
+                </a>
+                <button type="button" className="btn tiny" onClick={() => setMaximizedWidget(null)}>
+                  Close
+                </button>
+              </div>
+            </div>
+            <iframe
+              src={resolveAppUrl(maximizedWidget.view_url)}
+              title={maximizedWidget.filename || "Maximized widget"}
+              className="tool-widget-frame tool-widget-frame-maximized"
+              loading="lazy"
+              sandbox="allow-scripts allow-downloads"
+              referrerPolicy="no-referrer"
+            />
+          </div>
         </div>
       ) : null}
     </details>
@@ -355,8 +490,13 @@ function ComposerAttachmentItem() {
 }
 
 function TransportProvider({ children, apiBase, session }) {
+  const transportHeaders = useMemo(
+    () => Object.fromEntries(withAuthHeaders().entries()),
+    []
+  );
   const runtime = useAssistantTransportRuntime({
     api: `${apiBase}/assistant`,
+    headers: transportHeaders,
     initialState: {
       session_id: session?.session_id || null,
       messages: Array.isArray(session?.messages) ? session.messages : [],
@@ -407,7 +547,7 @@ function ThreadMarkdownShareButton({ apiBase, sessionId }) {
 
   const handleShareMarkdown = useCallback(async () => {
     if (!sessionId) return;
-    const shareResponse = await fetch(`${apiBase}/sessions/${sessionId}/share`, {
+    const shareResponse = await apiFetch(`${apiBase}/sessions/${sessionId}/share`, {
       method: "POST",
     });
     if (!shareResponse.ok) return;
@@ -758,21 +898,27 @@ function App() {
     if (typeof window === "undefined") return "light";
     const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
     if (storedTheme === "light" || storedTheme === "dark") return storedTheme;
-    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    return getMediaQueryMatches("(prefers-color-scheme: dark)") ? "dark" : "light";
   });
   const [isMobile, setIsMobile] = useState(() =>
-    typeof window !== "undefined" ? window.matchMedia("(max-width: 760px)").matches : false
+    getMediaQueryMatches("(max-width: 760px)")
   );
   const [showMobileThreads, setShowMobileThreads] = useState(false);
   const [showMobileRuntime, setShowMobileRuntime] = useState(false);
 
   useEffect(() => {
-    if (typeof window === "undefined") return undefined;
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return undefined;
+    }
     const media = window.matchMedia("(max-width: 760px)");
     const onChange = (event) => setIsMobile(event.matches);
     setIsMobile(media.matches);
-    media.addEventListener("change", onChange);
-    return () => media.removeEventListener("change", onChange);
+    if (typeof media.addEventListener === "function") {
+      media.addEventListener("change", onChange);
+      return () => media.removeEventListener("change", onChange);
+    }
+    media.addListener(onChange);
+    return () => media.removeListener(onChange);
   }, []);
 
   useEffect(() => {
@@ -798,7 +944,7 @@ function App() {
 
   const loadSession = useCallback(
     async (sessionId) => {
-      const response = await fetch(`${apiBase}/sessions/${sessionId}`);
+      const response = await apiFetch(`${apiBase}/sessions/${sessionId}`);
       if (!response.ok) throw new Error(`Failed to load session ${sessionId}`);
       const data = await response.json();
       setActiveSession(data);
@@ -808,7 +954,7 @@ function App() {
   );
 
   const loadSessions = useCallback(async () => {
-    const response = await fetch(`${apiBase}/sessions`);
+    const response = await apiFetch(`${apiBase}/sessions`);
     if (!response.ok) throw new Error("Failed to list sessions");
     const data = await response.json();
     const items = Array.isArray(data.sessions) ? data.sessions : [];
@@ -817,7 +963,7 @@ function App() {
   }, [apiBase]);
 
   const createSession = useCallback(async () => {
-    const response = await fetch(`${apiBase}/sessions`, {
+    const response = await apiFetch(`${apiBase}/sessions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
@@ -846,7 +992,7 @@ function App() {
     }
 
     setIsSharedView(true);
-    fetch(`${apiBase}/public/${shared}`)
+    apiFetch(`${apiBase}/public/${shared}`)
       .then((r) => r.json())
       .then((data) => {
         setActiveSession(data);
@@ -874,7 +1020,7 @@ function App() {
     if (isSharedView || tab !== "chat" || !activeSession?.session_id) return undefined;
     const sessionId = activeSession.session_id;
     const timer = window.setInterval(() => {
-      fetch(`${apiBase}/sessions/${sessionId}/sandbox`)
+      apiFetch(`${apiBase}/sessions/${sessionId}/sandbox`)
         .then((response) => (response.ok ? response.json() : null))
         .then((data) => {
           if (!data?.sandbox) return;
@@ -891,7 +1037,7 @@ function App() {
   async function handleShare(sessionId) {
     setShareInFlight(true);
     try {
-      const response = await fetch(`${apiBase}/sessions/${sessionId}/share`, { method: "POST" });
+      const response = await apiFetch(`${apiBase}/sessions/${sessionId}/share`, { method: "POST" });
       if (!response.ok) throw new Error("Failed to share session");
       const data = await response.json();
       const url = `${window.location.origin}${getAppBasePath()}${data.share_path}`;
@@ -909,7 +1055,7 @@ function App() {
 
   async function handleResetSession(sessionId) {
     if (!sessionId) return;
-    await fetch(`${apiBase}/sessions/${sessionId}/reset`, { method: "POST" });
+    await apiFetch(`${apiBase}/sessions/${sessionId}/reset`, { method: "POST" });
     const updated = await loadSessions();
     if (updated.length > 0) {
       await loadSession(updated[0].session_id);
@@ -923,7 +1069,7 @@ function App() {
     setConfigError("");
     setConfigMessage("");
     try {
-      const response = await fetch(`${apiBase}/config`);
+      const response = await apiFetch(`${apiBase}/config`);
       if (!response.ok) throw new Error(`Failed to load config: ${response.status}`);
       const data = await response.json();
       setConfig({
@@ -965,7 +1111,7 @@ function App() {
         sandbox_max_output_chars: Number(config.sandbox_max_output_chars),
         sandbox_local_timeout_seconds: Number(config.sandbox_local_timeout_seconds),
       };
-      const response = await fetch(`${apiBase}/config`, {
+      const response = await apiFetch(`${apiBase}/config`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -1001,7 +1147,7 @@ function App() {
         sandbox_max_output_chars: Number(nextConfig.sandbox_max_output_chars),
         sandbox_local_timeout_seconds: Number(nextConfig.sandbox_local_timeout_seconds),
       };
-      const response = await fetch(`${apiBase}/config`, {
+      const response = await apiFetch(`${apiBase}/config`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),

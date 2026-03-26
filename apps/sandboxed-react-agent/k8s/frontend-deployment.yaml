@@ -19,7 +19,7 @@ spec:
         - name: dockerhub-regcred
       containers:
         - name: frontend
-          image: docker.io/mylonasc/magarathea:sandboxed-react-agent-frontend-0.4.6
+          image: docker.io/mylonasc/magarathea:sandboxed-react-agent-frontend-0.4.9
           imagePullPolicy: IfNotPresent
           env:
             - name: BACKEND_UPSTREAM

@@ -230,8 +230,16 @@ class SandboxManager:
 
             namespace["expose_asset"] = expose_asset
 
+            def expose_html_widget(html, filename="widget.html"):
+                widget_path = Path(filename)
+                widget_path.parent.mkdir(parents=True, exist_ok=True)
+                widget_path.write_text(str(html), encoding="utf-8")
+                expose_asset(str(widget_path), mime_type="text/html")
+
+            namespace["expose_html_widget"] = expose_html_widget
+
             # Try to infer likely output files from string literals in source.
-            _literal_paths = re.findall(r'[\"\\\']([^\"\\\']+\\.(?:png|jpg|jpeg|gif|webp|svg|pdf|csv|txt|json|zip))[\"\\\']', source, flags=re.IGNORECASE)
+            _literal_paths = re.findall(r'[\"\\\']([^\"\\\']+\\.(?:png|jpg|jpeg|gif|webp|svg|pdf|csv|txt|json|zip|html|htm))[\"\\\']', source, flags=re.IGNORECASE)
             for _path in _literal_paths:
                 try:
                     _candidate_paths.append(str(Path(_path)))

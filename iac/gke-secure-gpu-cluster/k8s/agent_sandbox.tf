@@ -67,6 +67,21 @@ resource "kubernetes_manifest" "agent_sandbox_extensions" {
   ]
 }
 
+resource "kubernetes_service_account" "sandbox_runtime" {
+  count = var.enable_agent_sandbox && var.enable_agent_sandbox_runtime ? 1 : 0
+
+  metadata {
+    name      = "sandbox-runtime-ksa"
+    namespace = local.ns
+  }
+
+  automount_service_account_token = false
+
+  depends_on = [
+    kubernetes_namespace.app,
+  ]
+}
+
 resource "kubernetes_manifest" "agent_sandbox_template" {
   count = var.enable_agent_sandbox && var.enable_agent_sandbox_runtime ? 1 : 0
 
@@ -86,7 +101,9 @@ resource "kubernetes_manifest" "agent_sandbox_template" {
           }
         }
         spec = {
-          runtimeClassName = "gvisor"
+          serviceAccountName           = "sandbox-runtime-ksa"
+          automountServiceAccountToken = false
+          runtimeClassName             = "gvisor"
           nodeSelector = {
             "workload-isolation" = "gvisor"
           }
@@ -102,6 +119,11 @@ resource "kubernetes_manifest" "agent_sandbox_template" {
             {
               name  = "python-runtime"
               image = var.agent_sandbox_runtime_image
+              securityContext = {
+                capabilities = {
+                  drop = ["NET_RAW"]
+                }
+              }
               ports = [
                 {
                   containerPort = 8888
@@ -133,6 +155,7 @@ resource "kubernetes_manifest" "agent_sandbox_template" {
   depends_on = [
     kubernetes_namespace.app,
     kubernetes_manifest.agent_sandbox_extensions,
+    kubernetes_service_account.sandbox_runtime,
   ]
 }
 
@@ -155,7 +178,9 @@ resource "kubernetes_manifest" "agent_sandbox_template_small" {
           }
         }
         spec = {
-          runtimeClassName = "gvisor"
+          serviceAccountName           = "sandbox-runtime-ksa"
+          automountServiceAccountToken = false
+          runtimeClassName             = "gvisor"
           nodeSelector = {
             "workload-isolation" = "gvisor"
           }
@@ -171,6 +196,11 @@ resource "kubernetes_manifest" "agent_sandbox_template_small" {
             {
               name  = "python-runtime"
               image = var.agent_sandbox_runtime_image
+              securityContext = {
+                capabilities = {
+                  drop = ["NET_RAW"]
+                }
+              }
               ports = [
                 {
                   containerPort = 8888
@@ -202,6 +232,7 @@ resource "kubernetes_manifest" "agent_sandbox_template_small" {
   depends_on = [
     kubernetes_namespace.app,
     kubernetes_manifest.agent_sandbox_extensions,
+    kubernetes_service_account.sandbox_runtime,
   ]
 }
 
@@ -224,7 +255,9 @@ resource "kubernetes_manifest" "agent_sandbox_template_large" {
           }
         }
         spec = {
-          runtimeClassName = "gvisor"
+          serviceAccountName           = "sandbox-runtime-ksa"
+          automountServiceAccountToken = false
+          runtimeClassName             = "gvisor"
           nodeSelector = {
             "workload-isolation" = "gvisor"
           }
@@ -240,6 +273,11 @@ resource "kubernetes_manifest" "agent_sandbox_template_large" {
             {
               name  = "python-runtime"
               image = var.agent_sandbox_runtime_image
+              securityContext = {
+                capabilities = {
+                  drop = ["NET_RAW"]
+                }
+              }
               ports = [
                 {
                   containerPort = 8888
@@ -271,6 +309,7 @@ resource "kubernetes_manifest" "agent_sandbox_template_large" {
   depends_on = [
     kubernetes_namespace.app,
     kubernetes_manifest.agent_sandbox_extensions,
+    kubernetes_service_account.sandbox_runtime,
   ]
 }
 
@@ -293,7 +332,9 @@ resource "kubernetes_manifest" "agent_sandbox_template_pydata" {
           }
         }
         spec = {
-          runtimeClassName = "gvisor"
+          serviceAccountName           = "sandbox-runtime-ksa"
+          automountServiceAccountToken = false
+          runtimeClassName             = "gvisor"
           nodeSelector = {
             "workload-isolation" = "gvisor"
           }
@@ -314,6 +355,11 @@ resource "kubernetes_manifest" "agent_sandbox_template_pydata" {
             {
               name  = "python-runtime"
               image = var.agent_sandbox_runtime_image_pydata
+              securityContext = {
+                capabilities = {
+                  drop = ["NET_RAW"]
+                }
+              }
               ports = [
                 {
                   containerPort = 8888
@@ -345,6 +391,7 @@ resource "kubernetes_manifest" "agent_sandbox_template_pydata" {
   depends_on = [
     kubernetes_namespace.app,
     kubernetes_manifest.agent_sandbox_extensions,
+    kubernetes_service_account.sandbox_runtime,
   ]
 }
 
@@ -389,17 +436,55 @@ resource "kubernetes_manifest" "agent_sandbox_runtime_egress_policy" {
     }
     spec = {
       podSelector = {
-        matchLabels = {
-          "sandbox-network-access" = "internet"
-        }
+        matchExpressions = [
+          {
+            key      = "agents.x-k8s.io/sandbox-template-ref-hash"
+            operator = "Exists"
+          }
+        ]
       }
       policyTypes = ["Egress"]
       egress = [
         {
           to = [
             {
+              namespaceSelector = {
+                matchLabels = {
+                  "kubernetes.io/metadata.name" = "kube-system"
+                }
+              }
+              podSelector = {
+                matchLabels = {
+                  "k8s-app" = "kube-dns"
+                }
+              }
+            }
+          ]
+          ports = [
+            {
+              protocol = "UDP"
+              port     = 53
+            },
+            {
+              protocol = "TCP"
+              port     = 53
+            }
+          ]
+        },
+        {
+          to = [
+            {
               ipBlock = {
                 cidr = "0.0.0.0/0"
+                except = [
+                  "10.0.0.0/8",
+                  "100.64.0.0/10",
+                  "127.0.0.0/8",
+                  "169.254.0.0/16",
+                  "172.16.0.0/12",
+                  "192.168.0.0/16",
+                  "34.118.224.0/20",
+                ]
               }
             }
           ]

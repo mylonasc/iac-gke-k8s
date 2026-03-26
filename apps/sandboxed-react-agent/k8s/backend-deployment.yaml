@@ -38,7 +38,7 @@ spec:
         - name: dockerhub-regcred
       containers:
         - name: backend
-          image: docker.io/mylonasc/magarathea:sandboxed-react-agent-backend-0.4.7
+          image: docker.io/mylonasc/magarathea:sandboxed-react-agent-backend-0.4.9
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
@@ -74,6 +74,25 @@ spec:
               value: json
             - name: LOG_COMMAND_PREVIEW_CHARS
               value: "200"
+            - name: AUTH_ENABLED
+              value: "1"
+            - name: AUTH_ISSUER
+              valueFrom:
+                secretKeyRef:
+                  name: sandboxed-react-agent-secrets
+                  key: auth-issuer
+            - name: AUTH_AUDIENCE
+              valueFrom:
+                secretKeyRef:
+                  name: sandboxed-react-agent-secrets
+                  key: auth-audience
+            - name: AUTH_JWKS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: sandboxed-react-agent-secrets
+                  key: auth-jwks-url
+            - name: AUTH_EXEMPT_PATH_PREFIXES
+              value: /api/health,/api/public/
             - name: TRACING_ENABLED
               value: "0"
             - name: TRACING_SAMPLE_RATIO

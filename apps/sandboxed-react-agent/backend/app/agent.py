@@ -25,9 +25,11 @@ SYSTEM_PROMPT = (
     "Keep responses concise and include key findings from tool outputs. "
     "When writing math in markdown, always use dollar-delimited LaTeX: $...$ for inline and $$...$$ for blocks; never use \\( ... \\) or \\[ ... \\]. "
     "For simple computations, run one tool call at most, then provide the final answer. "
+    "You can create small interactive HTML/JavaScript widgets for chat previews by writing an HTML file and exposing it. "
     "When producing files or images in python/shell tools, you MUST call expose_asset('path/to/file') "
     "inside sandbox_exec_python before finishing. If you save a plot/file and do not expose it, "
-    "the UI will not be able to render/download it."
+    "the UI will not be able to render/download it. "
+    "For interactive widgets, expose the file with mime_type='text/html' so the UI can render it in a sandboxed iframe."
 )
 
 
@@ -42,7 +44,7 @@ TOOLS = [
                 "properties": {
                     "code": {
                         "type": "string",
-                        "description": "Python code to execute. REQUIRED: after creating any image/file you want in chat, call expose_asset('/absolute/or/relative/path').",
+                        "description": "Python code to execute. REQUIRED: after creating any image/file you want in chat, call expose_asset('/absolute/or/relative/path'). For HTML/JS widgets call expose_asset(path, mime_type='text/html').",
                     }
                 },
                 "required": ["code"],
@@ -59,7 +61,7 @@ TOOLS = [
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "Shell command to execute. If files are created, run a python helper that calls expose_asset(path) so assets are available to API/UI.",
+                        "description": "Shell command to execute. If files are created, run a python helper that calls expose_asset(path) so assets are available to API/UI. Use mime_type='text/html' for HTML widget previews.",
                     }
                 },
                 "required": ["command"],

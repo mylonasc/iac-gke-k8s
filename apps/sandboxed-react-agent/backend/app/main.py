@@ -7,10 +7,11 @@ from typing import Any
 from assistant_stream import create_run
 from assistant_stream.serialization import DataStreamResponse
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from .agent import SandboxedReactAgent
+from .auth import AuthConfig, TokenVerifier, authenticate_request
 from .logging_config import bind_context, configure_logging
 from .tracing import init_tracing
 
@@ -85,6 +86,21 @@ logger = logging.getLogger(__name__)
 agent = SandboxedReactAgent()
 app = FastAPI(title="sandboxed-react-agent-backend", version="0.1.0")
 init_tracing(app)
+auth_config = AuthConfig.from_env()
+token_verifier = TokenVerifier(auth_config)
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    try:
+        await authenticate_request(
+            request,
+            config=auth_config,
+            verifier=token_verifier,
+        )
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -291,7 +307,27 @@ def get_asset(asset_id: str):
     asset = agent.asset_manager.get_asset(asset_id)
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
-    return FileResponse(asset["storage_path"], media_type=asset["mime_type"])
+    headers: dict[str, str] = {}
+    if str(asset.get("mime_type") or "").startswith("text/html"):
+        headers = {
+            "Content-Security-Policy": (
+                "default-src 'none'; "
+                "script-src 'unsafe-inline' https:; "
+                "style-src 'unsafe-inline' https:; "
+                "img-src data: blob: https: http:; "
+                "font-src data: https:; "
+                "connect-src https: http:; "
+                "frame-ancestors 'self'; "
+                "base-uri 'none'; "
+                "form-action 'none'"
+            ),
+            "X-Frame-Options": "SAMEORIGIN",
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+        }
+    return FileResponse(
+        asset["storage_path"], media_type=asset["mime_type"], headers=headers
+    )
 
 
 @app.get("/api/assets/{asset_id}/download")

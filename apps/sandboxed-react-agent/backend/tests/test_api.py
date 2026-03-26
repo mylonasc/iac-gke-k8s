@@ -1,9 +1,11 @@
 import os
+import base64
 from pathlib import Path
 import shutil
 import json
 import asyncio
 from types import SimpleNamespace
+import jwt
 
 from fastapi.testclient import TestClient
 
@@ -14,6 +16,7 @@ os.environ.setdefault("ASSET_STORE_PATH", "/tmp/sandboxed-react-agent-assets")
 Path(os.environ["SESSION_STORE_PATH"]).unlink(missing_ok=True)
 
 from app.main import agent, app
+import app.main as main_module
 
 
 client = TestClient(app)
@@ -26,6 +29,53 @@ def setup_function() -> None:
         connection.execute("DELETE FROM assets")
         connection.execute("DELETE FROM sandbox_leases")
     shutil.rmtree(os.environ["ASSET_STORE_PATH"], ignore_errors=True)
+
+
+def test_auth_middleware_rejects_missing_bearer_when_enabled(monkeypatch) -> None:
+    monkeypatch.setattr(main_module.auth_config, "enabled", True)
+
+    response = client.get("/api/sessions")
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Missing Authorization header"
+
+
+def test_auth_middleware_accepts_valid_bearer_when_enabled(monkeypatch) -> None:
+    monkeypatch.setattr(main_module.auth_config, "enabled", True)
+    monkeypatch.setattr(
+        main_module.token_verifier,
+        "verify",
+        lambda token: {"sub": "user-1", "token": token},
+    )
+
+    response = client.get(
+        "/api/sessions",
+        headers={"Authorization": "Bearer valid-token"},
+    )
+    assert response.status_code == 200
+    assert "sessions" in response.json()
+
+
+def test_auth_middleware_rejects_invalid_bearer_when_enabled(monkeypatch) -> None:
+    monkeypatch.setattr(main_module.auth_config, "enabled", True)
+
+    def _raise_invalid(_token: str):
+        raise jwt.InvalidTokenError("bad token")
+
+    monkeypatch.setattr(main_module.token_verifier, "verify", _raise_invalid)
+
+    response = client.get(
+        "/api/sessions",
+        headers={"Authorization": "Bearer invalid-token"},
+    )
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid token"
+
+
+def test_auth_middleware_keeps_public_share_routes_open(monkeypatch) -> None:
+    monkeypatch.setattr(main_module.auth_config, "enabled", True)
+
+    response = client.get("/api/public/non-existent")
+    assert response.status_code == 404
 
 
 def test_config_roundtrip() -> None:
@@ -332,6 +382,41 @@ def test_transport_uses_server_session_messages_as_source_of_truth(monkeypatch) 
     part_types = [part.get("type") for part in old_assistant.get("content", [])]
     assert "tool-call" in part_types
     assert "image" in part_types
+
+
+def test_html_asset_endpoint_sets_security_headers() -> None:
+    session = agent.create_session(title="html asset test")
+    html = "<html><body><h1>Hello widget</h1></body></html>"
+    asset = agent.asset_manager.store_base64_asset(
+        session_id=session.session_id,
+        tool_call_id="tool-html-1",
+        filename="widget.html",
+        mime_type="text/html",
+        base64_data=base64.b64encode(html.encode("utf-8")).decode("ascii"),
+        created_at="2026-03-10T00:00:00Z",
+    )
+
+    response = client.get(asset["view_url"])
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "content-security-policy" in response.headers
+    assert response.headers.get("x-frame-options") == "SAMEORIGIN"
+
+
+def test_python_tool_expose_html_widget_helper() -> None:
+    agent.sandbox_manager.mode = "local"
+    code = (
+        "html = '<!doctype html><html><body><button onclick=\"this.textContent=\\'clicked\\'\">Click</button></body></html>'\n"
+        "expose_html_widget(html, 'mini-widget.html')\n"
+        "print('widget ready')"
+    )
+    result = agent.sandbox_manager.exec_python(code)
+    assert result.ok is True
+    assert any(
+        asset.get("filename") == "mini-widget.html"
+        and asset.get("mime_type") == "text/html"
+        for asset in result.assets or []
+    )
 
 
 def test_shared_markdown_includes_tool_asset_links() -> None:

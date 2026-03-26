@@ -102,6 +102,29 @@ To render diagrams on demand:
   - `python-runtime-template-pydata` (opt-in extended stack)
 - ingress-nginx and oauth2-proxy already configured for your host.
 
+### Backend API token validation
+
+The backend can enforce JWT/OIDC validation for all `/api/*` routes (except
+`/api/health` and `/api/public/*` by default). Configure:
+
+- `AUTH_ENABLED=1`
+- `AUTH_ISSUER`
+- `AUTH_AUDIENCE`
+- `AUTH_JWKS_URL`
+- optional: `AUTH_ALGORITHMS` (default `RS256`)
+- optional: `AUTH_EXEMPT_PATH_PREFIXES` (default `/api/health,/api/public/`)
+
+In Kubernetes, these values are wired from `sandboxed-react-agent-secrets` in
+`k8s/backend-deployment.yaml`.
+
+Frontend API calls include bearer auth when a token is available in:
+
+- `window.__AUTH_TOKEN__`
+- `localStorage[VITE_AUTH_TOKEN_STORAGE_KEY]` (default key: `sandboxed-react-agent-auth-token`)
+- `sessionStorage[VITE_AUTH_TOKEN_STORAGE_KEY]`
+
+You can also provide `VITE_AUTH_TOKEN` for local testing.
+
 Quick check:
 
 ```bash
