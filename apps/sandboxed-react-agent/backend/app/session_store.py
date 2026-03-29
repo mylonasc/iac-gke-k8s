@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -22,11 +23,23 @@ class SessionStore:
 
     def _init_db(self) -> None:
         """Create all storage tables and indexes if they do not exist."""
+        now_iso = datetime.now(timezone.utc).isoformat()
         with self._connect() as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id TEXT PRIMARY KEY,
+                    tier TEXT NOT NULL DEFAULT 'default',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS sessions (
                     session_id TEXT PRIMARY KEY,
+                    user_id TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     title TEXT NOT NULL,
@@ -38,8 +51,38 @@ class SessionStore:
                 )
                 """
             )
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
+            }
+            if "user_id" not in columns:
+                connection.execute("ALTER TABLE sessions ADD COLUMN user_id TEXT")
             connection.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_share_id ON sessions (share_id)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sessions_user_updated ON sessions (user_id, updated_at DESC)"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_configs (
+                    user_id TEXT PRIMARY KEY,
+                    model TEXT NOT NULL,
+                    max_tool_calls_per_turn INTEGER NOT NULL,
+                    sandbox_mode TEXT NOT NULL,
+                    sandbox_api_url TEXT NOT NULL,
+                    sandbox_template_name TEXT NOT NULL,
+                    sandbox_namespace TEXT NOT NULL,
+                    sandbox_server_port INTEGER NOT NULL,
+                    sandbox_max_output_chars INTEGER NOT NULL,
+                    sandbox_local_timeout_seconds INTEGER NOT NULL,
+                    sandbox_execution_model TEXT NOT NULL,
+                    sandbox_session_idle_ttl_seconds INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+                )
+                """
             )
             connection.execute(
                 """
@@ -89,11 +132,153 @@ class SessionStore:
                 ON sandbox_leases (expires_at, status)
                 """
             )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO users (user_id, tier, created_at, updated_at)
+                SELECT DISTINCT user_id, 'default', ?, ?
+                FROM sessions
+                WHERE user_id IS NOT NULL AND user_id != ''
+                """,
+                (now_iso, now_iso),
+            )
+
+    def ensure_user(self, user_id: str) -> dict[str, Any]:
+        """Ensure a user row exists and return current user metadata."""
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            raise ValueError("user_id is required")
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO users (user_id, tier, created_at, updated_at)
+                VALUES (?, 'default', ?, ?)
+                ON CONFLICT(user_id) DO NOTHING
+                """,
+                (normalized_user_id, now_iso, now_iso),
+            )
+            row = connection.execute(
+                "SELECT * FROM users WHERE user_id = ?", (normalized_user_id,)
+            ).fetchone()
+        assert row is not None
+        return {
+            "user_id": row["user_id"],
+            "tier": row["tier"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def get_user(self, user_id: str) -> dict[str, Any] | None:
+        """Return a user row for the provided user_id when present."""
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM users WHERE user_id = ?", (normalized_user_id,)
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "user_id": row["user_id"],
+            "tier": row["tier"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def get_user_config(self, user_id: str) -> dict[str, Any] | None:
+        """Fetch stored per-user runtime configuration if available."""
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM user_configs WHERE user_id = ?", (normalized_user_id,)
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "user_id": row["user_id"],
+            "model": row["model"],
+            "max_tool_calls_per_turn": int(row["max_tool_calls_per_turn"]),
+            "sandbox_mode": row["sandbox_mode"],
+            "sandbox_api_url": row["sandbox_api_url"],
+            "sandbox_template_name": row["sandbox_template_name"],
+            "sandbox_namespace": row["sandbox_namespace"],
+            "sandbox_server_port": int(row["sandbox_server_port"]),
+            "sandbox_max_output_chars": int(row["sandbox_max_output_chars"]),
+            "sandbox_local_timeout_seconds": int(row["sandbox_local_timeout_seconds"]),
+            "sandbox_execution_model": row["sandbox_execution_model"],
+            "sandbox_session_idle_ttl_seconds": int(
+                row["sandbox_session_idle_ttl_seconds"]
+            ),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def upsert_user_config(self, user_id: str, config: dict[str, Any]) -> None:
+        """Create or update per-user runtime configuration."""
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            raise ValueError("user_id is required")
+        self.ensure_user(normalized_user_id)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO user_configs (
+                    user_id,
+                    model,
+                    max_tool_calls_per_turn,
+                    sandbox_mode,
+                    sandbox_api_url,
+                    sandbox_template_name,
+                    sandbox_namespace,
+                    sandbox_server_port,
+                    sandbox_max_output_chars,
+                    sandbox_local_timeout_seconds,
+                    sandbox_execution_model,
+                    sandbox_session_idle_ttl_seconds,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    model=excluded.model,
+                    max_tool_calls_per_turn=excluded.max_tool_calls_per_turn,
+                    sandbox_mode=excluded.sandbox_mode,
+                    sandbox_api_url=excluded.sandbox_api_url,
+                    sandbox_template_name=excluded.sandbox_template_name,
+                    sandbox_namespace=excluded.sandbox_namespace,
+                    sandbox_server_port=excluded.sandbox_server_port,
+                    sandbox_max_output_chars=excluded.sandbox_max_output_chars,
+                    sandbox_local_timeout_seconds=excluded.sandbox_local_timeout_seconds,
+                    sandbox_execution_model=excluded.sandbox_execution_model,
+                    sandbox_session_idle_ttl_seconds=excluded.sandbox_session_idle_ttl_seconds,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    normalized_user_id,
+                    str(config["model"]),
+                    int(config["max_tool_calls_per_turn"]),
+                    str(config["sandbox_mode"]),
+                    str(config["sandbox_api_url"]),
+                    str(config["sandbox_template_name"]),
+                    str(config["sandbox_namespace"]),
+                    int(config["sandbox_server_port"]),
+                    int(config["sandbox_max_output_chars"]),
+                    int(config["sandbox_local_timeout_seconds"]),
+                    str(config["sandbox_execution_model"]),
+                    int(config["sandbox_session_idle_ttl_seconds"]),
+                    now_iso,
+                    now_iso,
+                ),
+            )
 
     def _to_record(self, row: sqlite3.Row) -> dict[str, Any]:
         """Map a session row to an application dictionary."""
         return {
             "session_id": row["session_id"],
+            "user_id": row["user_id"] or "",
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "title": row["title"],
@@ -111,6 +296,7 @@ class SessionStore:
                 """
                 INSERT INTO sessions (
                     session_id,
+                    user_id,
                     created_at,
                     updated_at,
                     title,
@@ -119,8 +305,9 @@ class SessionStore:
                     tool_calls,
                     last_error,
                     share_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
+                    user_id=excluded.user_id,
                     updated_at=excluded.updated_at,
                     title=excluded.title,
                     messages_json=excluded.messages_json,
@@ -131,6 +318,7 @@ class SessionStore:
                 """,
                 (
                     session["session_id"],
+                    session.get("user_id") or "",
                     session["created_at"],
                     session["updated_at"],
                     session["title"],
@@ -158,11 +346,29 @@ class SessionStore:
             ).fetchall()
         return [self._to_record(row) for row in rows]
 
+    def list_sessions_for_user(self, user_id: str) -> list[dict[str, Any]]:
+        """Return sessions owned by one user ordered by most recent update."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM sessions WHERE user_id = ? ORDER BY updated_at DESC",
+                (user_id,),
+            ).fetchall()
+        return [self._to_record(row) for row in rows]
+
     def delete_session(self, session_id: str) -> bool:
         """Delete a session record by id and report whether a row was removed."""
         with self._connect() as connection:
             cursor = connection.execute(
                 "DELETE FROM sessions WHERE session_id = ?", (session_id,)
+            )
+        return cursor.rowcount > 0
+
+    def delete_session_for_user(self, session_id: str, user_id: str) -> bool:
+        """Delete a session record when owned by the provided user."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM sessions WHERE session_id = ? AND user_id = ?",
+                (session_id, user_id),
             )
         return cursor.rowcount > 0
 
@@ -173,6 +379,28 @@ class SessionStore:
                 "UPDATE sessions SET share_id = ? WHERE session_id = ?",
                 (share_id, session_id),
             )
+
+    def set_share_id_for_user(
+        self, session_id: str, user_id: str, share_id: str
+    ) -> bool:
+        """Store a public share id for a session owned by the provided user."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE sessions SET share_id = ? WHERE session_id = ? AND user_id = ?",
+                (share_id, session_id, user_id),
+            )
+        return cursor.rowcount > 0
+
+    def get_session_for_user(
+        self, session_id: str, user_id: str
+    ) -> dict[str, Any] | None:
+        """Return one session by id when owned by the provided user."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM sessions WHERE session_id = ? AND user_id = ?",
+                (session_id, user_id),
+            ).fetchone()
+        return self._to_record(row) if row else None
 
     def get_by_share_id(self, share_id: str) -> dict[str, Any] | None:
         """Return a shared session by share id if present."""
@@ -215,6 +443,60 @@ class SessionStore:
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM assets WHERE asset_id = ?", (asset_id,)
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "asset_id": row["asset_id"],
+            "session_id": row["session_id"],
+            "tool_call_id": row["tool_call_id"],
+            "filename": row["filename"],
+            "mime_type": row["mime_type"],
+            "storage_path": row["storage_path"],
+            "size_bytes": row["size_bytes"],
+            "created_at": row["created_at"],
+        }
+
+    def get_asset_for_user(self, asset_id: str, user_id: str) -> dict[str, Any] | None:
+        """Fetch an asset by id when it belongs to a session owned by the user."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT a.*
+                FROM assets a
+                JOIN sessions s ON s.session_id = a.session_id
+                WHERE a.asset_id = ?
+                  AND s.user_id = ?
+                """,
+                (asset_id, user_id),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "asset_id": row["asset_id"],
+            "session_id": row["session_id"],
+            "tool_call_id": row["tool_call_id"],
+            "filename": row["filename"],
+            "mime_type": row["mime_type"],
+            "storage_path": row["storage_path"],
+            "size_bytes": row["size_bytes"],
+            "created_at": row["created_at"],
+        }
+
+    def get_asset_for_share(
+        self, asset_id: str, share_id: str
+    ) -> dict[str, Any] | None:
+        """Fetch an asset by id when it belongs to a publicly shared session."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT a.*
+                FROM assets a
+                JOIN sessions s ON s.session_id = a.session_id
+                WHERE a.asset_id = ?
+                  AND s.share_id = ?
+                """,
+                (asset_id, share_id),
             ).fetchone()
         if not row:
             return None

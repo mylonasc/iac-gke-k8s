@@ -12,6 +12,8 @@ from fastapi.testclient import TestClient
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 os.environ.setdefault("SESSION_STORE_PATH", "/tmp/sandboxed-react-agent-test.db")
 os.environ.setdefault("ASSET_STORE_PATH", "/tmp/sandboxed-react-agent-assets")
+os.environ.setdefault("ANON_IDENTITY_ENABLED", "1")
+os.environ.setdefault("ANON_IDENTITY_SECRET", "test-anon-secret")
 
 Path(os.environ["SESSION_STORE_PATH"]).unlink(missing_ok=True)
 
@@ -28,6 +30,8 @@ def setup_function() -> None:
         connection.execute("DELETE FROM sessions")
         connection.execute("DELETE FROM assets")
         connection.execute("DELETE FROM sandbox_leases")
+        connection.execute("DELETE FROM user_configs")
+        connection.execute("DELETE FROM users")
     shutil.rmtree(os.environ["ASSET_STORE_PATH"], ignore_errors=True)
 
 
@@ -99,6 +103,79 @@ def test_config_roundtrip() -> None:
     assert update_payload["sandbox"]["mode"] == "local"
 
 
+def test_me_endpoint_returns_user_tier() -> None:
+    response = client.get("/api/me")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["user_id"]
+    assert payload["tier"] == "default"
+
+
+def test_config_is_isolated_per_user(monkeypatch) -> None:
+    monkeypatch.setattr(main_module.auth_config, "enabled", True)
+    monkeypatch.setattr(
+        main_module.token_verifier,
+        "verify",
+        lambda token: {"sub": "user-a" if token == "token-a" else "user-b"},
+    )
+
+    update_a = client.post(
+        "/api/config",
+        headers={"Authorization": "Bearer token-a"},
+        json={
+            "model": "gpt-4.1-mini",
+            "max_tool_calls_per_turn": 2,
+            "sandbox_mode": "local",
+        },
+    )
+    assert update_a.status_code == 200
+
+    update_b = client.post(
+        "/api/config",
+        headers={"Authorization": "Bearer token-b"},
+        json={
+            "model": "gpt-4o-mini",
+            "max_tool_calls_per_turn": 6,
+            "sandbox_mode": "cluster",
+        },
+    )
+    assert update_b.status_code == 200
+
+    get_a = client.get("/api/config", headers={"Authorization": "Bearer token-a"})
+    get_b = client.get("/api/config", headers={"Authorization": "Bearer token-b"})
+    assert get_a.status_code == 200
+    assert get_b.status_code == 200
+    payload_a = get_a.json()
+    payload_b = get_b.json()
+    assert payload_a["model"] == "gpt-4.1-mini"
+    assert payload_a["max_tool_calls_per_turn"] == 2
+    assert payload_a["sandbox"]["mode"] == "local"
+    assert payload_b["model"] == "gpt-4o-mini"
+    assert payload_b["max_tool_calls_per_turn"] == 6
+    assert payload_b["sandbox"]["mode"] == "cluster"
+
+
+def test_config_change_recycles_user_session_leases(monkeypatch) -> None:
+    created = client.post("/api/sessions", json={})
+    assert created.status_code == 200
+    session_id = created.json()["session_id"]
+
+    calls: list[tuple[str, str]] = []
+
+    def _fake_release_scope(scope_type: str, scope_key: str) -> bool:
+        calls.append((scope_type, scope_key))
+        return True
+
+    monkeypatch.setattr(agent.sandbox_lifecycle, "release_scope", _fake_release_scope)
+
+    response = client.post(
+        "/api/config",
+        json={"sandbox_template_name": "python-runtime-template-large"},
+    )
+    assert response.status_code == 200
+    assert ("session", session_id) in calls
+
+
 def test_config_updates_sandbox_lifecycle_mode() -> None:
     response = client.post(
         "/api/config",
@@ -157,22 +234,27 @@ def test_sandbox_lifecycle_endpoints_roundtrip(monkeypatch) -> None:
 
 
 def test_reset_session_endpoint() -> None:
-    session = agent.create_session()
+    created = client.post("/api/sessions", json={})
+    assert created.status_code == 200
+    session_id = created.json()["session_id"]
 
-    response = client.post(f"/api/sessions/{session.session_id}/reset")
+    response = client.post(f"/api/sessions/{session_id}/reset")
     assert response.status_code == 200
     assert response.json()["reset"] is True
 
-    missing = client.post(f"/api/sessions/{session.session_id}/reset")
+    missing = client.post(f"/api/sessions/{session_id}/reset")
     assert missing.status_code == 404
 
 
 def test_session_sandbox_endpoint() -> None:
-    session = agent.create_session()
-    response = client.get(f"/api/sessions/{session.session_id}/sandbox")
+    created = client.post("/api/sessions", json={})
+    assert created.status_code == 200
+    session_id = created.json()["session_id"]
+
+    response = client.get(f"/api/sessions/{session_id}/sandbox")
     assert response.status_code == 200
     payload = response.json()
-    assert payload["session_id"] == session.session_id
+    assert payload["session_id"] == session_id
     assert payload["sandbox"]["has_active_lease"] is False
 
 
@@ -228,7 +310,12 @@ def test_assistant_endpoint_streams_transport_state(monkeypatch) -> None:
             }
         ]
 
-    monkeypatch.setattr(agent, "run_assistant_transport", fake_run_assistant_transport)
+    async def wrapper(payload, controller, user_id):
+        assert isinstance(user_id, str)
+        assert user_id
+        await fake_run_assistant_transport(payload, controller)
+
+    monkeypatch.setattr(agent, "run_assistant_transport", wrapper)
 
     response = client.post(
         "/api/assistant",
@@ -253,7 +340,10 @@ def test_assistant_endpoint_streams_transport_state(monkeypatch) -> None:
 
 
 def test_loading_session_normalizes_stale_running_status() -> None:
-    session = agent.create_session(title="resume me")
+    created = client.post("/api/sessions", json={"title": "resume me"})
+    assert created.status_code == 200
+    session_id = created.json()["session_id"]
+    session = agent.sessions[session_id]
     session.ui_messages = [
         {
             "id": "u1",
@@ -269,7 +359,7 @@ def test_loading_session_normalizes_stale_running_status() -> None:
     ]
     agent._persist_session(session)
 
-    fetched = client.get(f"/api/sessions/{session.session_id}")
+    fetched = client.get(f"/api/sessions/{session_id}")
     assert fetched.status_code == 200
     messages = fetched.json()["messages"]
     assert messages[-1]["role"] == "assistant"
@@ -277,9 +367,12 @@ def test_loading_session_normalizes_stale_running_status() -> None:
 
 
 def test_asset_endpoints_serve_uploaded_file() -> None:
-    session = agent.create_session(title="asset test")
+    created = client.post("/api/sessions", json={"title": "asset test"})
+    assert created.status_code == 200
+    session_id = created.json()["session_id"]
+
     asset = agent.asset_manager.store_base64_asset(
-        session_id=session.session_id,
+        session_id=session_id,
         tool_call_id="tool-1",
         filename="pixel.png",
         mime_type="image/png",
@@ -297,7 +390,10 @@ def test_asset_endpoints_serve_uploaded_file() -> None:
 
 
 def test_transport_uses_server_session_messages_as_source_of_truth(monkeypatch) -> None:
-    session = agent.create_session(title="asset persistence")
+    created = client.post("/api/sessions", json={"title": "asset persistence"})
+    assert created.status_code == 200
+    session_id = created.json()["session_id"]
+    session = agent.sessions[session_id]
     session.ui_messages = [
         {
             "id": "u-old",
@@ -373,9 +469,11 @@ def test_transport_uses_server_session_messages_as_source_of_truth(monkeypatch) 
     )
     controller = SimpleNamespace(state={"messages": [], "tool_updates": []})
 
-    asyncio.run(agent.run_assistant_transport(payload, controller))
+    asyncio.run(
+        agent.run_assistant_transport(payload, controller, user_id=session.user_id)
+    )
 
-    fetched = client.get(f"/api/sessions/{session.session_id}")
+    fetched = client.get(f"/api/sessions/{session_id}")
     assert fetched.status_code == 200
     messages = fetched.json()["messages"]
     old_assistant = next(m for m in messages if m.get("id") == "a-old")
@@ -385,10 +483,13 @@ def test_transport_uses_server_session_messages_as_source_of_truth(monkeypatch) 
 
 
 def test_html_asset_endpoint_sets_security_headers() -> None:
-    session = agent.create_session(title="html asset test")
+    created = client.post("/api/sessions", json={"title": "html asset test"})
+    assert created.status_code == 200
+    session_id = created.json()["session_id"]
+
     html = "<html><body><h1>Hello widget</h1></body></html>"
     asset = agent.asset_manager.store_base64_asset(
-        session_id=session.session_id,
+        session_id=session_id,
         tool_call_id="tool-html-1",
         filename="widget.html",
         mime_type="text/html",
@@ -456,15 +557,15 @@ def test_shared_markdown_includes_tool_asset_links() -> None:
         }
     ]
     agent._persist_session(session)
-    share_id = agent.create_share(session.session_id)
+    share_id = agent.create_share(session.session_id, user_id="")
     assert share_id is not None
 
     markdown_response = client.get(f"/api/public/{share_id}/markdown")
     assert markdown_response.status_code == 200
     markdown = markdown_response.text
     assert "#### Tool assets" in markdown
-    assert "![plot.png](/api/assets/asset-png)" in markdown
-    assert "[report.csv](/api/assets/asset-csv/download)" in markdown
+    assert f"![plot.png](/api/public/{share_id}/assets/asset-png)" in markdown
+    assert f"[report.csv](/api/public/{share_id}/assets/asset-csv/download)" in markdown
 
 
 def test_python_tool_auto_exposes_detected_image_path() -> None:
@@ -483,34 +584,13 @@ def test_python_tool_auto_exposes_detected_image_path() -> None:
 
 
 def test_assistant_transport_emits_image_asset_in_message(monkeypatch) -> None:
-    agent.sandbox_manager.mode = "local"
-
-    class FakeFunction:
-        def __init__(self, name: str, arguments: str) -> None:
-            self.name = name
-            self.arguments = arguments
-
-    class FakeToolCall:
-        def __init__(self, call_id: str, name: str, arguments: str) -> None:
-            self.id = call_id
-            self.function = FakeFunction(name, arguments)
-
-    class FakeMessage:
-        def __init__(self, content: str, tool_calls: list | None = None) -> None:
-            self.content = content
-            self.tool_calls = tool_calls or []
-
-    class FakeChoice:
-        def __init__(self, message) -> None:
-            self.message = message
-
-    class FakeCompletion:
-        def __init__(self, message) -> None:
-            self.choices = [FakeChoice(message)]
+    updated = client.post("/api/config", json={"sandbox_mode": "local"})
+    assert updated.status_code == 200
 
     calls = {"count": 0}
 
-    def fake_create(**kwargs):
+    async def fake_streamed_completion(_messages, model):
+        assert isinstance(model, str)
         calls["count"] += 1
         if calls["count"] == 1:
             code = (
@@ -520,21 +600,24 @@ def test_assistant_transport_emits_image_asset_in_message(monkeypatch) -> None:
                 "expose_asset('/tmp/sinusoid_plot.png')\n"
                 "print('created sinusoid')"
             )
-            return FakeCompletion(
-                FakeMessage(
-                    "",
-                    [
-                        FakeToolCall(
-                            "tool-plot",
-                            "sandbox_exec_python",
-                            json.dumps({"code": code}),
-                        )
-                    ],
-                )
-            )
-        return FakeCompletion(FakeMessage("Plot generated and attached."))
+            return {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "tool-plot",
+                        "type": "function",
+                        "function": {
+                            "name": "sandbox_exec_python",
+                            "arguments": json.dumps({"code": code}),
+                        },
+                    }
+                ],
+            }
+        return {"content": "Plot generated and attached.", "tool_calls": []}
 
-    monkeypatch.setattr(agent.async_client.chat.completions, "create", fake_create)
+    monkeypatch.setattr(
+        agent, "_create_completion_streaming_async", fake_streamed_completion
+    )
 
     response = client.post(
         "/api/assistant",
@@ -560,3 +643,132 @@ def test_assistant_transport_emits_image_asset_in_message(monkeypatch) -> None:
     assert response.status_code == 200
     assert "/api/assets/" in response.text
     assert "Plot generated and attached" in response.text
+
+
+def test_sessions_are_scoped_per_authenticated_user(monkeypatch) -> None:
+    monkeypatch.setattr(main_module.auth_config, "enabled", True)
+    monkeypatch.setattr(
+        main_module.token_verifier,
+        "verify",
+        lambda token: {"sub": token, "token": token},
+    )
+
+    created = client.post(
+        "/api/sessions",
+        json={},
+        headers={"Authorization": "Bearer user-a"},
+    )
+    assert created.status_code == 200
+    session_id = created.json()["session_id"]
+
+    own_list = client.get("/api/sessions", headers={"Authorization": "Bearer user-a"})
+    assert own_list.status_code == 200
+    assert any(item["session_id"] == session_id for item in own_list.json()["sessions"])
+
+    other_list = client.get("/api/sessions", headers={"Authorization": "Bearer user-b"})
+    assert other_list.status_code == 200
+    assert all(
+        item["session_id"] != session_id for item in other_list.json()["sessions"]
+    )
+
+    other_get = client.get(
+        f"/api/sessions/{session_id}", headers={"Authorization": "Bearer user-b"}
+    )
+    assert other_get.status_code == 404
+
+
+def test_public_session_rewrites_asset_urls_and_serves_assets() -> None:
+    session = agent.create_session(title="shared assets", user_id="owner-1")
+    asset = agent.asset_manager.store_base64_asset(
+        session_id=session.session_id,
+        tool_call_id="tool-1",
+        filename="pixel.png",
+        mime_type="image/png",
+        base64_data="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO5x8t8AAAAASUVORK5CYII=",
+        created_at="2026-03-10T00:00:00Z",
+    )
+    session.ui_messages = [
+        {
+            "id": "a1",
+            "role": "assistant",
+            "status": {"type": "complete"},
+            "content": [
+                {"type": "image", "image": asset["view_url"]},
+                {
+                    "type": "tool-call",
+                    "toolCallId": "tool-1",
+                    "toolName": "sandbox_exec_python",
+                    "argsText": "{}",
+                    "result": {
+                        "ok": True,
+                        "assets": [
+                            {
+                                "asset_id": asset["asset_id"],
+                                "filename": asset["filename"],
+                                "mime_type": asset["mime_type"],
+                                "view_url": asset["view_url"],
+                                "download_url": asset["download_url"],
+                            }
+                        ],
+                    },
+                },
+            ],
+        }
+    ]
+    agent._persist_session(session)
+    share_id = agent.create_share(session.session_id, user_id="owner-1")
+    assert share_id is not None
+
+    shared = client.get(f"/api/public/{share_id}")
+    assert shared.status_code == 200
+    payload = shared.json()
+    image_url = payload["messages"][0]["content"][0]["image"]
+    assert image_url == f"/api/public/{share_id}/assets/{asset['asset_id']}"
+
+    public_asset = client.get(image_url)
+    assert public_asset.status_code == 200
+    assert public_asset.headers["content-type"].startswith("image/png")
+
+
+def test_private_assets_are_not_accessible_across_users(monkeypatch) -> None:
+    monkeypatch.setattr(main_module.auth_config, "enabled", True)
+    monkeypatch.setattr(
+        main_module.token_verifier,
+        "verify",
+        lambda token: {"sub": token, "token": token},
+    )
+
+    session = agent.create_session(title="private assets", user_id="user-a")
+    asset = agent.asset_manager.store_base64_asset(
+        session_id=session.session_id,
+        tool_call_id="tool-1",
+        filename="pixel.png",
+        mime_type="image/png",
+        base64_data="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO5x8t8AAAAASUVORK5CYII=",
+        created_at="2026-03-10T00:00:00Z",
+    )
+
+    response = client.get(asset["view_url"], headers={"Authorization": "Bearer user-b"})
+    assert response.status_code == 404
+
+
+def test_sessions_are_scoped_per_anonymous_identity_cookie() -> None:
+    client_a = TestClient(app)
+    client_b = TestClient(app)
+
+    created = client_a.post("/api/sessions", json={"title": "anon-a"})
+    assert created.status_code == 200
+    session_id = created.json()["session_id"]
+
+    own_list = client_a.get("/api/sessions")
+    assert own_list.status_code == 200
+    assert any(item["session_id"] == session_id for item in own_list.json()["sessions"])
+
+    other_list = client_b.get("/api/sessions")
+    assert other_list.status_code == 200
+    assert all(
+        item["session_id"] != session_id for item in other_list.json()["sessions"]
+    )
+
+    other_get = client_b.get(f"/api/sessions/{session_id}")
+    assert other_get.status_code == 404

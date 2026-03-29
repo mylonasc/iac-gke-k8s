@@ -103,6 +103,27 @@
   gap: 0.55rem;
 }
 
+.user-identity {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 0.28rem 0.62rem;
+  background: var(--surface-strong);
+  color: var(--text-secondary);
+  max-width: min(36vw, 26rem);
+}
+
+.user-identity code {
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+}
+
 .tabs {
   display: inline-flex;
   border: 1px solid var(--border-strong);
@@ -897,6 +918,11 @@
   .topbar-actions {
     width: 100%;
     justify-content: space-between;
+    flex-wrap: wrap;
+  }
+
+  .user-identity {
+    max-width: 100%;
   }
 
   .mobile-controls {

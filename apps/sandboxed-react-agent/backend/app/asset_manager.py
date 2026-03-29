@@ -57,3 +57,11 @@ class AssetManager:
 
     def get_asset(self, asset_id: str) -> dict[str, Any] | None:
         return self.session_store.get_asset(asset_id)
+
+    def get_asset_for_user(self, asset_id: str, user_id: str) -> dict[str, Any] | None:
+        return self.session_store.get_asset_for_user(asset_id, user_id)
+
+    def get_asset_for_share(
+        self, asset_id: str, share_id: str
+    ) -> dict[str, Any] | None:
+        return self.session_store.get_asset_for_share(asset_id, share_id)

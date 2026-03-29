@@ -189,10 +189,44 @@ class SandboxLifecycleService:
             now + timedelta(seconds=self.max_lease_ttl_seconds),
         )
 
-    def _touch_lease(self, lease: SandboxLease) -> SandboxLease:
+    def _effective_runtime(
+        self, runtime_config: dict[str, object] | None
+    ) -> dict[str, object]:
+        """Return effective sandbox runtime values with optional request overrides."""
+        defaults: dict[str, object] = {
+            "mode": self.sandbox_manager.mode,
+            "api_url": self.sandbox_manager.api_url,
+            "template_name": self.sandbox_manager.template_name,
+            "namespace": self.sandbox_manager.namespace,
+            "server_port": self.sandbox_manager.server_port,
+            "sandbox_ready_timeout": self.sandbox_manager.sandbox_ready_timeout,
+            "gateway_ready_timeout": self.sandbox_manager.gateway_ready_timeout,
+            "max_output_chars": self.sandbox_manager.max_output_chars,
+            "local_timeout_seconds": self.sandbox_manager.local_timeout_seconds,
+            "execution_model": self.execution_model,
+            "session_idle_ttl_seconds": self.session_idle_ttl_seconds,
+            "max_lease_ttl_seconds": self.max_lease_ttl_seconds,
+        }
+        if not isinstance(runtime_config, dict):
+            return defaults
+        merged = dict(defaults)
+        for key in defaults:
+            if runtime_config.get(key) is not None:
+                merged[key] = runtime_config[key]
+        return merged
+
+    def _touch_lease(
+        self, lease: SandboxLease, *, session_idle_ttl_seconds: int | None = None
+    ) -> SandboxLease:
         """Refresh lease activity timestamps and persist the update."""
         now = _now_utc()
-        idle_expiry, hard_expiry = self._ttl_bounds()
+        idle_ttl = (
+            int(session_idle_ttl_seconds)
+            if session_idle_ttl_seconds is not None
+            else self.session_idle_ttl_seconds
+        )
+        idle_expiry = now + timedelta(seconds=idle_ttl)
+        hard_expiry = now + timedelta(seconds=self.max_lease_ttl_seconds)
 
         created = _from_iso(lease.created_at)
         created_cap = created + timedelta(seconds=self.max_lease_ttl_seconds)
@@ -201,18 +235,26 @@ class SandboxLifecycleService:
         self.session_store.upsert_sandbox_lease(lease.as_record())
         return lease
 
-    def _build_fresh_lease(self, scope_type: str, scope_key: str) -> SandboxLease:
+    def _build_fresh_lease(
+        self,
+        scope_type: str,
+        scope_key: str,
+        *,
+        template_name: str,
+        namespace: str,
+        session_idle_ttl_seconds: int,
+    ) -> SandboxLease:
         """Create a new lease model using current sandbox defaults."""
         now = _now_utc()
-        idle_expiry, _ = self._ttl_bounds()
+        idle_expiry = now + timedelta(seconds=session_idle_ttl_seconds)
         return SandboxLease(
             lease_id=f"lease-{uuid.uuid4().hex}",
             scope_type=scope_type,
             scope_key=scope_key,
             status="pending",
             claim_name=None,
-            template_name=self.sandbox_manager.template_name,
-            namespace=self.sandbox_manager.namespace,
+            template_name=template_name,
+            namespace=namespace,
             metadata={},
             created_at=_to_iso(now),
             last_used_at=_to_iso(now),
@@ -221,7 +263,16 @@ class SandboxLifecycleService:
             last_error=None,
         )
 
-    def _create_runtime(self, lease: SandboxLease) -> _LeaseRuntime:
+    def _create_runtime(
+        self,
+        lease: SandboxLease,
+        *,
+        api_url: str,
+        server_port: int,
+        sandbox_ready_timeout: int,
+        gateway_ready_timeout: int,
+        session_idle_ttl_seconds: int,
+    ) -> _LeaseRuntime:
         """Create and enter a sandbox client for the provided lease."""
         logger.info(
             "lease.acquire.start",
@@ -237,18 +288,18 @@ class SandboxLifecycleService:
 
         client = SandboxClient(
             template_name=lease.template_name,
-            api_url=self.sandbox_manager.api_url,
+            api_url=api_url,
             namespace=lease.namespace,
-            server_port=self.sandbox_manager.server_port,
-            sandbox_ready_timeout=self.sandbox_manager.sandbox_ready_timeout,
-            gateway_ready_timeout=self.sandbox_manager.gateway_ready_timeout,
+            server_port=server_port,
+            sandbox_ready_timeout=sandbox_ready_timeout,
+            gateway_ready_timeout=gateway_ready_timeout,
         )
         client.__enter__()
 
         lease.claim_name = getattr(client, "claim_name", None)
         lease.status = "ready"
         lease.last_error = None
-        self._touch_lease(lease)
+        self._touch_lease(lease, session_idle_ttl_seconds=session_idle_ttl_seconds)
 
         runtime = _LeaseRuntime(lease=lease, client=client)
         self._runtime_by_lease_id[lease.lease_id] = runtime
@@ -361,8 +412,22 @@ class SandboxLifecycleService:
                 },
             )
 
-    def acquire_scope_lease(self, scope_type: str, scope_key: str) -> _LeaseRuntime:
+    def acquire_scope_lease(
+        self,
+        scope_type: str,
+        scope_key: str,
+        *,
+        runtime_config: dict[str, object] | None = None,
+    ) -> _LeaseRuntime:
         """Acquire or reuse a lease runtime for the provided logical scope."""
+        effective = self._effective_runtime(runtime_config)
+        template_name = str(effective["template_name"])
+        namespace = str(effective["namespace"])
+        api_url = str(effective["api_url"])
+        server_port = int(effective["server_port"])
+        sandbox_ready_timeout = int(effective["sandbox_ready_timeout"])
+        gateway_ready_timeout = int(effective["gateway_ready_timeout"])
+        session_idle_ttl_seconds = int(effective["session_idle_ttl_seconds"])
         with self._state_lock:
             existing_lease = self._lookup_scope_lease(scope_type, scope_key)
             if existing_lease and self._is_expired(existing_lease):
@@ -379,10 +444,30 @@ class SandboxLifecycleService:
                     self._lease_id_by_scope.pop((scope_type, scope_key), None)
                 existing_lease = None
 
+            if existing_lease and (
+                existing_lease.template_name != template_name
+                or existing_lease.namespace != namespace
+            ):
+                runtime = self._runtime_by_lease_id.get(existing_lease.lease_id)
+                if runtime:
+                    self._release_runtime_handle(runtime, status="released")
+                else:
+                    self._delete_claim_best_effort(existing_lease)
+                    self.session_store.mark_sandbox_lease_released(
+                        existing_lease.lease_id,
+                        released_at=_to_iso(_now_utc()),
+                        status="released",
+                    )
+                    self._lease_id_by_scope.pop((scope_type, scope_key), None)
+                existing_lease = None
+
             if existing_lease:
                 runtime = self._runtime_by_lease_id.get(existing_lease.lease_id)
                 if runtime:
-                    self._touch_lease(runtime.lease)
+                    self._touch_lease(
+                        runtime.lease,
+                        session_idle_ttl_seconds=session_idle_ttl_seconds,
+                    )
                     logger.info(
                         "lease.reuse",
                         extra={
@@ -395,9 +480,22 @@ class SandboxLifecycleService:
                     )
                     return runtime
 
-            lease = existing_lease or self._build_fresh_lease(scope_type, scope_key)
+            lease = existing_lease or self._build_fresh_lease(
+                scope_type,
+                scope_key,
+                template_name=template_name,
+                namespace=namespace,
+                session_idle_ttl_seconds=session_idle_ttl_seconds,
+            )
             self.session_store.upsert_sandbox_lease(lease.as_record())
-            return self._create_runtime(lease)
+            return self._create_runtime(
+                lease,
+                api_url=api_url,
+                server_port=server_port,
+                sandbox_ready_timeout=sandbox_ready_timeout,
+                gateway_ready_timeout=gateway_ready_timeout,
+                session_idle_ttl_seconds=session_idle_ttl_seconds,
+            )
 
     def release_scope(self, scope_type: str, scope_key: str) -> bool:
         """Release an active lease for a scope and return whether one existed."""
@@ -468,40 +566,70 @@ class SandboxLifecycleService:
                 released_count += 1
         return released_count
 
-    def exec_python(self, session_id: str, code: str) -> SandboxExecutionResult:
+    def exec_python(
+        self,
+        session_id: str,
+        code: str,
+        *,
+        runtime_config: dict[str, object] | None = None,
+    ) -> SandboxExecutionResult:
         """Execute Python code under current lifecycle execution policy."""
+        effective = self._effective_runtime(runtime_config)
+        mode = str(effective["mode"])
+        execution_model = str(effective["execution_model"])
         self.reap_expired_leases()
-        if self.sandbox_manager.mode == "local":
-            return self.sandbox_manager.exec_python(code)
-        if self.execution_model == "ephemeral":
-            return self.sandbox_manager.exec_python(code)
+        if mode == "local":
+            return self.sandbox_manager.exec_python(code, runtime_config=effective)
+        if execution_model == "ephemeral":
+            return self.sandbox_manager.exec_python(code, runtime_config=effective)
 
-        runtime = self.acquire_scope_lease("session", session_id)
+        runtime = self.acquire_scope_lease(
+            "session", session_id, runtime_config=effective
+        )
         with runtime.lock:
-            self._touch_lease(runtime.lease)
+            self._touch_lease(
+                runtime.lease,
+                session_idle_ttl_seconds=int(effective["session_idle_ttl_seconds"]),
+            )
             return self.sandbox_manager.exec_python_with_sandbox(
                 code,
                 sandbox=runtime.client,
                 lease_id=runtime.lease.lease_id,
                 claim_name=runtime.lease.claim_name,
+                runtime_config=effective,
             )
 
-    def exec_shell(self, session_id: str, command: str) -> SandboxExecutionResult:
+    def exec_shell(
+        self,
+        session_id: str,
+        command: str,
+        *,
+        runtime_config: dict[str, object] | None = None,
+    ) -> SandboxExecutionResult:
         """Execute a shell command under current lifecycle execution policy."""
+        effective = self._effective_runtime(runtime_config)
+        mode = str(effective["mode"])
+        execution_model = str(effective["execution_model"])
         self.reap_expired_leases()
-        if self.sandbox_manager.mode == "local":
-            return self.sandbox_manager.exec_shell(command)
-        if self.execution_model == "ephemeral":
-            return self.sandbox_manager.exec_shell(command)
+        if mode == "local":
+            return self.sandbox_manager.exec_shell(command, runtime_config=effective)
+        if execution_model == "ephemeral":
+            return self.sandbox_manager.exec_shell(command, runtime_config=effective)
 
-        runtime = self.acquire_scope_lease("session", session_id)
+        runtime = self.acquire_scope_lease(
+            "session", session_id, runtime_config=effective
+        )
         with runtime.lock:
-            self._touch_lease(runtime.lease)
+            self._touch_lease(
+                runtime.lease,
+                session_idle_ttl_seconds=int(effective["session_idle_ttl_seconds"]),
+            )
             return self.sandbox_manager.exec_shell_with_sandbox(
                 command,
                 sandbox=runtime.client,
                 lease_id=runtime.lease.lease_id,
                 claim_name=runtime.lease.claim_name,
+                runtime_config=effective,
             )
 
     def list_sandboxes(self) -> list[dict[str, Any]]:

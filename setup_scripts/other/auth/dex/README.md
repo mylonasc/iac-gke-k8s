@@ -1,4 +1,4 @@
-# Dex + oauth2-proxy setup (Microsoft + GitHub + Google)
+# Dex + oauth2-proxy setup (Microsoft + GitHub + Google + local users)
 
 This folder contains a concrete setup for running Dex as your identity broker,
 then using oauth2-proxy (already present in this repo) to protect your app
@@ -9,13 +9,16 @@ Result:
 - User hits your app.
 - ingress-nginx redirects unauthenticated users to oauth2-proxy.
 - oauth2-proxy delegates login to Dex (OIDC provider).
-- Dex shows Microsoft, GitHub, and Google login options.
+- Dex shows Microsoft, GitHub, Google, and optional local username/password login options.
 
 ## Files in this folder
 
 - `01_create_dex_config_secret.sh`: creates/updates the Dex config Secret from env vars.
+- `02_load_env_from_cluster.sh`: prints `export ...` lines from the deployed Dex secret.
+- `manage_static_passwords.py`: Textual TUI to add/update/delete local password users.
 - `dex.yaml`: Dex Namespace + Deployment + Service.
 - `dex-ingress.example.yaml`: example ingress for exposing Dex at `/dex`.
+- `static-passwords.example.yaml`: example local user entries for Dex password DB.
 
 Related oauth2-proxy files:
 
@@ -53,6 +56,15 @@ Important: these are two different callback types and both are required:
 
 ## 2) Create Dex config Secret (includes connectors + oauth2-proxy client)
 
+If Dex is already deployed and you want to avoid retyping OAuth secrets, load the
+current values from cluster first:
+
+```bash
+eval "$(./02_load_env_from_cluster.sh)"
+```
+
+Then set or update any fields you want to change and run the config script.
+
 Export variables and run the script:
 
 ```bash
@@ -74,6 +86,64 @@ export DEX_GOOGLE_CLIENT_SECRET="<google-client-secret>"
 ./01_create_dex_config_secret.sh
 ```
 
+### Optional: add local username/password users
+
+1. Copy the example file and populate your curated users:
+
+```bash
+cp static-passwords.example.yaml static-passwords.yaml
+```
+
+2. Generate bcrypt hashes and replace `hash` values in `static-passwords.yaml`:
+
+```bash
+htpasswd -bnBC 10 "" "<plain-password>" | tr -d ':\n'
+```
+
+3. Export the file path before running the script:
+
+```bash
+export DEX_STATIC_PASSWORDS_FILE="$(pwd)/static-passwords.yaml"
+./01_create_dex_config_secret.sh
+```
+
+When `DEX_STATIC_PASSWORDS_FILE` is set, the script appends:
+
+- `enablePasswordDB: true`
+- `staticPasswords:` entries loaded from the file
+
+Expected file format is a YAML list of users (no top-level `staticPasswords:` key).
+
+### Optional: manage users with a TUI
+
+Install the UI dependency once:
+
+```bash
+pip install textual
+```
+
+Then launch the manager (defaults to `./static-passwords.yaml`):
+
+```bash
+./manage_static_passwords.py
+```
+
+Or use a custom file:
+
+```bash
+./manage_static_passwords.py --file /path/to/static-passwords.yaml
+```
+
+Inside the TUI:
+
+- `a` add user
+- `e` edit user metadata
+- `p` change password
+- `d` delete user
+- `s` save
+- `r` reload
+- `q` quit
+
 Notes:
 
 - `DEX_MICROSOFT_TENANT=common` is multi-tenant; set your tenant ID to restrict.
@@ -81,11 +151,14 @@ Notes:
 - Current manifest uses SQLite on pod local storage (`emptyDir`) for Dex state.
   Because that storage is pod-local, run a single Dex replica in this mode.
   For HA/persistence, move Dex storage to a durable backend.
+- `static-passwords.yaml` is gitignored in this folder. Do not commit real user hashes.
 
 ## 3) Deploy Dex
 
 ```bash
 kubectl apply -f dex.yaml
+kubectl rollout restart deployment/dex -n dex
+kubectl rollout status deployment/dex -n dex
 ```
 
 Then expose it via ingress:

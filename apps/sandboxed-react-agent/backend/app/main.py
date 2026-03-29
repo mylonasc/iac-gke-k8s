@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import time
 import uuid
 from typing import Any
@@ -11,7 +12,13 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from .agent import SandboxedReactAgent
-from .auth import AuthConfig, TokenVerifier, authenticate_request
+from .auth import (
+    AnonymousIdentityConfig,
+    AuthConfig,
+    TokenVerifier,
+    authenticate_request,
+    ensure_anonymous_user_id,
+)
 from .logging_config import bind_context, configure_logging
 from .tracing import init_tracing
 
@@ -88,19 +95,81 @@ app = FastAPI(title="sandboxed-react-agent-backend", version="0.1.0")
 init_tracing(app)
 auth_config = AuthConfig.from_env()
 token_verifier = TokenVerifier(auth_config)
+anon_identity_config = AnonymousIdentityConfig.from_env()
+
+
+def _request_user_id(request: Request) -> str:
+    user_id = str(getattr(request.state, "auth_user_id", "") or "").strip()
+    if not user_id and not auth_config.enabled:
+        user_id = (os.getenv("AUTH_DEV_USER_ID") or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Missing user identity")
+    return user_id
+
+
+def _extract_transport_session_id(payload: AssistantTransportRequest) -> str | None:
+    if isinstance(payload.state, dict):
+        maybe_session_id = payload.state.get("session_id")
+        if isinstance(maybe_session_id, str) and maybe_session_id:
+            return maybe_session_id
+    if isinstance(payload.threadId, str) and payload.threadId:
+        return payload.threadId
+    return None
+
+
+def _asset_security_headers(asset: dict[str, Any]) -> dict[str, str]:
+    if not str(asset.get("mime_type") or "").startswith("text/html"):
+        return {}
+    return {
+        "Content-Security-Policy": (
+            "default-src 'none'; "
+            "script-src 'unsafe-inline' https:; "
+            "style-src 'unsafe-inline' https:; "
+            "img-src data: blob: https: http:; "
+            "font-src data: https:; "
+            "connect-src https: http:; "
+            "frame-ancestors 'self'; "
+            "base-uri 'none'; "
+            "form-action 'none'"
+        ),
+        "X-Frame-Options": "SAMEORIGIN",
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "no-referrer",
+    }
 
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     try:
-        await authenticate_request(
-            request,
-            config=auth_config,
-            verifier=token_verifier,
-        )
+        if auth_config.enabled:
+            await authenticate_request(
+                request,
+                config=auth_config,
+                verifier=token_verifier,
+            )
+        elif request.url.path.startswith("/api/"):
+            user_id, signed_cookie = ensure_anonymous_user_id(
+                request,
+                config=anon_identity_config,
+            )
+            request.state.auth_user_id = user_id
+            request.state.auth_subject = user_id
+            request.state.anon_identity_cookie = signed_cookie
     except HTTPException as exc:
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
-    return await call_next(request)
+    response = await call_next(request)
+    signed_cookie = str(getattr(request.state, "anon_identity_cookie", "") or "")
+    if signed_cookie:
+        response.set_cookie(
+            key=anon_identity_config.cookie_name,
+            value=signed_cookie,
+            httponly=True,
+            secure=anon_identity_config.secure_cookie,
+            samesite=anon_identity_config.same_site,
+            path="/",
+            max_age=60 * 60 * 24 * 365,
+        )
+    return response
 
 
 @app.middleware("http")
@@ -156,11 +225,18 @@ async def health() -> dict[str, str]:
 
 
 @app.post("/api/chat")
-async def chat(payload: ChatRequest) -> dict:
-    with bind_context(session_id=payload.session_id):
-        result = await asyncio.to_thread(
-            agent.chat, user_message=payload.message, session_id=payload.session_id
-        )
+async def chat(payload: ChatRequest, request: Request) -> dict:
+    user_id = _request_user_id(request)
+    try:
+        with bind_context(session_id=payload.session_id):
+            result = await asyncio.to_thread(
+                agent.chat,
+                user_message=payload.message,
+                session_id=payload.session_id,
+                user_id=user_id,
+            )
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail="Session not found") from exc
 
     logger.info(
         "chat.completed",
@@ -176,28 +252,47 @@ async def chat(payload: ChatRequest) -> dict:
 
 
 @app.post("/api/assistant")
-async def assistant(payload: AssistantTransportRequest):
+async def assistant(payload: AssistantTransportRequest, request: Request):
+    user_id = _request_user_id(request)
+    existing_session_id = _extract_transport_session_id(payload)
+    if existing_session_id and not agent.get_session(existing_session_id, user_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+
     async def run_callback(controller):
-        await agent.run_assistant_transport(payload, controller)
+        await agent.run_assistant_transport(payload, controller, user_id)
 
     stream = create_run(run_callback, state=payload.state)
     return DataStreamResponse(stream)
 
 
 @app.get("/api/state")
-def state() -> dict:
-    return agent.get_state_summary()
+def state(request: Request) -> dict:
+    user_id = _request_user_id(request)
+    return agent.get_state_summary(user_id=user_id)
+
+
+@app.get("/api/me")
+def me(request: Request) -> dict[str, str]:
+    user_id = _request_user_id(request)
+    profile = agent.get_user_profile(user_id)
+    return {
+        "user_id": user_id,
+        "tier": str(profile.get("tier") or "default"),
+    }
 
 
 @app.get("/api/config")
-def get_config() -> dict:
-    return agent.get_runtime_config()
+def get_config(request: Request) -> dict:
+    user_id = _request_user_id(request)
+    return agent.get_runtime_config(user_id)
 
 
 @app.post("/api/config")
-def update_config(payload: ConfigUpdateRequest) -> dict:
+def update_config(payload: ConfigUpdateRequest, request: Request) -> dict:
+    user_id = _request_user_id(request)
     try:
         result = agent.update_runtime_config(
+            user_id=user_id,
             model=payload.model,
             max_tool_calls_per_turn=payload.max_tool_calls_per_turn,
             sandbox_mode=payload.sandbox_mode,
@@ -231,21 +326,24 @@ def update_config(payload: ConfigUpdateRequest) -> dict:
 
 
 @app.post("/api/sessions/{session_id}/reset")
-def reset_session(session_id: str) -> dict:
-    removed = agent.reset_session(session_id)
+def reset_session(session_id: str, request: Request) -> dict:
+    user_id = _request_user_id(request)
+    removed = agent.reset_session(session_id, user_id)
     if not removed:
         raise HTTPException(status_code=404, detail="Session not found")
     return {"session_id": session_id, "reset": True}
 
 
 @app.get("/api/sessions")
-def list_sessions() -> dict[str, Any]:
-    return {"sessions": agent.list_sessions()}
+def list_sessions(request: Request) -> dict[str, Any]:
+    user_id = _request_user_id(request)
+    return {"sessions": agent.list_sessions(user_id)}
 
 
 @app.post("/api/sessions")
-def create_session(payload: SessionCreateRequest) -> dict[str, Any]:
-    session = agent.create_session(title=payload.title)
+def create_session(payload: SessionCreateRequest, request: Request) -> dict[str, Any]:
+    user_id = _request_user_id(request)
+    session = agent.create_session(title=payload.title, user_id=user_id)
     return {
         "session_id": session.session_id,
         "title": session.title,
@@ -256,16 +354,18 @@ def create_session(payload: SessionCreateRequest) -> dict[str, Any]:
 
 
 @app.get("/api/sessions/{session_id}")
-def get_session(session_id: str) -> dict[str, Any]:
-    session = agent.get_session(session_id)
+def get_session(session_id: str, request: Request) -> dict[str, Any]:
+    user_id = _request_user_id(request)
+    session = agent.get_session(session_id, user_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     return session
 
 
 @app.get("/api/sessions/{session_id}/sandbox")
-def get_session_sandbox(session_id: str) -> dict[str, Any]:
-    session = agent.get_session(session_id)
+def get_session_sandbox(session_id: str, request: Request) -> dict[str, Any]:
+    user_id = _request_user_id(request)
+    session = agent.get_session(session_id, user_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     return {
@@ -275,8 +375,9 @@ def get_session_sandbox(session_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/sessions/{session_id}/share")
-def share_session(session_id: str) -> dict[str, str]:
-    share_id = agent.create_share(session_id)
+def share_session(session_id: str, request: Request) -> dict[str, str]:
+    user_id = _request_user_id(request)
+    share_id = agent.create_share(session_id, user_id)
     if not share_id:
         raise HTTPException(status_code=404, detail="Session not found")
     return {
@@ -303,36 +404,44 @@ def get_public_session_markdown(share_id: str) -> PlainTextResponse:
 
 
 @app.get("/api/assets/{asset_id}")
-def get_asset(asset_id: str):
-    asset = agent.asset_manager.get_asset(asset_id)
+def get_asset(asset_id: str, request: Request):
+    user_id = _request_user_id(request)
+    asset = agent.asset_manager.get_asset_for_user(asset_id, user_id)
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
-    headers: dict[str, str] = {}
-    if str(asset.get("mime_type") or "").startswith("text/html"):
-        headers = {
-            "Content-Security-Policy": (
-                "default-src 'none'; "
-                "script-src 'unsafe-inline' https:; "
-                "style-src 'unsafe-inline' https:; "
-                "img-src data: blob: https: http:; "
-                "font-src data: https:; "
-                "connect-src https: http:; "
-                "frame-ancestors 'self'; "
-                "base-uri 'none'; "
-                "form-action 'none'"
-            ),
-            "X-Frame-Options": "SAMEORIGIN",
-            "X-Content-Type-Options": "nosniff",
-            "Referrer-Policy": "no-referrer",
-        }
+    headers = _asset_security_headers(asset)
     return FileResponse(
         asset["storage_path"], media_type=asset["mime_type"], headers=headers
     )
 
 
 @app.get("/api/assets/{asset_id}/download")
-def download_asset(asset_id: str):
-    asset = agent.asset_manager.get_asset(asset_id)
+def download_asset(asset_id: str, request: Request):
+    user_id = _request_user_id(request)
+    asset = agent.asset_manager.get_asset_for_user(asset_id, user_id)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    return FileResponse(
+        asset["storage_path"],
+        media_type=asset["mime_type"],
+        filename=asset["filename"],
+    )
+
+
+@app.get("/api/public/{share_id}/assets/{asset_id}")
+def get_public_asset(share_id: str, asset_id: str):
+    asset = agent.asset_manager.get_asset_for_share(asset_id, share_id)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    headers = _asset_security_headers(asset)
+    return FileResponse(
+        asset["storage_path"], media_type=asset["mime_type"], headers=headers
+    )
+
+
+@app.get("/api/public/{share_id}/assets/{asset_id}/download")
+def download_public_asset(share_id: str, asset_id: str):
+    asset = agent.asset_manager.get_asset_for_share(asset_id, share_id)
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
     return FileResponse(

@@ -1,3 +1,4 @@
 setup_env.sh
 .env
 .env.*
+static-passwords.yaml

@@ -10,7 +10,7 @@ spec:
   tls:
     - hosts:
         - magarathea.ddns.net
-      secretName: auth-example-com-tls
+      secretName: magarathea-ddns-net-tls
   rules:
     - host: magarathea.ddns.net
       http:

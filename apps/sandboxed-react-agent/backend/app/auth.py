@@ -1,5 +1,9 @@
 import logging
+import hmac
 import os
+import secrets
+import uuid
+from hashlib import sha256
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +28,7 @@ class AuthConfig:
     jwks_url: str
     algorithms: tuple[str, ...]
     exempt_prefixes: tuple[str, ...]
+    user_id_claim: str
 
     @classmethod
     def from_env(cls) -> "AuthConfig":
@@ -53,6 +58,7 @@ class AuthConfig:
             jwks_url=jwks_url,
             algorithms=algorithms,
             exempt_prefixes=exempt_prefixes,
+            user_id_claim=(os.getenv("AUTH_USER_ID_CLAIM") or "sub").strip() or "sub",
         )
         config.validate()
         return config
@@ -64,6 +70,45 @@ class AuthConfig:
             raise RuntimeError("AUTH_ISSUER must be set when AUTH_ENABLED=1")
         if not self.jwks_url:
             raise RuntimeError("AUTH_JWKS_URL must be set when AUTH_ENABLED=1")
+
+
+@dataclass
+class AnonymousIdentityConfig:
+    enabled: bool
+    cookie_name: str
+    secret: str
+    secure_cookie: bool
+    same_site: str
+
+    @classmethod
+    def from_env(cls) -> "AnonymousIdentityConfig":
+        enabled_default = not _as_bool(os.getenv("AUTH_ENABLED"), default=False)
+        enabled = _as_bool(os.getenv("ANON_IDENTITY_ENABLED"), default=enabled_default)
+        same_site = (
+            (os.getenv("ANON_IDENTITY_COOKIE_SAMESITE") or "lax").strip().lower()
+        )
+        if same_site not in {"lax", "strict", "none"}:
+            same_site = "lax"
+
+        raw_secret = (os.getenv("ANON_IDENTITY_SECRET") or "").strip()
+        if enabled and not raw_secret:
+            raw_secret = secrets.token_urlsafe(32)
+            logger.warning(
+                "auth.anon_identity_ephemeral_secret",
+                extra={"event": "auth.anon_identity_ephemeral_secret"},
+            )
+
+        return cls(
+            enabled=enabled,
+            cookie_name=(
+                os.getenv("ANON_IDENTITY_COOKIE_NAME") or "sra_anon_uid"
+            ).strip(),
+            secret=raw_secret,
+            secure_cookie=_as_bool(
+                os.getenv("ANON_IDENTITY_COOKIE_SECURE"), default=False
+            ),
+            same_site=same_site,
+        )
 
 
 class TokenVerifier:
@@ -133,10 +178,57 @@ async def authenticate_request(
         raise HTTPException(status_code=401, detail="Invalid token") from exc
 
     request.state.auth_claims = claims
-    request.state.auth_subject = str(
-        claims.get("sub")
-        or claims.get("email")
-        or claims.get("preferred_username")
-        or ""
-    )
+    user_id = str(claims.get(config.user_id_claim) or "").strip()
+    if not user_id:
+        user_id = str(
+            claims.get("sub")
+            or claims.get("email")
+            or claims.get("preferred_username")
+            or ""
+        ).strip()
+    request.state.auth_user_id = user_id
+    request.state.auth_subject = user_id
     return claims
+
+
+def _sign_user_id(user_id: str, secret: str) -> str:
+    digest = hmac.new(
+        secret.encode("utf-8"), user_id.encode("utf-8"), sha256
+    ).hexdigest()
+    return digest
+
+
+def encode_signed_user_id(user_id: str, secret: str) -> str:
+    return f"{user_id}.{_sign_user_id(user_id, secret)}"
+
+
+def decode_signed_user_id(token: str, secret: str) -> str | None:
+    if not token or "." not in token:
+        return None
+    user_id, signature = token.rsplit(".", 1)
+    if not user_id or not signature:
+        return None
+    expected = _sign_user_id(user_id, secret)
+    if not hmac.compare_digest(signature, expected):
+        return None
+    return user_id
+
+
+def ensure_anonymous_user_id(
+    request: Request,
+    *,
+    config: AnonymousIdentityConfig,
+) -> tuple[str, str | None]:
+    if not config.enabled:
+        return "", None
+
+    cookie_value = (request.cookies.get(config.cookie_name) or "").strip()
+    user_id = (
+        decode_signed_user_id(cookie_value, config.secret) if cookie_value else None
+    )
+    if user_id:
+        return user_id, None
+
+    generated_user_id = f"anon-{uuid.uuid4().hex}"
+    signed_value = encode_signed_user_id(generated_user_id, config.secret)
+    return generated_user_id, signed_value

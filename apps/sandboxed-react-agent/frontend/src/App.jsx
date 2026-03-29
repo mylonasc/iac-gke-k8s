@@ -905,6 +905,8 @@ function App() {
   );
   const [showMobileThreads, setShowMobileThreads] = useState(false);
   const [showMobileRuntime, setShowMobileRuntime] = useState(false);
+  const [userId, setUserId] = useState("");
+  const [userTier, setUserTier] = useState("default");
 
   useEffect(() => {
     if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
@@ -960,6 +962,19 @@ function App() {
     const items = Array.isArray(data.sessions) ? data.sessions : [];
     setSessions(items);
     return items;
+  }, [apiBase]);
+
+  const loadUserIdentity = useCallback(async () => {
+    try {
+      const response = await apiFetch(`${apiBase}/me`);
+      if (!response.ok) throw new Error("Failed to load user identity");
+      const data = await response.json();
+      setUserId(typeof data?.user_id === "string" ? data.user_id : "");
+      setUserTier(typeof data?.tier === "string" && data.tier ? data.tier : "default");
+    } catch {
+      setUserId("");
+      setUserTier("default");
+    }
   }, [apiBase]);
 
   const createSession = useCallback(async () => {
@@ -1094,6 +1109,15 @@ function App() {
     loadConfig();
   }, [apiBase]);
 
+  useEffect(() => {
+    if (isSharedView) {
+      setUserId("");
+      setUserTier("default");
+      return;
+    }
+    loadUserIdentity();
+  }, [isSharedView, loadUserIdentity]);
+
   async function handleSaveConfig(event) {
     event.preventDefault();
     setConfigSaving(true);
@@ -1168,6 +1192,12 @@ function App() {
       <header className="topbar">
         <h1>Sandboxed React Agent</h1>
         <div className="topbar-actions">
+          {!isSharedView ? (
+            <span className="user-identity" title={userId || "User ID unavailable"}>
+              User ID: <code>{userId || "-"}</code>
+              <span className="badge">Tier: {userTier}</span>
+            </span>
+          ) : null}
           <nav className="tabs">
             <button type="button" onClick={() => setTab("chat")} className={`tab ${tab === "chat" ? "active" : ""}`}>Chat</button>
             <button type="button" onClick={() => setTab("settings")} className={`tab ${tab === "settings" ? "active" : ""}`}>Settings</button>

@@ -74,6 +74,7 @@ TOOLS = [
 @dataclass
 class SessionState:
     session_id: str
+    user_id: str
     created_at: str
     updated_at: str
     title: str
@@ -95,9 +96,18 @@ def _token_chunks(text: str) -> list[str]:
     return chunks or [text]
 
 
+def _public_asset_url(share_id: str, asset_id: str, *, download: bool = False) -> str:
+    base = f"/api/public/{share_id}/assets/{asset_id}"
+    if download:
+        return f"{base}/download"
+    return base
+
+
 class AgentGraphState(TypedDict):
     session_id: str
     messages: list[dict[str, Any]]
+    runtime_config: dict[str, Any]
+    max_tool_calls_per_turn: int
     pending_tool_calls: list[dict[str, Any]]
     turn_tool_calls: list[dict[str, Any]]
     tool_events: list[dict[str, Any]]
@@ -111,8 +121,8 @@ class SandboxedReactAgent:
     """Main orchestration layer for model calls, tools, and session state."""
 
     def __init__(self) -> None:
-        self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-        self.max_tool_calls_per_turn = int(
+        self.default_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        self.default_max_tool_calls_per_turn = int(
             os.getenv("AGENT_MAX_TOOL_CALLS_PER_TURN", "4")
         )
         self.async_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -123,6 +133,8 @@ class SandboxedReactAgent:
             session_store=self.session_store,
         )
         self.asset_manager = AssetManager(self.session_store)
+        self.default_sandbox_config = self.sandbox_manager.get_config()
+        self.default_sandbox_config.update(self.sandbox_lifecycle.get_config())
         self.sessions: dict[str, SessionState] = {}
         self._tool_event_listener: Any = None
         self._agent_graph = self._build_agent_graph()
@@ -142,6 +154,7 @@ class SandboxedReactAgent:
     def _session_to_dict(self, session: SessionState) -> dict[str, Any]:
         return {
             "session_id": session.session_id,
+            "user_id": session.user_id,
             "created_at": session.created_at,
             "updated_at": session.updated_at,
             "title": session.title,
@@ -159,6 +172,7 @@ class SandboxedReactAgent:
         for record in self.session_store.list_sessions():
             self.sessions[record["session_id"]] = SessionState(
                 session_id=record["session_id"],
+                user_id=record.get("user_id") or "",
                 created_at=record["created_at"],
                 updated_at=record["updated_at"],
                 title=record.get("title") or "New chat",
@@ -380,18 +394,132 @@ class SandboxedReactAgent:
             ] += chunk
             await asyncio.sleep(delay_seconds)
 
-    def get_runtime_config(self) -> dict[str, Any]:
-        """Return current model and sandbox runtime configuration."""
-        sandbox_config = self.sandbox_manager.get_config()
-        sandbox_config.update(self.sandbox_lifecycle.get_config())
+    def _default_runtime_config_record(self) -> dict[str, Any]:
         return {
-            "model": self.model,
-            "max_tool_calls_per_turn": self.max_tool_calls_per_turn,
-            "sandbox": sandbox_config,
+            "model": self.default_model,
+            "max_tool_calls_per_turn": self.default_max_tool_calls_per_turn,
+            "sandbox_mode": self.default_sandbox_config.get("mode", "cluster"),
+            "sandbox_api_url": self.default_sandbox_config.get("api_url", ""),
+            "sandbox_template_name": self.default_sandbox_config.get(
+                "template_name", "python-runtime-template-small"
+            ),
+            "sandbox_namespace": self.default_sandbox_config.get(
+                "namespace", "alt-default"
+            ),
+            "sandbox_server_port": int(
+                self.default_sandbox_config.get("server_port", 8888)
+            ),
+            "sandbox_max_output_chars": int(
+                self.default_sandbox_config.get("max_output_chars", 6000)
+            ),
+            "sandbox_local_timeout_seconds": int(
+                self.default_sandbox_config.get("local_timeout_seconds", 20)
+            ),
+            "sandbox_execution_model": self.default_sandbox_config.get(
+                "execution_model", "session"
+            ),
+            "sandbox_session_idle_ttl_seconds": int(
+                self.default_sandbox_config.get("session_idle_ttl_seconds", 1800)
+            ),
         }
+
+    def _ensure_user_profile(self, user_id: str) -> dict[str, Any]:
+        return self.session_store.ensure_user(user_id)
+
+    def get_user_profile(self, user_id: str) -> dict[str, Any]:
+        """Return a persisted user profile, creating it on first access."""
+        return self._ensure_user_profile(user_id)
+
+    def _resolve_user_runtime_record(self, user_id: str) -> dict[str, Any]:
+        defaults = self._default_runtime_config_record()
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            return defaults
+        self._ensure_user_profile(normalized_user_id)
+        stored = self.session_store.get_user_config(normalized_user_id)
+        if not stored:
+            return defaults
+        merged = dict(defaults)
+        merged.update(
+            {
+                key: stored[key]
+                for key in defaults.keys()
+                if key in stored and stored[key] is not None
+            }
+        )
+        return merged
+
+    def _runtime_context_for_user(self, user_id: str) -> dict[str, Any]:
+        record = self._resolve_user_runtime_record(user_id)
+        sandbox = {
+            "mode": record["sandbox_mode"],
+            "api_url": record["sandbox_api_url"],
+            "template_name": record["sandbox_template_name"],
+            "namespace": record["sandbox_namespace"],
+            "server_port": int(record["sandbox_server_port"]),
+            "max_output_chars": int(record["sandbox_max_output_chars"]),
+            "local_timeout_seconds": int(record["sandbox_local_timeout_seconds"]),
+            "execution_model": record["sandbox_execution_model"],
+            "session_idle_ttl_seconds": int(record["sandbox_session_idle_ttl_seconds"]),
+            "sandbox_ready_timeout": int(
+                self.default_sandbox_config.get("sandbox_ready_timeout", 420)
+            ),
+            "gateway_ready_timeout": int(
+                self.default_sandbox_config.get("gateway_ready_timeout", 180)
+            ),
+            "max_lease_ttl_seconds": int(
+                self.default_sandbox_config.get("max_lease_ttl_seconds", 21600)
+            ),
+        }
+        return {
+            "model": record["model"],
+            "max_tool_calls_per_turn": int(record["max_tool_calls_per_turn"]),
+            "sandbox": sandbox,
+        }
+
+    def _default_runtime_context(self) -> dict[str, Any]:
+        """Return baseline runtime context before user-specific overrides."""
+        defaults = self._default_runtime_config_record()
+        return {
+            "model": defaults["model"],
+            "max_tool_calls_per_turn": int(defaults["max_tool_calls_per_turn"]),
+            "sandbox": {
+                "mode": defaults["sandbox_mode"],
+                "api_url": defaults["sandbox_api_url"],
+                "template_name": defaults["sandbox_template_name"],
+                "namespace": defaults["sandbox_namespace"],
+                "server_port": int(defaults["sandbox_server_port"]),
+                "max_output_chars": int(defaults["sandbox_max_output_chars"]),
+                "local_timeout_seconds": int(defaults["sandbox_local_timeout_seconds"]),
+                "execution_model": defaults["sandbox_execution_model"],
+                "session_idle_ttl_seconds": int(
+                    defaults["sandbox_session_idle_ttl_seconds"]
+                ),
+                "sandbox_ready_timeout": int(
+                    self.default_sandbox_config.get("sandbox_ready_timeout", 420)
+                ),
+                "gateway_ready_timeout": int(
+                    self.default_sandbox_config.get("gateway_ready_timeout", 180)
+                ),
+                "max_lease_ttl_seconds": int(
+                    self.default_sandbox_config.get("max_lease_ttl_seconds", 21600)
+                ),
+            },
+        }
+
+    def get_runtime_config(self, user_id: str) -> dict[str, Any]:
+        """Return effective model and sandbox runtime configuration for one user."""
+        return self._runtime_context_for_user(user_id)
+
+    def _release_user_session_leases(self, user_id: str) -> None:
+        for session in self.sessions.values():
+            if session.user_id != user_id:
+                continue
+            self.sandbox_lifecycle.release_scope("session", session.session_id)
 
     def update_runtime_config(
         self,
+        user_id: str,
         model: str | None = None,
         max_tool_calls_per_turn: int | None = None,
         sandbox_mode: str | None = None,
@@ -404,34 +532,79 @@ class SandboxedReactAgent:
         sandbox_execution_model: str | None = None,
         sandbox_session_idle_ttl_seconds: int | None = None,
     ) -> dict[str, Any]:
+        current = self._resolve_user_runtime_record(user_id)
+        updated = dict(current)
+
         if model is not None:
-            self.model = model
+            updated["model"] = model
         if max_tool_calls_per_turn is not None:
             if max_tool_calls_per_turn < 1:
                 raise ValueError("max_tool_calls_per_turn must be >= 1")
-            self.max_tool_calls_per_turn = max_tool_calls_per_turn
+            updated["max_tool_calls_per_turn"] = max_tool_calls_per_turn
 
-        self.sandbox_manager.update_config(
-            mode=sandbox_mode,
-            api_url=sandbox_api_url,
-            template_name=sandbox_template_name,
-            namespace=sandbox_namespace,
-            server_port=sandbox_server_port,
-            max_output_chars=sandbox_max_output_chars,
-            local_timeout_seconds=sandbox_local_timeout_seconds,
-        )
-        self.sandbox_lifecycle.update_config(
-            execution_model=sandbox_execution_model,
-            session_idle_ttl_seconds=sandbox_session_idle_ttl_seconds,
-        )
+        if sandbox_mode is not None:
+            normalized_mode = sandbox_mode.strip().lower()
+            if normalized_mode not in {"cluster", "local"}:
+                raise ValueError("sandbox_mode must be 'cluster' or 'local'")
+            updated["sandbox_mode"] = normalized_mode
+        if sandbox_api_url is not None:
+            updated["sandbox_api_url"] = sandbox_api_url
+        if sandbox_template_name is not None:
+            updated["sandbox_template_name"] = sandbox_template_name
+        if sandbox_namespace is not None:
+            updated["sandbox_namespace"] = sandbox_namespace
+        if sandbox_server_port is not None:
+            if sandbox_server_port <= 0:
+                raise ValueError("sandbox_server_port must be > 0")
+            updated["sandbox_server_port"] = sandbox_server_port
+        if sandbox_max_output_chars is not None:
+            if sandbox_max_output_chars < 100:
+                raise ValueError("sandbox_max_output_chars must be >= 100")
+            updated["sandbox_max_output_chars"] = sandbox_max_output_chars
+        if sandbox_local_timeout_seconds is not None:
+            if sandbox_local_timeout_seconds <= 0:
+                raise ValueError("sandbox_local_timeout_seconds must be > 0")
+            updated["sandbox_local_timeout_seconds"] = sandbox_local_timeout_seconds
+        if sandbox_execution_model is not None:
+            normalized_model = sandbox_execution_model.strip().lower()
+            if normalized_model not in {"ephemeral", "session"}:
+                raise ValueError(
+                    "sandbox_execution_model must be 'ephemeral' or 'session'"
+                )
+            updated["sandbox_execution_model"] = normalized_model
+        if sandbox_session_idle_ttl_seconds is not None:
+            if sandbox_session_idle_ttl_seconds <= 0:
+                raise ValueError("sandbox_session_idle_ttl_seconds must be > 0")
+            updated["sandbox_session_idle_ttl_seconds"] = (
+                sandbox_session_idle_ttl_seconds
+            )
 
-        return self.get_runtime_config()
+        self.session_store.upsert_user_config(user_id, updated)
 
-    def create_session(self, title: str | None = None) -> SessionState:
+        recycle_fields = {
+            "sandbox_mode",
+            "sandbox_api_url",
+            "sandbox_template_name",
+            "sandbox_namespace",
+            "sandbox_server_port",
+            "sandbox_execution_model",
+        }
+        should_recycle = any(updated[key] != current[key] for key in recycle_fields)
+        if should_recycle:
+            self._release_user_session_leases(user_id)
+
+        return self.get_runtime_config(user_id)
+
+    def create_session(
+        self, title: str | None = None, user_id: str = ""
+    ) -> SessionState:
+        if user_id:
+            self._ensure_user_profile(user_id)
         session_id = str(uuid.uuid4())
         now = _now_iso()
         state = SessionState(
             session_id=session_id,
+            user_id=user_id,
             created_at=now,
             updated_at=now,
             title=title or "New chat",
@@ -441,10 +614,17 @@ class SandboxedReactAgent:
         self._persist_session(state)
         return state
 
-    def get_or_create_session(self, session_id: str | None) -> SessionState:
+    def get_or_create_session(
+        self, session_id: str | None, user_id: str
+    ) -> SessionState:
+        if user_id:
+            self._ensure_user_profile(user_id)
         if session_id and session_id in self.sessions:
-            return self.sessions[session_id]
-        return self.create_session()
+            existing = self.sessions[session_id]
+            if existing.user_id != user_id:
+                raise PermissionError("Session not found")
+            return existing
+        return self.create_session(user_id=user_id)
 
     def _run_tool(
         self,
@@ -453,6 +633,7 @@ class SandboxedReactAgent:
         tool_call_id: str | None,
         name: str,
         arguments_json: str,
+        runtime_config: dict[str, Any],
     ) -> tuple[str, list[dict[str, Any]]]:
         """Execute a tool call and return payload plus stored asset metadata."""
         try:
@@ -478,10 +659,18 @@ class SandboxedReactAgent:
         result = None
         if name == "sandbox_exec_python":
             code = parsed.get("code", "")
-            result = self.sandbox_lifecycle.exec_python(session_id, code)
+            result = self.sandbox_lifecycle.exec_python(
+                session_id,
+                code,
+                runtime_config=runtime_config.get("sandbox"),
+            )
         elif name == "sandbox_exec_shell":
             command = parsed.get("command", "")
-            result = self.sandbox_lifecycle.exec_shell(session_id, command)
+            result = self.sandbox_lifecycle.exec_shell(
+                session_id,
+                command,
+                runtime_config=runtime_config.get("sandbox"),
+            )
         else:
             return (
                 self._tool_error_output(
@@ -550,6 +739,7 @@ class SandboxedReactAgent:
         tool_call_id: str | None,
         name: str,
         arguments_json: str,
+        runtime_config: dict[str, Any],
     ) -> tuple[str, list[dict[str, Any]]]:
         return await asyncio.to_thread(
             self._run_tool,
@@ -557,14 +747,17 @@ class SandboxedReactAgent:
             tool_call_id=tool_call_id,
             name=name,
             arguments_json=arguments_json,
+            runtime_config=runtime_config,
         )
 
     async def _persist_session_async(self, session: SessionState) -> None:
         await asyncio.to_thread(self._persist_session, session)
 
-    async def _create_completion_async(self, messages: list[dict[str, Any]]) -> Any:
+    async def _create_completion_async(
+        self, messages: list[dict[str, Any]], model: str
+    ) -> Any:
         return await self.async_client.chat.completions.create(
-            model=self.model,
+            model=model,
             messages=messages,
             tools=TOOLS,
             tool_choice="auto",
@@ -572,10 +765,10 @@ class SandboxedReactAgent:
         )
 
     async def _create_completion_streaming_async(
-        self, messages: list[dict[str, Any]]
+        self, messages: list[dict[str, Any]], model: str
     ) -> dict[str, Any]:
         stream = await self.async_client.chat.completions.create(
-            model=self.model,
+            model=model,
             messages=messages,
             tools=TOOLS,
             tool_choice="auto",
@@ -646,11 +839,16 @@ class SandboxedReactAgent:
         final_text = ""
 
         if self._tool_event_listener is not None:
-            streamed = await self._create_completion_streaming_async(state["messages"])
+            streamed = await self._create_completion_streaming_async(
+                state["messages"],
+                model=str(state["runtime_config"]["model"]),
+            )
             final_text = str(streamed.get("content") or "")
             tool_calls = streamed.get("tool_calls") or []
         else:
-            completion = await self._create_completion_async(state["messages"])
+            completion = await self._create_completion_async(
+                state["messages"], model=str(state["runtime_config"]["model"])
+            )
             assistant_message = completion.choices[0].message
             final_text = assistant_message.content or ""
             tool_calls = assistant_message.tool_calls or []
@@ -715,7 +913,7 @@ class SandboxedReactAgent:
             args_text = tc.get("function", {}).get("arguments", "{}")
             tool_call_id = tc.get("id") or f"tool_{uuid.uuid4().hex}"
 
-            if tool_call_count >= self.max_tool_calls_per_turn:
+            if tool_call_count >= int(state["max_tool_calls_per_turn"]):
                 limit_reached = True
                 error_text = "Tool-calling loop exhausted max tool calls"
                 final_reply = "I hit the tool-calling safety limit for this turn."
@@ -774,6 +972,7 @@ class SandboxedReactAgent:
                     tool_call_id=tool_call_id,
                     name=tool_name,
                     arguments_json=args_text,
+                    runtime_config=state["runtime_config"],
                 )
             except Exception as exc:
                 output = self._tool_error_output(
@@ -871,11 +1070,16 @@ class SandboxedReactAgent:
         return graph.compile()
 
     async def _run_agent_graph_async(
-        self, messages: list[dict[str, Any]], session_id: str
+        self,
+        messages: list[dict[str, Any]],
+        session_id: str,
+        runtime_config: dict[str, Any],
     ) -> AgentGraphState:
         initial_state: AgentGraphState = {
             "session_id": session_id,
             "messages": list(messages),
+            "runtime_config": runtime_config,
+            "max_tool_calls_per_turn": int(runtime_config["max_tool_calls_per_turn"]),
             "pending_tool_calls": [],
             "turn_tool_calls": [],
             "tool_events": [],
@@ -887,14 +1091,19 @@ class SandboxedReactAgent:
         result = await self._agent_graph.ainvoke(
             initial_state,
             config={
-                "recursion_limit": max(20, self.max_tool_calls_per_turn * 4 + 8),
+                "recursion_limit": max(
+                    20, int(runtime_config["max_tool_calls_per_turn"]) * 4 + 8
+                ),
                 "configurable": {"session_id": session_id},
             },
         )
         return result
 
-    def chat(self, user_message: str, session_id: str | None = None) -> dict[str, Any]:
-        state = self.get_or_create_session(session_id)
+    def chat(
+        self, user_message: str, session_id: str | None = None, user_id: str = ""
+    ) -> dict[str, Any]:
+        runtime_config = self._runtime_context_for_user(user_id)
+        state = self.get_or_create_session(session_id, user_id)
         state.messages = self._sanitize_messages(state.messages)
         state.updated_at = _now_iso()
         state.messages.append({"role": "user", "content": user_message})
@@ -902,7 +1111,11 @@ class SandboxedReactAgent:
             state.title = self._title_from_text(user_message)
         try:
             result = asyncio.run(
-                self._run_agent_graph_async(state.messages, state.session_id)
+                self._run_agent_graph_async(
+                    state.messages,
+                    state.session_id,
+                    runtime_config,
+                )
             )
             state.messages = result["messages"]
             state.tool_calls += len(result.get("tool_events", []))
@@ -944,8 +1157,9 @@ class SandboxedReactAgent:
             }
 
     async def run_assistant_transport(
-        self, payload: Any, controller: RunController
+        self, payload: Any, controller: RunController, user_id: str
     ) -> None:
+        runtime_config = self._runtime_context_for_user(user_id)
         if controller.state is None:
             controller.state = {}
         if "messages" not in controller.state:
@@ -966,7 +1180,7 @@ class SandboxedReactAgent:
         except KeyError:
             pass
 
-        session = self.get_or_create_session(existing_session_id)
+        session = self.get_or_create_session(existing_session_id, user_id)
         controller.state["session_id"] = session.session_id
         controller.state["messages"] = copy.deepcopy(session.ui_messages)
 
@@ -1150,7 +1364,9 @@ class SandboxedReactAgent:
                 self._tool_event_listener = _live_tool_listener
                 try:
                     graph_result = await self._run_agent_graph_async(
-                        session.messages, session.session_id
+                        session.messages,
+                        session.session_id,
+                        runtime_config,
                     )
                 finally:
                     self._tool_event_listener = previous_listener
@@ -1297,13 +1513,22 @@ class SandboxedReactAgent:
                 self._normalize_session_ui_messages(session)
                 await self._persist_session_async(session)
 
-    def get_state_summary(self) -> dict[str, Any]:
+    def get_state_summary(self, user_id: str | None = None) -> dict[str, Any]:
         """Provide aggregate state information for diagnostics endpoints."""
+        sessions = list(self.sessions.values())
+        if user_id is not None:
+            sessions = [session for session in sessions if session.user_id == user_id]
+        runtime_config = (
+            self.get_runtime_config(user_id)
+            if user_id
+            else self._default_runtime_context()
+        )
         return {
-            "session_count": len(self.sessions),
+            "session_count": len(sessions),
             "sessions": [
                 {
                     "session_id": s.session_id,
+                    "user_id": s.user_id,
                     "created_at": s.created_at,
                     "updated_at": s.updated_at,
                     "title": s.title,
@@ -1313,7 +1538,7 @@ class SandboxedReactAgent:
                     "last_error": s.last_error,
                     "share_id": s.share_id,
                 }
-                for s in self.sessions.values()
+                for s in sessions
             ],
             "sandbox": {
                 "mode": self.sandbox_manager.mode,
@@ -1322,16 +1547,18 @@ class SandboxedReactAgent:
                 "namespace": self.sandbox_manager.namespace,
                 "execution_model": self.sandbox_lifecycle.execution_model,
             },
-            "runtime_config": self.get_runtime_config(),
+            "runtime_config": runtime_config,
         }
 
-    def reset_session(self, session_id: str) -> bool:
+    def reset_session(self, session_id: str, user_id: str) -> bool:
         """Reset a session and release any scope-bound sandbox lease."""
         if session_id not in self.sessions:
             return False
+        if self.sessions[session_id].user_id != user_id:
+            return False
         self.sandbox_lifecycle.release_scope("session", session_id)
         del self.sessions[session_id]
-        self.session_store.delete_session(session_id)
+        self.session_store.delete_session_for_user(session_id, user_id)
         return True
 
     def list_sandboxes(self) -> list[dict[str, Any]]:
@@ -1346,9 +1573,11 @@ class SandboxedReactAgent:
         """Release an active sandbox lease by id."""
         return self.sandbox_lifecycle.release_sandbox(lease_id)
 
-    def list_sessions(self) -> list[dict[str, Any]]:
+    def list_sessions(self, user_id: str) -> list[dict[str, Any]]:
         sessions = sorted(
-            self.sessions.values(), key=lambda session: session.updated_at, reverse=True
+            [s for s in self.sessions.values() if s.user_id == user_id],
+            key=lambda session: session.updated_at,
+            reverse=True,
         )
         return [
             {
@@ -1376,9 +1605,11 @@ class SandboxedReactAgent:
                         return text[:90]
         return ""
 
-    def get_session(self, session_id: str) -> dict[str, Any] | None:
+    def get_session(self, session_id: str, user_id: str) -> dict[str, Any] | None:
         session = self.sessions.get(session_id)
         if not session:
+            return None
+        if session.user_id != user_id:
             return None
         self._normalize_session_ui_messages(session)
         return {
@@ -1421,20 +1652,61 @@ class SandboxedReactAgent:
             "expires_at": lease.get("expires_at"),
         }
 
-    def create_share(self, session_id: str) -> str | None:
+    def create_share(self, session_id: str, user_id: str) -> str | None:
         session = self.sessions.get(session_id)
         if not session:
             return None
+        if session.user_id != user_id:
+            return None
         if not session.share_id:
             session.share_id = uuid.uuid4().hex
-            self.session_store.set_share_id(session_id, session.share_id)
+            self.session_store.set_share_id_for_user(
+                session_id, user_id, session.share_id
+            )
             self._persist_session(session)
         return session.share_id
+
+    def _publicize_shared_session(
+        self, session: dict[str, Any], share_id: str
+    ) -> dict[str, Any]:
+        rewritten = copy.deepcopy(session)
+        for message in rewritten.get("messages", []):
+            if not isinstance(message, dict):
+                continue
+            for part in message.get("content", []):
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "image":
+                    image_url = str(part.get("image") or "")
+                    match = re.fullmatch(r"/api/assets/([A-Za-z0-9_-]+)", image_url)
+                    if match:
+                        part["image"] = _public_asset_url(share_id, match.group(1))
+                if part.get("type") == "tool-call":
+                    result = part.get("result")
+                    if not isinstance(result, dict):
+                        continue
+                    assets = result.get("assets")
+                    if not isinstance(assets, list):
+                        continue
+                    for asset in assets:
+                        if not isinstance(asset, dict):
+                            continue
+                        asset_id = str(asset.get("asset_id") or "")
+                        if not asset_id:
+                            continue
+                        asset["view_url"] = _public_asset_url(share_id, asset_id)
+                        asset["download_url"] = _public_asset_url(
+                            share_id, asset_id, download=True
+                        )
+        return rewritten
 
     def get_shared_session(self, share_id: str) -> dict[str, Any] | None:
         for session in self.sessions.values():
             if session.share_id == share_id:
-                return self.get_session(session.session_id)
+                private_session = self.get_session(session.session_id, session.user_id)
+                if not private_session:
+                    return None
+                return self._publicize_shared_session(private_session, share_id)
 
         record = self.session_store.get_by_share_id(share_id)
         if not record:
@@ -1443,6 +1715,7 @@ class SandboxedReactAgent:
         if session_id not in self.sessions:
             self.sessions[session_id] = SessionState(
                 session_id=record["session_id"],
+                user_id=record.get("user_id") or "",
                 created_at=record["created_at"],
                 updated_at=record["updated_at"],
                 title=record.get("title") or "New chat",
@@ -1452,7 +1725,12 @@ class SandboxedReactAgent:
                 last_error=record["last_error"],
                 share_id=record.get("share_id"),
             )
-        return self.get_session(session_id)
+        private_session = self.get_session(
+            session_id, self.sessions[session_id].user_id
+        )
+        if not private_session:
+            return None
+        return self._publicize_shared_session(private_session, share_id)
 
     def get_shared_session_markdown(self, share_id: str) -> str | None:
         session = self.get_shared_session(share_id)

@@ -113,9 +113,26 @@ The backend can enforce JWT/OIDC validation for all `/api/*` routes (except
 - `AUTH_JWKS_URL`
 - optional: `AUTH_ALGORITHMS` (default `RS256`)
 - optional: `AUTH_EXEMPT_PATH_PREFIXES` (default `/api/health,/api/public/`)
+- optional: `AUTH_USER_ID_CLAIM` (default `sub`)
+
+Session ownership is now scoped per authenticated user id claim. By default,
+the backend stores and filters sessions by JWT `sub`.
+
+When JWT auth is disabled (`AUTH_ENABLED=0`), the backend can still isolate
+session ownership by issuing a signed anonymous identity cookie. Configure:
+
+- `ANON_IDENTITY_ENABLED` (default `1`)
+- `ANON_IDENTITY_SECRET` (recommended to set explicitly in each environment)
+- optional: `ANON_IDENTITY_COOKIE_NAME` (default `sra_anon_uid`)
+- optional: `ANON_IDENTITY_COOKIE_SECURE` (default `0`)
+- optional: `ANON_IDENTITY_COOKIE_SAMESITE` (default `lax`)
 
 In Kubernetes, these values are wired from `sandboxed-react-agent-secrets` in
 `k8s/backend-deployment.yaml`.
+
+If you run Kubernetes without JWT auth (`AUTH_ENABLED=0`), also provide
+`anon-identity-secret` in `sandboxed-react-agent-secrets` and set
+`ANON_IDENTITY_ENABLED=1`.
 
 Frontend API calls include bearer auth when a token is available in:
 
@@ -435,6 +452,9 @@ For local Docker Compose runs, open the app at `http://localhost:8080`.
 The chat UI includes a **Backend Configuration** panel that can update runtime settings
 without restarting the container.
 
+Configuration is scoped per authenticated user id. A change in one account does not
+affect other users.
+
 Configurable settings include:
 
 - OpenAI model (`model`)
@@ -451,6 +471,12 @@ The panel calls backend API endpoints:
 - `GET /api/sandboxes`
 - `GET /api/sandboxes/{lease_id}`
 - `POST /api/sandboxes/{lease_id}/release`
+
+Persistence model in SQLite:
+
+- `users` table stores `user_id` and user `tier` (default: `default`).
+- `user_configs` stores per-user runtime config values.
+- `sessions` remain user-owned and are filtered by `user_id`.
 
 ## Kubernetes notes
 

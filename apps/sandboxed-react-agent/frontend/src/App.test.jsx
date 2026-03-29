@@ -121,6 +121,15 @@ describe("App UI", () => {
           };
         }
 
+        if (url.endsWith("/api/me") && (!init || init.method === undefined)) {
+          return {
+            ok: true,
+            json: async () => ({
+              user_id: "test-user-123",
+            }),
+          };
+        }
+
         if (url.endsWith("/api/config") && init?.method === "POST") {
           return {
             ok: true,
@@ -151,6 +160,7 @@ describe("App UI", () => {
     render(<App />);
 
     expect(screen.getByRole("heading", { name: "Sandboxed React Agent" })).toBeInTheDocument();
+    expect(await screen.findByText("test-user-123")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Threads" })).toBeInTheDocument();
     expect(screen.getByText("Start by sending a message.")).toBeInTheDocument();
 
