@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title or "Telegram Service" }}</title>
+  <style>
+    :root {
+      --bg: #f4f6ef;
+      --surface: #ffffff;
+      --text: #1f2937;
+      --accent: #0f766e;
+      --muted: #6b7280;
+      --border: #d1d5db;
+      --danger: #b91c1c;
+    }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      color: var(--text);
+      background: radial-gradient(circle at 10% 10%, #dbeafe 0, transparent 45%), var(--bg);
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 14px 22px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+    }
+    main {
+      max-width: 1080px;
+      margin: 24px auto;
+      padding: 0 16px;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    h1, h2, h3 { margin: 0 0 10px; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    th, td {
+      border-bottom: 1px solid var(--border);
+      padding: 8px;
+      text-align: left;
+    }
+    input, select, button {
+      font-size: 14px;
+      padding: 8px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-right: 8px;
+      margin-bottom: 8px;
+    }
+    button {
+      background: var(--accent);
+      color: white;
+      border: none;
+      cursor: pointer;
+    }
+    .muted { color: var(--muted); }
+    .error { color: var(--danger); }
+    pre {
+      background: #0b1020;
+      color: #c7d2fe;
+      border-radius: 10px;
+      padding: 12px;
+      overflow: auto;
+      font-size: 13px;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    @media (max-width: 900px) {
+      .row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>Telegram Service Gateway</strong>
+    <nav>
+      <a href="/admin">Dashboard</a>
+      <span class="muted"> | </span>
+      <a href="/admin/onboarding">Onboarding</a>
+      <span class="muted"> | </span>
+      <a href="/admin/logout">Logout</a>
+    </nav>
+  </header>
+  <main>
+    {% block body %}{% endblock %}
+  </main>
+</body>
+</html>

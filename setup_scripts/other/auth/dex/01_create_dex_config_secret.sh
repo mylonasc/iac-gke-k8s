@@ -28,6 +28,25 @@ DEX_OAUTH2_PROXY_CLIENT_ID="${DEX_OAUTH2_PROXY_CLIENT_ID:-oauth2-proxy}"
 DEX_MICROSOFT_TENANT="${DEX_MICROSOFT_TENANT:-common}"
 DEX_ISSUER_URL="${DEX_ISSUER_URL%/}"
 DEX_STATIC_PASSWORDS_FILE="${DEX_STATIC_PASSWORDS_FILE:-}"
+DEX_OAUTH2_PROXY_EXTRA_REDIRECT_URIS="${DEX_OAUTH2_PROXY_EXTRA_REDIRECT_URIS:-}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [[ -z "${DEX_STATIC_PASSWORDS_FILE}" && -f "${SCRIPT_DIR}/static-passwords.yaml" ]]; then
+  DEX_STATIC_PASSWORDS_FILE="${SCRIPT_DIR}/static-passwords.yaml"
+fi
+
+declare -a OAUTH2_PROXY_REDIRECT_URIS
+OAUTH2_PROXY_REDIRECT_URIS=("${DEX_OAUTH2_PROXY_REDIRECT_URI}")
+
+if [[ -n "${DEX_OAUTH2_PROXY_EXTRA_REDIRECT_URIS}" ]]; then
+  IFS=',' read -r -a _extra_redirects <<<"${DEX_OAUTH2_PROXY_EXTRA_REDIRECT_URIS}"
+  for uri in "${_extra_redirects[@]}"; do
+    trimmed="$(echo "${uri}" | xargs)"
+    if [[ -n "${trimmed}" ]]; then
+      OAUTH2_PROXY_REDIRECT_URIS+=("${trimmed}")
+    fi
+  done
+fi
 
 if [[ -n "${DEX_STATIC_PASSWORDS_FILE}" ]]; then
   if [[ ! -f "${DEX_STATIC_PASSWORDS_FILE}" ]]; then
@@ -65,7 +84,13 @@ staticClients:
     name: oauth2-proxy
     secret: ${DEX_OAUTH2_PROXY_CLIENT_SECRET}
     redirectURIs:
-      - ${DEX_OAUTH2_PROXY_REDIRECT_URI}
+EOF
+
+for redirect_uri in "${OAUTH2_PROXY_REDIRECT_URIS[@]}"; do
+  printf '      - %s\n' "${redirect_uri}" >>"${tmp_file}"
+done
+
+cat >>"${tmp_file}" <<EOF
 connectors:
   - type: github
     id: github

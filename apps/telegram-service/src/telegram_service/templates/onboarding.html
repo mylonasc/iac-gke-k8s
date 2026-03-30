@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="card">
+  <h2>Bot Onboarding</h2>
+  <p class="muted">Create deep links for users and process Telegram updates to bind chat IDs automatically.</p>
+</div>
+
+<div class="row">
+  <section class="card">
+    <h3>Create Onboarding Link</h3>
+    <form method="post" action="/admin/onboarding/create">
+      <select name="connection_id" required>
+        <option value="">bot connection</option>
+        {% for c in bot_connections %}
+        {% if c.is_active %}
+        <option value="{{ c.id }}">{{ c.id }} - {{ c.name }}{% if c.bot_username %} (@{{ c.bot_username }}){% endif %}</option>
+        {% endif %}
+        {% endfor %}
+      </select>
+      <input name="target_label" placeholder="target label (e.g. user@company)">
+      <input name="ttl_seconds" type="number" value="900" min="60" max="86400">
+      <button type="submit">Create Link</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h3>Process Telegram Updates</h3>
+    <form method="post" action="/admin/onboarding/process">
+      <select name="connection_id" required>
+        <option value="">bot connection</option>
+        {% for c in bot_connections %}
+        {% if c.is_active %}
+        <option value="{{ c.id }}">{{ c.id }} - {{ c.name }}{% if c.bot_username %} (@{{ c.bot_username }}){% endif %}</option>
+        {% endif %}
+        {% endfor %}
+      </select>
+      <input name="limit" type="number" value="50" min="1" max="100">
+      <input name="offset" placeholder="offset (optional)">
+      <button type="submit">Process Updates</button>
+    </form>
+  </section>
+</div>
+
+<section class="card">
+  <h3>Onboarding Links</h3>
+  {% if error %}
+  <p class="error">{{ error }}</p>
+  {% endif %}
+  {% if result %}
+  <p>{{ result }}</p>
+  {% endif %}
+  <table>
+    <thead><tr><th>ID</th><th>Conn</th><th>Target</th><th>Status</th><th>Chat</th><th>Context</th><th>Deep Link</th><th>QR</th><th>Actions</th></tr></thead>
+    <tbody>
+      {% for item in onboarding_rows %}
+      <tr>
+        <td>{{ item.id }}</td>
+        <td>{{ item.connection_id }}</td>
+        <td>{{ item.target_label or '-' }}</td>
+        <td>{{ item.status }}</td>
+        <td>{{ item.chat_id or '-' }}</td>
+        <td>{{ item.context_id or '-' }}</td>
+        <td>{% if item.deep_link %}<a href="{{ item.deep_link }}" target="_blank">{{ item.deep_link }}</a>{% else %}-{% endif %}</td>
+        <td>{% if item.qr_data_url %}<img src="{{ item.qr_data_url }}" alt="qr" width="96" height="96">{% else %}-{% endif %}</td>
+        <td>
+          <form method="post" action="/admin/onboarding/{{ item.id }}/delete">
+            <button type="submit">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

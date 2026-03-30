@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: telegram-service-config
+  namespace: telegram-gateway
+data:
+  APP_ENV: "prod"
+  DATABASE_URL: "sqlite:///./data/telegram_gateway.db"
+  DEX_JWKS_URL: "https://magarathea.ddns.net/dex/keys"
+  DEX_ISSUERS: "https://magarathea.ddns.net/dex"
+  DEX_AUDIENCE: "oauth2-proxy"
+  DEX_EMAIL_ALLOWLIST: "mylonas.charilaos@gmail.com"
+  DEX_REQUIRED_GROUP: ""

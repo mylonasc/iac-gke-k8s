@@ -1,0 +1,206 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="card">
+  <h2>Welcome, {{ admin.username }}</h2>
+  <p class="muted">Runtime gateway auth uses Dex-issued JWTs. Admin UI uses local credentials.</p>
+</div>
+
+<div class="row">
+  <section class="card">
+    <h3>Create Connection</h3>
+    <form method="post" action="/admin/connections">
+      <input name="name" placeholder="connection name" required>
+      <select name="type">
+        <option value="bot">bot</option>
+        <option value="user">user</option>
+      </select>
+      <select name="secret_ref_token">
+        <option value="">token ref (optional)</option>
+        {% for s in managed_secrets %}
+        {% if s.is_active %}
+        <option value="managed://{{ s.name }}">managed://{{ s.name }}</option>
+        {% endif %}
+        {% endfor %}
+      </select>
+      <select name="secret_ref_session">
+        <option value="">session ref (optional)</option>
+        {% for s in managed_secrets %}
+        {% if s.is_active %}
+        <option value="managed://{{ s.name }}">managed://{{ s.name }}</option>
+        {% endif %}
+        {% endfor %}
+      </select>
+      <input name="phone_number" placeholder="phone for user login">
+      <button type="submit">Create Connection</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h3>Create Messaging Context</h3>
+    <form method="post" action="/admin/contexts">
+      <select name="connection_id" required>
+        <option value="">connection</option>
+        {% for c in connections %}
+        {% if c.is_active %}
+        <option value="{{ c.id }}">{{ c.id }} - {{ c.name }} ({{ c.type.value }})</option>
+        {% endif %}
+        {% endfor %}
+      </select>
+      <input name="name" placeholder="context name" required>
+      <select name="mode">
+        <option value="send_only">send_only</option>
+        <option value="send_receive">send_receive</option>
+        <option value="receive_only">receive_only</option>
+      </select>
+      <input name="chat_id" placeholder="telegram chat id" required>
+      <button type="submit">Create Context</button>
+    </form>
+  </section>
+</div>
+
+<section class="card">
+  <h3>Users</h3>
+  <table>
+    <thead><tr><th>ID</th><th>Username</th><th>Admin</th><th>Active</th></tr></thead>
+    <tbody>
+      {% for u in users %}
+      <tr><td>{{ u.id }}</td><td>{{ u.username }}</td><td>{{ u.is_admin }}</td><td>{{ u.is_active }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h3>Managed Secrets</h3>
+  <form method="post" action="/admin/secrets">
+    <input name="name" placeholder="secret name" required>
+    <input name="value" placeholder="secret value" required>
+    <input name="secret_type" placeholder="type" value="generic">
+    <input name="description" placeholder="description (optional)">
+    <button type="submit">Create or Rotate Secret</button>
+  </form>
+  <table>
+    <thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Version</th><th>Active</th><th>Action</th></tr></thead>
+    <tbody>
+      {% for s in managed_secrets %}
+      <tr>
+        <td>{{ s.id }}</td>
+        <td>managed://{{ s.name }}</td>
+        <td>{{ s.secret_type }}</td>
+        <td>{{ s.version }}</td>
+        <td>{{ s.is_active }}</td>
+        <td>
+          {% if s.is_active %}
+          <form method="post" action="/admin/secrets/{{ s.name }}/deactivate" style="display:inline">
+            <button type="submit">Deactivate</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h3>Connections</h3>
+  <table>
+    <thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Token Ref</th><th>Session Ref</th><th>Phone</th><th>Active</th><th>Action</th></tr></thead>
+    <tbody>
+      {% for c in connections %}
+      <tr>
+        <td>{{ c.id }}</td>
+        <td>{{ c.name }}</td>
+        <td>{{ c.type.value }}</td>
+        <td>{{ c.secret_ref_token or '-' }}</td>
+        <td>{{ c.secret_ref_session or '-' }}</td>
+        <td>{{ c.phone_number or '-' }}</td>
+        <td>{{ c.is_active }}</td>
+        <td>
+          {% if c.is_active %}
+          <form method="post" action="/admin/connections/{{ c.id }}/deactivate" style="display:inline">
+            <button type="submit">Deactivate</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h3>Messaging Contexts</h3>
+  <table>
+    <thead><tr><th>ID</th><th>Connection</th><th>Name</th><th>Mode</th><th>Chat ID</th></tr></thead>
+    <tbody>
+      {% for x in contexts %}
+      <tr><td>{{ x.id }}</td><td>{{ x.connection_id }}</td><td>{{ x.name }}</td><td>{{ x.mode.value }}</td><td>{{ x.chat_id }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h3>Manual Runtime Messaging (Dex token required)</h3>
+  <p class="muted">Use this section to send/receive with both bot and user contexts via runtime endpoints.</p>
+  <form method="post" action="/admin/runtime/send">
+    <select name="context_id" required>
+      <option value="">context</option>
+      {% for x in contexts %}
+      {% if x.is_active %}
+      <option value="{{ x.id }}">{{ x.id }} - {{ x.name }} (conn {{ x.connection_id }}, {{ x.mode.value }})</option>
+      {% endif %}
+      {% endfor %}
+    </select>
+    <input name="text" placeholder="message text" required>
+    <input name="dex_token" placeholder="Dex JWT" style="width: 420px" required>
+    <button type="submit">Send</button>
+  </form>
+  <form method="post" action="/admin/runtime/updates">
+    <select name="context_id" required>
+      <option value="">context</option>
+      {% for x in contexts %}
+      {% if x.is_active %}
+      <option value="{{ x.id }}">{{ x.id }} - {{ x.name }} (conn {{ x.connection_id }}, {{ x.mode.value }})</option>
+      {% endif %}
+      {% endfor %}
+    </select>
+    <input name="offset" placeholder="offset (optional)">
+    <input name="dex_token" placeholder="Dex JWT" style="width: 420px" required>
+    <button type="submit">Get Updates</button>
+  </form>
+</section>
+
+<section class="card">
+  <h3>OTP Tools</h3>
+  <form method="post" action="/admin/runtime/otp/issue">
+    <select name="context_id" required>
+      <option value="">context</option>
+      {% for x in contexts %}
+      {% if x.is_active %}
+      <option value="{{ x.id }}">{{ x.id }} - {{ x.name }} (conn {{ x.connection_id }}, {{ x.mode.value }})</option>
+      {% endif %}
+      {% endfor %}
+    </select>
+    <input name="purpose" placeholder="purpose" value="auth">
+    <input name="ttl_seconds" type="number" placeholder="ttl seconds" value="300">
+    <input name="length" type="number" placeholder="length" value="6">
+    <input name="target_label" placeholder="target label (optional)">
+    <input name="dex_token" placeholder="Dex JWT" style="width: 420px" required>
+    <button type="submit">Issue OTP</button>
+  </form>
+  <form method="post" action="/admin/runtime/otp/verify">
+    <input name="challenge_id" placeholder="challenge id" required>
+    <input name="code" placeholder="OTP code" required>
+    <input name="dex_token" placeholder="Dex JWT" style="width: 420px" required>
+    <button type="submit">Verify OTP</button>
+  </form>
+  {% if runtime_error %}
+  <p class="error">{{ runtime_error }}</p>
+  {% endif %}
+  {% if runtime_result %}
+  <pre>{{ runtime_result }}</pre>
+  {% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,16 @@
+services:
+  telegram-service:
+    build:
+      context: .
+    container_name: telegram-service-local
+    env_file:
+      - .env.local
+    environment:
+      DATABASE_URL: sqlite:////app/data/telegram_gateway.db
+    ports:
+      - "8000:8000"
+    volumes:
+      - telegram_service_data:/app/data
+
+volumes:
+  telegram_service_data:

@@ -70,6 +70,7 @@ Export variables and run the script:
 ```bash
 export DEX_ISSUER_URL="https://auth.<your-domain>/dex"
 export DEX_OAUTH2_PROXY_REDIRECT_URI="https://app.<your-domain>/oauth2/callback"
+export DEX_OAUTH2_PROXY_EXTRA_REDIRECT_URIS="http://localhost:8090/dex/callback"
 export DEX_OAUTH2_PROXY_CLIENT_ID="oauth2-proxy"
 export DEX_OAUTH2_PROXY_CLIENT_SECRET="<strong-random-secret>"
 
@@ -106,6 +107,9 @@ htpasswd -bnBC 10 "" "<plain-password>" | tr -d ':\n'
 export DEX_STATIC_PASSWORDS_FILE="$(pwd)/static-passwords.yaml"
 ./01_create_dex_config_secret.sh
 ```
+
+If `DEX_STATIC_PASSWORDS_FILE` is not set but `./static-passwords.yaml` exists,
+the script now auto-loads that file.
 
 When `DEX_STATIC_PASSWORDS_FILE` is set, the script appends:
 

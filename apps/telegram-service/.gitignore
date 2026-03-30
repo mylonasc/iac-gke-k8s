@@ -1,0 +1,5 @@
+.env.local
+./k8s/secrets.yaml
+data/
+__pycache__/
+.pytest_cache/
