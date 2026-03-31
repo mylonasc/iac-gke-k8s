@@ -1,28 +1,26 @@
 {
   "name": "sandboxed-react-agent-frontend",
-  "version": "0.1.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 5173",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0 --port 4173",
-    "test": "npm run test:unit && npm run test:e2e",
-    "test:unit": "vitest run",
-    "test:e2e": "playwright test"
+    "test": "npm run test:unit",
+    "test:unit": "vitest run"
   },
   "dependencies": {
     "@assistant-ui/react": "0.12.16",
     "katex": "0.16.22",
-    "rehype-katex": "7.0.1",
-    "react-markdown": "9.0.3",
     "react": "19.2.0",
     "react-dom": "19.2.0",
+    "react-markdown": "9.0.3",
+    "rehype-katex": "7.0.1",
     "remark-gfm": "4.0.1",
     "remark-math": "6.0.0"
   },
   "devDependencies": {
-    "@playwright/test": "1.53.2",
     "@testing-library/jest-dom": "6.7.0",
     "@testing-library/react": "16.3.0",
     "@testing-library/user-event": "14.6.1",

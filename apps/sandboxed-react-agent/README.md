@@ -79,7 +79,8 @@ To render diagrams on demand:
 ## Folder structure
 
 - `backend/`: FastAPI service and Dockerfile.
-- `frontend/`: React app and Dockerfile.
+- `frontend/`: redesigned modular React UI (default runtime frontend).
+- `frontend-old/`: previous UI kept for reference.
 - `k8s/`: Kubernetes manifests (deployments, services, ingress, secret example).
 
 ## Prerequisites
@@ -362,7 +363,7 @@ Set your DockerHub user and image tag:
 
 ```bash
 export DOCKERHUB_USER=<your-dockerhub-user>
-export TAG=0.1.0
+export TAG=0.5.0
 ```
 
 Build/push backend:

@@ -1,0 +1,57 @@
+@import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;700&family=IBM+Plex+Mono:wght@400;500&display=swap");
+
+:root {
+  color-scheme: light;
+  --bg-main: #f4f8ff;
+  --bg-elevated: rgba(255, 255, 255, 0.88);
+  --bg-solid: #ffffff;
+  --bg-soft: #ecf3ff;
+  --text-main: #0f2847;
+  --text-subtle: #426182;
+  --line: #d4deec;
+  --line-strong: #b6c5db;
+  --brand: #0f766e;
+  --brand-contrast: #ffffff;
+  --danger: #9f1239;
+  --success: #166534;
+  --shadow: 0 16px 34px rgba(17, 42, 73, 0.1);
+  --font-sans: "Manrope", "Avenir Next", "Segoe UI", sans-serif;
+  --font-display: "Space Grotesk", "Manrope", sans-serif;
+  --font-mono: "IBM Plex Mono", "JetBrains Mono", monospace;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg-main: #050c18;
+  --bg-elevated: rgba(16, 28, 48, 0.82);
+  --bg-solid: #0c1a30;
+  --bg-soft: #102743;
+  --text-main: #dfebff;
+  --text-subtle: #9fb4cf;
+  --line: #1f3a5f;
+  --line-strong: #2d527f;
+  --brand: #40c4e8;
+  --brand-contrast: #032734;
+  --danger: #fb7185;
+  --success: #86efac;
+  --shadow: 0 14px 34px rgba(0, 0, 0, 0.38);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  color: var(--text-main);
+  background: radial-gradient(circle at 5% -5%, rgba(16, 185, 129, 0.15) 0%, transparent 40%),
+    radial-gradient(circle at 92% 8%, rgba(14, 116, 144, 0.12) 0%, transparent 34%),
+    radial-gradient(circle at 74% 92%, rgba(59, 130, 246, 0.12) 0%, transparent 40%), var(--bg-main);
+}

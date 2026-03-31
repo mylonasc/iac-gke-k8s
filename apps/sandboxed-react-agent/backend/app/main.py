@@ -91,7 +91,7 @@ class SandboxReleaseResponse(BaseModel):
 configure_logging()
 logger = logging.getLogger(__name__)
 agent = SandboxedReactAgent()
-app = FastAPI(title="sandboxed-react-agent-backend", version="0.1.0")
+app = FastAPI(title="sandboxed-react-agent-backend", version="0.5.0")
 init_tracing(app)
 auth_config = AuthConfig.from_env()
 token_verifier = TokenVerifier(auth_config)
