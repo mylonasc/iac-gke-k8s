@@ -15,11 +15,18 @@ It supports two execution targets:
 ## Architecture
 
 1. Browser sends chat request to backend (`/sandboxed-react-agent/api/chat`).
-2. Backend calls OpenAI with tool definitions (`sandbox_exec_python`, `sandbox_exec_shell`).
-3. When tool calls are requested, backend executes them in configured sandbox mode.
+2. Backend builds a per-session agent runtime and toolkit set, then calls OpenAI with tool definitions such as `sandbox_exec_python` and `sandbox_exec_shell`.
+3. When tool calls are requested, toolkit modules invoke integration facades that manage sandbox execution, lease reuse, and asset persistence.
 4. Tool output is returned to the model and then to the user.
 
-The backend currently uses an in-memory session store (single replica recommended).
+The backend now separates responsibilities into four layers:
+
+- `app/agent.py`: app-facing composition root for FastAPI, session ownership, and public APIs.
+- `app/agents/runtime.py` and `app/agents/transport.py`: LangGraph run loop and assistant transport orchestration.
+- `app/agents/toolkits/`: stateful tool providers that expose model-facing tools while holding injected runtime/session handles.
+- `app/agents/integrations/`: facades over sandbox runtime, sandbox lease/session lifecycle, and asset storage.
+
+This lets tool definitions evolve independently from sandbox backend details and keeps resource manipulation behind a stable Python abstraction.
 
 ## Deployment diagram (KubeDiagrams)
 
@@ -79,6 +86,9 @@ To render diagrams on demand:
 ## Folder structure
 
 - `backend/`: FastAPI service and Dockerfile.
+- `backend/app/agents/`: backend agent abstractions.
+- `backend/app/agents/toolkits/`: stateful LangGraph/LangChain-compatible tool providers.
+- `backend/app/agents/integrations/`: facades for sandbox runtime, lease/session lifecycle, and assets.
 - `frontend/`: redesigned modular React UI (default runtime frontend).
 - `frontend-old/`: previous UI kept for reference.
 - `k8s/`: Kubernetes manifests (deployments, services, ingress, secret example).
