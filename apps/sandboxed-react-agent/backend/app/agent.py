@@ -83,6 +83,7 @@ class SandboxedReactAgent:
         self._agent_runtime = AgentRuntime(
             build_sandbox_toolkit=self._build_sandbox_toolkit,
             notify_tool_event=self._notify_tool_event,
+            should_stream_model=lambda: False,
             get_create_completion=lambda: self._create_completion_async,
             get_create_completion_streaming=lambda: (
                 self._create_completion_streaming_async

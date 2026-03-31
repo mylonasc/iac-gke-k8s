@@ -19,6 +19,7 @@ Path(os.environ["SESSION_STORE_PATH"]).unlink(missing_ok=True)
 
 from app.main import agent, app
 import app.main as main_module
+from app.agents.tool_payloads import ToolExecutionPayload
 
 
 client = TestClient(app)
@@ -589,7 +590,7 @@ def test_assistant_transport_emits_image_asset_in_message(monkeypatch) -> None:
 
     calls = {"count": 0}
 
-    async def fake_streamed_completion(_messages, model):
+    async def fake_completion(_messages, model):
         assert isinstance(model, str)
         calls["count"] += 1
         if calls["count"] == 1:
@@ -600,24 +601,37 @@ def test_assistant_transport_emits_image_asset_in_message(monkeypatch) -> None:
                 "expose_asset('/tmp/sinusoid_plot.png')\n"
                 "print('created sinusoid')"
             )
-            return {
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": "tool-plot",
-                        "type": "function",
-                        "function": {
-                            "name": "sandbox_exec_python",
-                            "arguments": json.dumps({"code": code}),
-                        },
-                    }
-                ],
-            }
-        return {"content": "Plot generated and attached.", "tool_calls": []}
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content="",
+                            tool_calls=[
+                                {
+                                    "id": "tool-plot",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "sandbox_exec_python",
+                                        "arguments": json.dumps({"code": code}),
+                                    },
+                                }
+                            ],
+                        )
+                    )
+                ]
+            )
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="Plot generated and attached.",
+                        tool_calls=[],
+                    )
+                )
+            ]
+        )
 
-    monkeypatch.setattr(
-        agent, "_create_completion_streaming_async", fake_streamed_completion
-    )
+    monkeypatch.setattr(agent, "_create_completion_async", fake_completion)
 
     response = client.post(
         "/api/assistant",
@@ -643,6 +657,111 @@ def test_assistant_transport_emits_image_asset_in_message(monkeypatch) -> None:
     assert response.status_code == 200
     assert "/api/assets/" in response.text
     assert "Plot generated and attached" in response.text
+
+
+def test_assistant_transport_deduplicates_immediate_identical_tool_retries(
+    monkeypatch,
+) -> None:
+    calls = {"count": 0}
+    tool_runs = {"count": 0}
+
+    async def fake_completion(_messages, model):
+        assert isinstance(model, str)
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content="",
+                            tool_calls=[
+                                {
+                                    "id": "tool-first",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "sandbox_exec_python",
+                                        "arguments": json.dumps(
+                                            {"code": "result = 12 * 13\nresult"}
+                                        ),
+                                    },
+                                }
+                            ],
+                        )
+                    )
+                ]
+            )
+        if calls["count"] == 2:
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content="",
+                            tool_calls=[
+                                {
+                                    "id": "tool-duplicate",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "sandbox_exec_python",
+                                        "arguments": json.dumps(
+                                            {"code": "result = 12 * 13\nresult"}
+                                        ),
+                                    },
+                                }
+                            ],
+                        )
+                    )
+                ]
+            )
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="The result is 156.",
+                        tool_calls=[],
+                    )
+                )
+            ]
+        )
+
+    def fake_run_python(*, session_id, tool_call_id, code, runtime_config, created_at):
+        tool_runs["count"] += 1
+        payload = ToolExecutionPayload(
+            tool="sandbox_exec_python",
+            ok=True,
+            stdout="156",
+            stderr="",
+            exit_code=0,
+        )
+        return payload, []
+
+    monkeypatch.setattr(agent, "_create_completion_async", fake_completion)
+    monkeypatch.setattr(agent.session_sandbox_facade, "run_python", fake_run_python)
+
+    response = client.post(
+        "/api/assistant",
+        json={
+            "commands": [
+                {
+                    "type": "add-message",
+                    "message": {
+                        "role": "user",
+                        "parts": [
+                            {
+                                "type": "text",
+                                "text": "Use python to calculate 12*13 and tell me the result.",
+                            }
+                        ],
+                    },
+                }
+            ],
+            "state": {"messages": [], "tool_updates": []},
+        },
+    )
+
+    assert response.status_code == 200
+    assert tool_runs["count"] == 1
+    assert response.text.count('"toolCallId"') == 1
+    assert "The result is 156." in response.text
 
 
 def test_sessions_are_scoped_per_authenticated_user(monkeypatch) -> None:

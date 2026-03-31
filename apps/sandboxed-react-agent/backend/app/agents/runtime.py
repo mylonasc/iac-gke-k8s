@@ -16,6 +16,7 @@ class AgentRuntime:
         *,
         build_sandbox_toolkit: Callable[[str, dict[str, Any]], Any],
         notify_tool_event: Callable[[dict[str, Any]], Awaitable[None]],
+        should_stream_model: Callable[[], bool],
         get_create_completion: Callable[[], Callable[..., Awaitable[Any]]],
         get_create_completion_streaming: Callable[
             [], Callable[..., Awaitable[dict[str, Any]]]
@@ -24,6 +25,7 @@ class AgentRuntime:
     ) -> None:
         self.build_sandbox_toolkit = build_sandbox_toolkit
         self.notify_tool_event = notify_tool_event
+        self.should_stream_model = should_stream_model
         self.get_create_completion = get_create_completion
         self.get_create_completion_streaming = get_create_completion_streaming
         self.tool_error_output = tool_error_output
@@ -31,6 +33,16 @@ class AgentRuntime:
 
     def set_graph(self, graph: Any) -> None:
         self._graph = graph
+
+    def _last_tool_result(
+        self, turn_tool_calls: list[dict[str, Any]], tool_name: str, args_text: str
+    ) -> str | None:
+        for prior in reversed(turn_tool_calls):
+            if prior.get("tool") == tool_name and prior.get("arguments") == args_text:
+                result = prior.get("result")
+                if isinstance(result, str):
+                    return result
+        return None
 
     async def _call_completion_async(
         self,
@@ -66,7 +78,7 @@ class AgentRuntime:
         )
         tools = toolkit.get_openai_tools()
 
-        if self.notify_tool_event is not None:
+        if self.should_stream_model():
             streamed = await self._call_completion_streaming_async(
                 messages=state["messages"],
                 model=str(state["runtime_config"]["model"]),
@@ -190,6 +202,23 @@ class AgentRuntime:
                         }
                     )
                 break
+
+            cached_output = self._last_tool_result(
+                turn_tool_calls, tool_name, args_text
+            )
+            if cached_output is not None:
+                # Some model runs immediately re-issue the exact same tool call.
+                # Reuse the previous tool output for the LLM context and avoid
+                # double-executing the sandbox or duplicating UI tool cards.
+                tool_call_count += 1
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": cached_output,
+                    }
+                )
+                continue
 
             try:
                 output, stored_assets = await toolkit.run_tool_call(
