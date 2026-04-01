@@ -5,6 +5,7 @@
 - Runtime requests are authenticated using Dex-issued JWTs.
 - Verification is done against `DEX_JWKS_URL`.
 - Optional checks: `DEX_ISSUERS`, `DEX_AUDIENCE`, `DEX_EMAIL_ALLOWLIST`, `DEX_REQUIRED_GROUP`.
+- Runtime access to contexts is restricted to resources owned by the authenticated Dex principal.
 
 ## Admin authentication
 
@@ -16,6 +17,7 @@
 - Store bot tokens and MTProto session artifacts in Google Secret Manager.
 - Sync bootstrap/admin secrets to Kubernetes through External Secrets.
 - Keep only secret references in DB.
+- Tenant self-service connection creation stores imported bot tokens and session strings as gateway-managed secrets.
 
 Supported secret refs in v1:
 
@@ -29,6 +31,7 @@ Supported secret refs in v1:
 - Service type `ClusterIP` only.
 - No public ingress manifest.
 - NetworkPolicy default deny; explicitly allows limited ingress and egress.
+- If Telegram webhooks are enabled, configure `WEBHOOK_SHARED_SECRET` and send the matching `X-Telegram-Bot-Api-Secret-Token` header.
 
 ## Operational recommendations
 

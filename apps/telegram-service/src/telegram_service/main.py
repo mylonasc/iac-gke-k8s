@@ -9,6 +9,7 @@ from telegram_service.routers.admin_api import router as admin_api_router
 from telegram_service.routers.admin_ui import router as admin_ui_router
 from telegram_service.routers.config_api import router as config_api_router
 from telegram_service.routers.runtime_gateway import router as runtime_router
+from telegram_service.routers.self_service_api import router as self_service_router
 
 settings = get_settings()
 
@@ -17,6 +18,7 @@ app.include_router(admin_api_router)
 app.include_router(admin_ui_router)
 app.include_router(config_api_router)
 app.include_router(runtime_router)
+app.include_router(self_service_router)
 
 
 @app.on_event("startup")

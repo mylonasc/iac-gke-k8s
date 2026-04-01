@@ -13,6 +13,7 @@ Python FastAPI gateway and admin dashboard for managing multiple Telegram bot/us
 - Built-in one-time-password lifecycle endpoints (`issue` + `verify`).
 - Bot onboarding links with `/start <token>` chat binding and QR deep links.
 - Runtime API secured by Dex-issued JWT verification (OIDC login stays external to this service).
+- Dex-authenticated self-service API for tenant-owned connections, contexts, and onboarding links.
 - Admin panel for connection/context/secrets metadata management.
 - Secret model designed for GSM + External Secrets (DB stores references only, not raw bot tokens/sessions).
 - Kubernetes-first deployment in dedicated namespace and `ClusterIP` service.
@@ -23,6 +24,7 @@ Python FastAPI gateway and admin dashboard for managing multiple Telegram bot/us
 - `src/telegram_service/routers/admin_api.py`: admin/config API.
 - `src/telegram_service/routers/config_api.py`: dedicated configuration endpoint group.
 - `src/telegram_service/routers/runtime_gateway.py`: runtime gateway API.
+- `src/telegram_service/routers/self_service_api.py`: tenant self-service API.
 - `src/telegram_service/routers/admin_ui.py`: admin dashboard routes.
 - `k8s/`: namespace/deployment/service/network policies/examples.
 - `docker-compose.yml`: local stack.
@@ -64,6 +66,8 @@ Example:
 curl -H "Authorization: Bearer $DEX_JWT" http://localhost:8000/gateway/whoami
 ```
 
+Tenant self-service endpoints under `/api/self-service/*` use the same Dex bearer token and are scoped to resources owned by the caller.
+
 OTP example:
 
 ```bash
@@ -82,6 +86,8 @@ Use admin API (`/api/admin/*`) or UI to create:
 - messaging contexts
 
 Dedicated config endpoint for provisioning connections is exposed at `/api/config/*`.
+
+For tenant-owned provisioning, use `/api/self-service/*` instead. Self-service connection creation stores bot tokens and imported session strings into gateway-managed secrets scoped to the caller.
 
 Connection secret references support:
 
@@ -157,6 +163,7 @@ Tear down:
 ## Notes
 
 - Current default DB is SQLite for quick start. Models are SQLAlchemy-based and can move to Postgres by changing `DATABASE_URL`.
+- Runtime access is now restricted to contexts whose owning connection belongs to the authenticated Dex principal.
 - Service is intentionally `ClusterIP` and no public ingress is included.
 - NetworkPolicy defaults to deny and allows ingress only from namespaces labeled `telegram-gateway-access=true`.
 - Deployment expects pull secret `dockerhub-regcred` in namespace `telegram-gateway`.

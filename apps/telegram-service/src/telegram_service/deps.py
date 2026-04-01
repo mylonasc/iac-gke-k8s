@@ -1,3 +1,5 @@
+import hashlib
+
 from fastapi import Depends, Header, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
@@ -47,3 +49,32 @@ def get_runtime_principal(authorization: str = Header(default="")) -> RuntimePri
     token = authorization.replace("Bearer ", "", 1).strip()
     verifier = get_dex_verifier()
     return verifier.verify_token(token)
+
+
+def _runtime_username(subject: str) -> str:
+    digest = hashlib.sha256(subject.encode("utf-8")).hexdigest()[:24]
+    return f"dex-{digest}"
+
+
+def get_current_runtime_user(
+    principal: RuntimePrincipal = Depends(get_runtime_principal),
+    db: Session = Depends(get_db),
+) -> User:
+    username = _runtime_username(principal.subject)
+    user = db.query(User).filter(User.username == username).first()
+    if not user:
+        user = User(
+            username=username,
+            password_hash=None,
+            is_admin=False,
+            is_active=True,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Runtime user is inactive"
+        )
+    return user

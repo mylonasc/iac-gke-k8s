@@ -77,6 +77,13 @@ class RuntimePrincipal(BaseModel):
     email: str | None = None
 
 
+class RuntimeIdentity(BaseModel):
+    user_id: int
+    subject: str
+    username: str | None = None
+    email: str | None = None
+
+
 class UserLoginStartRequest(BaseModel):
     connection_id: int
 
@@ -166,3 +173,19 @@ class OnboardingOut(BaseModel):
     qr_data_url: str | None = None
 
     model_config = {"from_attributes": True}
+
+
+class SelfServiceConnectionCreate(BaseModel):
+    name: str = Field(min_length=3, max_length=200)
+    type: ConnectionType
+    bot_username: str | None = Field(default=None, max_length=200)
+    phone_number: str | None = Field(default=None, max_length=50)
+    bot_token: str | None = Field(default=None, min_length=1, max_length=8192)
+    session_string: str | None = Field(default=None, min_length=1, max_length=8192)
+
+
+class SelfServiceContextCreate(BaseModel):
+    connection_id: int
+    name: str = Field(min_length=2, max_length=120)
+    mode: ContextMode
+    chat_id: str = Field(min_length=1, max_length=80)

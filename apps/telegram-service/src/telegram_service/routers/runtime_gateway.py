@@ -8,13 +8,14 @@ from sqlalchemy.orm import Session
 
 from telegram_service.config import get_settings
 from telegram_service.database import get_db
-from telegram_service.deps import get_runtime_principal
+from telegram_service.deps import get_current_runtime_user, get_runtime_principal
 from telegram_service.models import (
     ConnectionType,
     ContextMode,
     MessagingContext,
     OtpChallenge,
     TelegramConnection,
+    User,
 )
 from telegram_service.onboarding import process_telegram_update_for_onboarding
 from telegram_service.mtproto import get_user_messages, send_user_message
@@ -34,7 +35,7 @@ settings = get_settings()
 
 
 def _resolve_context(
-    db: Session, context_id: int
+    db: Session, context_id: int, user: User
 ) -> tuple[MessagingContext, TelegramConnection]:
     context = (
         db.query(MessagingContext)
@@ -54,6 +55,9 @@ def _resolve_context(
     )  # noqa: E712
     if not connection:
         raise HTTPException(status_code=404, detail="Connection not found")
+
+    if connection.owner_user_id != user.id:
+        raise HTTPException(status_code=404, detail="Owned context not found")
 
     return context, connection
 
@@ -76,6 +80,21 @@ def _hash_otp(challenge_id: str, code: str) -> str:
 def _generate_otp(length: int) -> str:
     alphabet = "0123456789"
     return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+def _filter_bot_updates_for_chat(
+    provider_response: dict[str, Any], chat_id: str
+) -> list[dict[str, Any]]:
+    results = (
+        provider_response.get("result") if isinstance(provider_response, dict) else []
+    )
+    filtered: list[dict[str, Any]] = []
+    for item in results or []:
+        message = item.get("message") or item.get("edited_message") or {}
+        item_chat_id = str(((message.get("chat") or {}).get("id", ""))).strip()
+        if item_chat_id == chat_id:
+            filtered.append(item)
+    return filtered
 
 
 async def _send_through_connection(
@@ -130,23 +149,14 @@ async def _receive_through_connection(
                 status_code=500, detail=f"Cannot resolve bot token: {exc}"
             ) from exc
         provider_response = await get_updates(token=token, offset=offset)
-
-        results = (
-            provider_response.get("result")
-            if isinstance(provider_response, dict)
-            else []
-        )
-        filtered: list[dict[str, Any]] = []
-        for item in results or []:
-            message = item.get("message") or item.get("edited_message") or {}
-            item_chat_id = str(((message.get("chat") or {}).get("id", ""))).strip()
-            if item_chat_id == chat_id:
-                filtered.append(item)
+        filtered = _filter_bot_updates_for_chat(provider_response, chat_id)
 
         return {
             "connection_type": "bot",
-            "provider_response": provider_response,
-            "context_filtered_result": filtered,
+            "provider_response": {
+                "ok": provider_response.get("ok", True),
+                "result": filtered,
+            },
         }
 
     if connection.type == ConnectionType.user:
@@ -184,9 +194,10 @@ async def send_to_context(
     context_id: int,
     payload: SendMessageRequest,
     _: RuntimePrincipal = Depends(get_runtime_principal),
+    user: User = Depends(get_current_runtime_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    context, connection = _resolve_context(db, context_id)
+    context, connection = _resolve_context(db, context_id, user)
     _ensure_send_allowed(context)
     response = await _send_through_connection(
         connection, chat_id=context.chat_id, text=payload.text, db=db
@@ -199,9 +210,10 @@ async def get_context_updates(
     context_id: int,
     offset: int | None = Query(default=None),
     _: RuntimePrincipal = Depends(get_runtime_principal),
+    user: User = Depends(get_current_runtime_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    context, connection = _resolve_context(db, context_id)
+    context, connection = _resolve_context(db, context_id, user)
     _ensure_receive_allowed(context)
     response = await _receive_through_connection(
         connection, chat_id=context.chat_id, offset=offset, db=db
@@ -213,9 +225,10 @@ async def get_context_updates(
 async def issue_otp(
     payload: OtpIssueRequest,
     principal: RuntimePrincipal = Depends(get_runtime_principal),
+    user: User = Depends(get_current_runtime_user),
     db: Session = Depends(get_db),
 ) -> OtpIssueResponse:
-    context, connection = _resolve_context(db, payload.context_id)
+    context, connection = _resolve_context(db, payload.context_id, user)
     _ensure_send_allowed(context)
 
     otp_code = _generate_otp(payload.length)
@@ -299,6 +312,12 @@ def verify_otp(
 async def receive_webhook(
     connection_name: str, request: Request, db: Session = Depends(get_db)
 ) -> dict:
+    expected_secret = settings.webhook_shared_secret.strip()
+    if expected_secret:
+        actual_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if actual_secret != expected_secret:
+            raise HTTPException(status_code=401, detail="Invalid webhook secret")
+
     connection = (
         db.query(TelegramConnection)
         .filter(

@@ -65,6 +65,8 @@ Base: `/gateway`
 - `POST /otp/issue`
 - `POST /otp/verify`
 
+Runtime callers can only access contexts owned by their Dex identity.
+
 ## Configuration endpoint
 
 Base: `/api/config`
@@ -74,6 +76,42 @@ Base: `/api/config`
 - `POST /contexts`
 
 This endpoint group is intended for provisioning new Telegram connections and contexts.
+
+## Self-service API
+
+Base: `/api/self-service`
+
+- `GET /me`
+- `GET /connections`
+- `POST /connections`
+- `GET /contexts`
+- `POST /contexts`
+- `GET /onboarding-links`
+- `POST /onboarding-links`
+- `POST /onboarding-links/process`
+
+Self-service APIs are authenticated with Dex JWTs and operate only on caller-owned resources.
+
+### Example: create owned bot connection
+
+```json
+{
+  "name": "tenant-bot-main",
+  "type": "bot",
+  "bot_token": "123456:telegram-bot-token"
+}
+```
+
+### Example: create owned context
+
+```json
+{
+  "connection_id": 1,
+  "name": "alerts",
+  "mode": "send_only",
+  "chat_id": "-1001234567890"
+}
+```
 
 ### Context mode rules
 
