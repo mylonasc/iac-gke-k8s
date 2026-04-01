@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0 --port 4173",
     "test": "npm run test:unit",
-    "test:unit": "vitest run"
+    "test:unit": "vitest run",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@assistant-ui/react": "0.12.16",
@@ -21,6 +22,7 @@
     "remark-math": "6.0.0"
   },
   "devDependencies": {
+    "@playwright/test": "1.55.0",
     "@testing-library/jest-dom": "6.7.0",
     "@testing-library/react": "16.3.0",
     "@testing-library/user-event": "14.6.1",

@@ -84,6 +84,16 @@ class SessionStore:
                 )
                 """
             )
+            user_config_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(user_configs)"
+                ).fetchall()
+            }
+            if "config_json" not in user_config_columns:
+                connection.execute(
+                    "ALTER TABLE user_configs ADD COLUMN config_json TEXT"
+                )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS assets (
@@ -197,24 +207,12 @@ class SessionStore:
             ).fetchone()
         if not row:
             return None
-        return {
-            "user_id": row["user_id"],
-            "model": row["model"],
-            "max_tool_calls_per_turn": int(row["max_tool_calls_per_turn"]),
-            "sandbox_mode": row["sandbox_mode"],
-            "sandbox_api_url": row["sandbox_api_url"],
-            "sandbox_template_name": row["sandbox_template_name"],
-            "sandbox_namespace": row["sandbox_namespace"],
-            "sandbox_server_port": int(row["sandbox_server_port"]),
-            "sandbox_max_output_chars": int(row["sandbox_max_output_chars"]),
-            "sandbox_local_timeout_seconds": int(row["sandbox_local_timeout_seconds"]),
-            "sandbox_execution_model": row["sandbox_execution_model"],
-            "sandbox_session_idle_ttl_seconds": int(
-                row["sandbox_session_idle_ttl_seconds"]
-            ),
-            "created_at": row["created_at"],
-            "updated_at": row["updated_at"],
-        }
+        config_json = row["config_json"] if "config_json" in row.keys() else None
+        if config_json:
+            parsed = json.loads(config_json)
+            if isinstance(parsed, dict):
+                return parsed
+        return self._legacy_runtime_config_from_row(row)
 
     def upsert_user_config(self, user_id: str, config: dict[str, Any]) -> None:
         """Create or update per-user runtime configuration."""
@@ -223,6 +221,7 @@ class SessionStore:
             raise ValueError("user_id is required")
         self.ensure_user(normalized_user_id)
         now_iso = datetime.now(timezone.utc).isoformat()
+        legacy = self._legacy_columns_from_runtime_config(config)
         with self._connect() as connection:
             connection.execute(
                 """
@@ -239,9 +238,10 @@ class SessionStore:
                     sandbox_local_timeout_seconds,
                     sandbox_execution_model,
                     sandbox_session_idle_ttl_seconds,
+                    config_json,
                     created_at,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     model=excluded.model,
                     max_tool_calls_per_turn=excluded.max_tool_calls_per_turn,
@@ -254,25 +254,108 @@ class SessionStore:
                     sandbox_local_timeout_seconds=excluded.sandbox_local_timeout_seconds,
                     sandbox_execution_model=excluded.sandbox_execution_model,
                     sandbox_session_idle_ttl_seconds=excluded.sandbox_session_idle_ttl_seconds,
+                    config_json=excluded.config_json,
                     updated_at=excluded.updated_at
                 """,
                 (
                     normalized_user_id,
-                    str(config["model"]),
-                    int(config["max_tool_calls_per_turn"]),
-                    str(config["sandbox_mode"]),
-                    str(config["sandbox_api_url"]),
-                    str(config["sandbox_template_name"]),
-                    str(config["sandbox_namespace"]),
-                    int(config["sandbox_server_port"]),
-                    int(config["sandbox_max_output_chars"]),
-                    int(config["sandbox_local_timeout_seconds"]),
-                    str(config["sandbox_execution_model"]),
-                    int(config["sandbox_session_idle_ttl_seconds"]),
+                    str(legacy["model"]),
+                    int(legacy["max_tool_calls_per_turn"]),
+                    str(legacy["sandbox_mode"]),
+                    str(legacy["sandbox_api_url"]),
+                    str(legacy["sandbox_template_name"]),
+                    str(legacy["sandbox_namespace"]),
+                    int(legacy["sandbox_server_port"]),
+                    int(legacy["sandbox_max_output_chars"]),
+                    int(legacy["sandbox_local_timeout_seconds"]),
+                    str(legacy["sandbox_execution_model"]),
+                    int(legacy["sandbox_session_idle_ttl_seconds"]),
+                    json.dumps(config, ensure_ascii=True),
                     now_iso,
                     now_iso,
                 ),
             )
+
+    def _legacy_runtime_config_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "agent": {
+                "model": row["model"],
+                "max_tool_calls_per_turn": int(row["max_tool_calls_per_turn"]),
+                "enabled_toolkits": ["sandbox"],
+            },
+            "toolkits": {
+                "sandbox": {
+                    "enabled": True,
+                    "runtime": {
+                        "mode": row["sandbox_mode"],
+                        "api_url": row["sandbox_api_url"],
+                        "template_name": row["sandbox_template_name"],
+                        "namespace": row["sandbox_namespace"],
+                        "server_port": int(row["sandbox_server_port"]),
+                        "max_output_chars": int(row["sandbox_max_output_chars"]),
+                        "local_timeout_seconds": int(
+                            row["sandbox_local_timeout_seconds"]
+                        ),
+                    },
+                    "lifecycle": {
+                        "execution_model": row["sandbox_execution_model"],
+                        "session_idle_ttl_seconds": int(
+                            row["sandbox_session_idle_ttl_seconds"]
+                        ),
+                    },
+                }
+            },
+        }
+
+    def _legacy_columns_from_runtime_config(
+        self, config: dict[str, Any]
+    ) -> dict[str, Any]:
+        if "agent" not in config or "toolkits" not in config:
+            return {
+                "model": config["model"],
+                "max_tool_calls_per_turn": int(config["max_tool_calls_per_turn"]),
+                "sandbox_mode": config["sandbox_mode"],
+                "sandbox_api_url": config["sandbox_api_url"],
+                "sandbox_template_name": config["sandbox_template_name"],
+                "sandbox_namespace": config["sandbox_namespace"],
+                "sandbox_server_port": int(config["sandbox_server_port"]),
+                "sandbox_max_output_chars": int(config["sandbox_max_output_chars"]),
+                "sandbox_local_timeout_seconds": int(
+                    config["sandbox_local_timeout_seconds"]
+                ),
+                "sandbox_execution_model": config["sandbox_execution_model"],
+                "sandbox_session_idle_ttl_seconds": int(
+                    config["sandbox_session_idle_ttl_seconds"]
+                ),
+            }
+
+        agent = config.get("agent") or {}
+        sandbox = (config.get("toolkits") or {}).get("sandbox") or {}
+        sandbox_runtime = sandbox.get("runtime") or {}
+        sandbox_lifecycle = sandbox.get("lifecycle") or {}
+        return {
+            "model": str(agent.get("model") or "gpt-4o-mini"),
+            "max_tool_calls_per_turn": int(agent.get("max_tool_calls_per_turn") or 4),
+            "sandbox_mode": str(sandbox_runtime.get("mode") or "cluster"),
+            "sandbox_api_url": str(sandbox_runtime.get("api_url") or ""),
+            "sandbox_template_name": str(
+                sandbox_runtime.get("template_name") or "python-runtime-template-small"
+            ),
+            "sandbox_namespace": str(sandbox_runtime.get("namespace") or "alt-default"),
+            "sandbox_server_port": int(sandbox_runtime.get("server_port") or 8888),
+            "sandbox_max_output_chars": int(
+                sandbox_runtime.get("max_output_chars") or 6000
+            ),
+            "sandbox_local_timeout_seconds": int(
+                sandbox_runtime.get("local_timeout_seconds") or 20
+            ),
+            "sandbox_execution_model": str(
+                sandbox_lifecycle.get("execution_model") or "session"
+            ),
+            "sandbox_session_idle_ttl_seconds": int(
+                sandbox_lifecycle.get("session_idle_ttl_seconds") or 1800
+            ),
+        }
 
     def _to_record(self, row: sqlite3.Row) -> dict[str, Any]:
         """Map a session row to an application dictionary."""

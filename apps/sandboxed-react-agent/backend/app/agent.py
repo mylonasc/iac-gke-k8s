@@ -21,8 +21,12 @@ from .agents.runtime import AgentRuntime
 from .agents.session_ui import SessionUIHelper
 from .agents.state import AgentGraphState
 from .agents.transport import AssistantTransportRuntime
+from .agents.toolkits.base import ToolkitProvider
 from .agents.tool_events import model_token_event
+from .agents.toolkits.highcharts import HighchartsToolkitProvider
+from .agents.toolkits.sandbox import SandboxToolkitProvider
 from .asset_manager import AssetManager
+from .frontend_libs import FrontendLibraryCache
 from .sandbox_lifecycle import SandboxLifecycleService
 from .sandbox_manager import SandboxManager
 from .session_store import SessionStore
@@ -62,6 +66,7 @@ class SandboxedReactAgent:
             os.getenv("AGENT_MAX_TOOL_CALLS_PER_TURN", "4")
         )
         self.async_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        self.frontend_library_cache = FrontendLibraryCache()
         self.sandbox_manager = SandboxManager()
         self.session_store = SessionStore()
         self.sandbox_lifecycle = SandboxLifecycleService(
@@ -75,13 +80,17 @@ class SandboxedReactAgent:
             self.sandbox_lease_facade,
             self.asset_facade,
         )
+        self.toolkit_providers: list[ToolkitProvider] = [
+            SandboxToolkitProvider(self.session_sandbox_facade),
+            HighchartsToolkitProvider(self.asset_manager),
+        ]
         self.default_sandbox_config = self.sandbox_manager.get_config()
         self.default_sandbox_config.update(self.sandbox_lifecycle.get_config())
         self.sessions: dict[str, SessionState] = {}
         self._tool_event_listener: Any = None
         self._session_ui = SessionUIHelper(now_iso=_now_iso)
         self._agent_runtime = AgentRuntime(
-            build_sandbox_toolkit=self._build_sandbox_toolkit,
+            build_tool_runtime=self._build_tool_runtime,
             notify_tool_event=self._notify_tool_event,
             should_stream_model=lambda: False,
             get_create_completion=lambda: self._create_completion_async,
@@ -217,43 +226,123 @@ class SandboxedReactAgent:
 
         return sanitized
 
-    def _default_runtime_config_record(self) -> dict[str, Any]:
+    def _default_runtime_config(self) -> dict[str, Any]:
         return {
-            "model": self.default_model,
-            "max_tool_calls_per_turn": self.default_max_tool_calls_per_turn,
-            "sandbox_mode": self.default_sandbox_config.get("mode", "cluster"),
-            "sandbox_api_url": self.default_sandbox_config.get("api_url", ""),
-            "sandbox_template_name": self.default_sandbox_config.get(
-                "template_name", "python-runtime-template-small"
-            ),
-            "sandbox_namespace": self.default_sandbox_config.get(
-                "namespace", "alt-default"
-            ),
-            "sandbox_server_port": int(
-                self.default_sandbox_config.get("server_port", 8888)
-            ),
-            "sandbox_max_output_chars": int(
-                self.default_sandbox_config.get("max_output_chars", 6000)
-            ),
-            "sandbox_local_timeout_seconds": int(
-                self.default_sandbox_config.get("local_timeout_seconds", 20)
-            ),
-            "sandbox_execution_model": self.default_sandbox_config.get(
-                "execution_model", "session"
-            ),
-            "sandbox_session_idle_ttl_seconds": int(
-                self.default_sandbox_config.get("session_idle_ttl_seconds", 1800)
-            ),
+            "agent": {
+                "model": self.default_model,
+                "max_tool_calls_per_turn": self.default_max_tool_calls_per_turn,
+                "enabled_toolkits": [
+                    provider.toolkit_id for provider in self.toolkit_providers
+                ],
+            },
+            "toolkits": {
+                "sandbox": {
+                    "enabled": True,
+                    "runtime": {
+                        "mode": self.default_sandbox_config.get("mode", "cluster"),
+                        "api_url": self.default_sandbox_config.get("api_url", ""),
+                        "template_name": self.default_sandbox_config.get(
+                            "template_name", "python-runtime-template-small"
+                        ),
+                        "namespace": self.default_sandbox_config.get(
+                            "namespace", "alt-default"
+                        ),
+                        "server_port": int(
+                            self.default_sandbox_config.get("server_port", 8888)
+                        ),
+                        "max_output_chars": int(
+                            self.default_sandbox_config.get("max_output_chars", 6000)
+                        ),
+                        "local_timeout_seconds": int(
+                            self.default_sandbox_config.get("local_timeout_seconds", 20)
+                        ),
+                    },
+                    "lifecycle": {
+                        "execution_model": self.default_sandbox_config.get(
+                            "execution_model", "session"
+                        ),
+                        "session_idle_ttl_seconds": int(
+                            self.default_sandbox_config.get(
+                                "session_idle_ttl_seconds", 1800
+                            )
+                        ),
+                        "sandbox_ready_timeout": int(
+                            self.default_sandbox_config.get(
+                                "sandbox_ready_timeout", 420
+                            )
+                        ),
+                        "gateway_ready_timeout": int(
+                            self.default_sandbox_config.get(
+                                "gateway_ready_timeout", 180
+                            )
+                        ),
+                        "max_lease_ttl_seconds": int(
+                            self.default_sandbox_config.get(
+                                "max_lease_ttl_seconds", 21600
+                            )
+                        ),
+                    },
+                },
+                "highcharts": {
+                    "enabled": True,
+                    "runtime": {
+                        "library_url": self.frontend_library_cache.get_library_url(
+                            "highcharts"
+                        )
+                    },
+                },
+            },
         }
 
-    def _build_sandbox_toolkit(self, session_id: str, runtime_config: dict[str, Any]):
-        return self._agent_factory.build_sandbox_toolkit(
-            session_sandbox=self.session_sandbox_facade,
+    def _build_tool_runtime(self, session_id: str, runtime_config: dict[str, Any]):
+        return self._agent_factory.build_tool_runtime(
+            toolkit_providers=self.toolkit_providers,
             session_id=session_id,
-            runtime_config=runtime_config.get("sandbox") or {},
+            runtime_config=runtime_config,
             now_iso=_now_iso,
             event_sink=self._notify_tool_event,
         )
+
+    def _merge_runtime_config(
+        self, defaults: dict[str, Any], stored: dict[str, Any]
+    ) -> dict[str, Any]:
+        merged = copy.deepcopy(defaults)
+        merged_agent = merged.get("agent") or {}
+        stored_agent = stored.get("agent") or {}
+        merged_agent.update(
+            {
+                key: value
+                for key, value in stored_agent.items()
+                if value is not None and key != "enabled_toolkits"
+            }
+        )
+        merged["agent"] = merged_agent
+
+        merged_toolkits = merged.get("toolkits") or {}
+        stored_toolkits = stored.get("toolkits") or {}
+        for toolkit_id, toolkit_config in stored_toolkits.items():
+            if not isinstance(toolkit_config, dict):
+                continue
+            base_toolkit = copy.deepcopy(merged_toolkits.get(toolkit_id) or {})
+            for key, value in toolkit_config.items():
+                if isinstance(value, dict) and isinstance(base_toolkit.get(key), dict):
+                    merged_section = dict(base_toolkit.get(key) or {})
+                    merged_section.update(
+                        {
+                            sub_key: sub_value
+                            for sub_key, sub_value in value.items()
+                            if sub_value is not None
+                        }
+                    )
+                    base_toolkit[key] = merged_section
+                elif value is not None:
+                    base_toolkit[key] = value
+            merged_toolkits[toolkit_id] = base_toolkit
+        merged["toolkits"] = merged_toolkits
+        merged["agent"]["enabled_toolkits"] = [
+            provider.toolkit_id for provider in self.toolkit_providers
+        ]
+        return merged
 
     def _ensure_user_profile(self, user_id: str) -> dict[str, Any]:
         return self.session_store.ensure_user(user_id)
@@ -262,8 +351,8 @@ class SandboxedReactAgent:
         """Return a persisted user profile, creating it on first access."""
         return self._ensure_user_profile(user_id)
 
-    def _resolve_user_runtime_record(self, user_id: str) -> dict[str, Any]:
-        defaults = self._default_runtime_config_record()
+    def _resolve_user_runtime_config(self, user_id: str) -> dict[str, Any]:
+        defaults = self._default_runtime_config()
         normalized_user_id = str(user_id or "").strip()
         if not normalized_user_id:
             return defaults
@@ -271,76 +360,17 @@ class SandboxedReactAgent:
         stored = self.session_store.get_user_config(normalized_user_id)
         if not stored:
             return defaults
-        merged = dict(defaults)
-        merged.update(
-            {
-                key: stored[key]
-                for key in defaults.keys()
-                if key in stored and stored[key] is not None
-            }
-        )
-        return merged
+        return self._merge_runtime_config(defaults, stored)
 
     def _runtime_context_for_user(self, user_id: str) -> dict[str, Any]:
-        record = self._resolve_user_runtime_record(user_id)
-        sandbox = {
-            "mode": record["sandbox_mode"],
-            "api_url": record["sandbox_api_url"],
-            "template_name": record["sandbox_template_name"],
-            "namespace": record["sandbox_namespace"],
-            "server_port": int(record["sandbox_server_port"]),
-            "max_output_chars": int(record["sandbox_max_output_chars"]),
-            "local_timeout_seconds": int(record["sandbox_local_timeout_seconds"]),
-            "execution_model": record["sandbox_execution_model"],
-            "session_idle_ttl_seconds": int(record["sandbox_session_idle_ttl_seconds"]),
-            "sandbox_ready_timeout": int(
-                self.default_sandbox_config.get("sandbox_ready_timeout", 420)
-            ),
-            "gateway_ready_timeout": int(
-                self.default_sandbox_config.get("gateway_ready_timeout", 180)
-            ),
-            "max_lease_ttl_seconds": int(
-                self.default_sandbox_config.get("max_lease_ttl_seconds", 21600)
-            ),
-        }
-        return {
-            "model": record["model"],
-            "max_tool_calls_per_turn": int(record["max_tool_calls_per_turn"]),
-            "sandbox": sandbox,
-        }
+        return self._resolve_user_runtime_config(user_id)
 
     def _default_runtime_context(self) -> dict[str, Any]:
         """Return baseline runtime context before user-specific overrides."""
-        defaults = self._default_runtime_config_record()
-        return {
-            "model": defaults["model"],
-            "max_tool_calls_per_turn": int(defaults["max_tool_calls_per_turn"]),
-            "sandbox": {
-                "mode": defaults["sandbox_mode"],
-                "api_url": defaults["sandbox_api_url"],
-                "template_name": defaults["sandbox_template_name"],
-                "namespace": defaults["sandbox_namespace"],
-                "server_port": int(defaults["sandbox_server_port"]),
-                "max_output_chars": int(defaults["sandbox_max_output_chars"]),
-                "local_timeout_seconds": int(defaults["sandbox_local_timeout_seconds"]),
-                "execution_model": defaults["sandbox_execution_model"],
-                "session_idle_ttl_seconds": int(
-                    defaults["sandbox_session_idle_ttl_seconds"]
-                ),
-                "sandbox_ready_timeout": int(
-                    self.default_sandbox_config.get("sandbox_ready_timeout", 420)
-                ),
-                "gateway_ready_timeout": int(
-                    self.default_sandbox_config.get("gateway_ready_timeout", 180)
-                ),
-                "max_lease_ttl_seconds": int(
-                    self.default_sandbox_config.get("max_lease_ttl_seconds", 21600)
-                ),
-            },
-        }
+        return self._default_runtime_config()
 
     def get_runtime_config(self, user_id: str) -> dict[str, Any]:
-        """Return effective model and sandbox runtime configuration for one user."""
+        """Return effective agent and toolkit runtime configuration for one user."""
         return self._runtime_context_for_user(user_id)
 
     def _release_user_session_leases(self, user_id: str) -> None:
@@ -352,6 +382,8 @@ class SandboxedReactAgent:
     def update_runtime_config(
         self,
         user_id: str,
+        agent: dict[str, Any] | None = None,
+        toolkits: dict[str, Any] | None = None,
         model: str | None = None,
         max_tool_calls_per_turn: int | None = None,
         sandbox_mode: str | None = None,
@@ -364,64 +396,131 @@ class SandboxedReactAgent:
         sandbox_execution_model: str | None = None,
         sandbox_session_idle_ttl_seconds: int | None = None,
     ) -> dict[str, Any]:
-        current = self._resolve_user_runtime_record(user_id)
-        updated = dict(current)
+        current = self._resolve_user_runtime_config(user_id)
+        updated = copy.deepcopy(current)
 
-        if model is not None:
-            updated["model"] = model
-        if max_tool_calls_per_turn is not None:
-            if max_tool_calls_per_turn < 1:
+        agent_config = agent or {}
+        sandbox_config = ((toolkits or {}).get("sandbox") or {}) if toolkits else {}
+        sandbox_runtime = sandbox_config.get("runtime") or {}
+        sandbox_lifecycle = sandbox_config.get("lifecycle") or {}
+        updated_agent = updated["agent"]
+        updated_sandbox = updated["toolkits"]["sandbox"]
+        updated_sandbox_runtime = updated_sandbox["runtime"]
+        updated_sandbox_lifecycle = updated_sandbox["lifecycle"]
+
+        resolved_model = agent_config.get("model") if "model" in agent_config else model
+        resolved_max_tool_calls = (
+            agent_config.get("max_tool_calls_per_turn")
+            if "max_tool_calls_per_turn" in agent_config
+            else max_tool_calls_per_turn
+        )
+        resolved_sandbox_mode = (
+            sandbox_runtime.get("mode") if "mode" in sandbox_runtime else sandbox_mode
+        )
+        resolved_sandbox_api_url = (
+            sandbox_runtime.get("api_url")
+            if "api_url" in sandbox_runtime
+            else sandbox_api_url
+        )
+        resolved_sandbox_template_name = (
+            sandbox_runtime.get("template_name")
+            if "template_name" in sandbox_runtime
+            else sandbox_template_name
+        )
+        resolved_sandbox_namespace = (
+            sandbox_runtime.get("namespace")
+            if "namespace" in sandbox_runtime
+            else sandbox_namespace
+        )
+        resolved_sandbox_server_port = (
+            sandbox_runtime.get("server_port")
+            if "server_port" in sandbox_runtime
+            else sandbox_server_port
+        )
+        resolved_sandbox_max_output_chars = (
+            sandbox_runtime.get("max_output_chars")
+            if "max_output_chars" in sandbox_runtime
+            else sandbox_max_output_chars
+        )
+        resolved_sandbox_local_timeout_seconds = (
+            sandbox_runtime.get("local_timeout_seconds")
+            if "local_timeout_seconds" in sandbox_runtime
+            else sandbox_local_timeout_seconds
+        )
+        resolved_sandbox_execution_model = (
+            sandbox_lifecycle.get("execution_model")
+            if "execution_model" in sandbox_lifecycle
+            else sandbox_execution_model
+        )
+        resolved_sandbox_session_idle_ttl_seconds = (
+            sandbox_lifecycle.get("session_idle_ttl_seconds")
+            if "session_idle_ttl_seconds" in sandbox_lifecycle
+            else sandbox_session_idle_ttl_seconds
+        )
+
+        if resolved_model is not None:
+            updated_agent["model"] = resolved_model
+        if resolved_max_tool_calls is not None:
+            if resolved_max_tool_calls < 1:
                 raise ValueError("max_tool_calls_per_turn must be >= 1")
-            updated["max_tool_calls_per_turn"] = max_tool_calls_per_turn
+            updated_agent["max_tool_calls_per_turn"] = resolved_max_tool_calls
 
-        if sandbox_mode is not None:
-            normalized_mode = sandbox_mode.strip().lower()
+        if resolved_sandbox_mode is not None:
+            normalized_mode = str(resolved_sandbox_mode).strip().lower()
             if normalized_mode not in {"cluster", "local"}:
                 raise ValueError("sandbox_mode must be 'cluster' or 'local'")
-            updated["sandbox_mode"] = normalized_mode
-        if sandbox_api_url is not None:
-            updated["sandbox_api_url"] = sandbox_api_url
-        if sandbox_template_name is not None:
-            updated["sandbox_template_name"] = sandbox_template_name
-        if sandbox_namespace is not None:
-            updated["sandbox_namespace"] = sandbox_namespace
-        if sandbox_server_port is not None:
-            if sandbox_server_port <= 0:
+            updated_sandbox_runtime["mode"] = normalized_mode
+        if resolved_sandbox_api_url is not None:
+            updated_sandbox_runtime["api_url"] = resolved_sandbox_api_url
+        if resolved_sandbox_template_name is not None:
+            updated_sandbox_runtime["template_name"] = resolved_sandbox_template_name
+        if resolved_sandbox_namespace is not None:
+            updated_sandbox_runtime["namespace"] = resolved_sandbox_namespace
+        if resolved_sandbox_server_port is not None:
+            if resolved_sandbox_server_port <= 0:
                 raise ValueError("sandbox_server_port must be > 0")
-            updated["sandbox_server_port"] = sandbox_server_port
-        if sandbox_max_output_chars is not None:
-            if sandbox_max_output_chars < 100:
+            updated_sandbox_runtime["server_port"] = resolved_sandbox_server_port
+        if resolved_sandbox_max_output_chars is not None:
+            if resolved_sandbox_max_output_chars < 100:
                 raise ValueError("sandbox_max_output_chars must be >= 100")
-            updated["sandbox_max_output_chars"] = sandbox_max_output_chars
-        if sandbox_local_timeout_seconds is not None:
-            if sandbox_local_timeout_seconds <= 0:
+            updated_sandbox_runtime["max_output_chars"] = (
+                resolved_sandbox_max_output_chars
+            )
+        if resolved_sandbox_local_timeout_seconds is not None:
+            if resolved_sandbox_local_timeout_seconds <= 0:
                 raise ValueError("sandbox_local_timeout_seconds must be > 0")
-            updated["sandbox_local_timeout_seconds"] = sandbox_local_timeout_seconds
-        if sandbox_execution_model is not None:
-            normalized_model = sandbox_execution_model.strip().lower()
+            updated_sandbox_runtime["local_timeout_seconds"] = (
+                resolved_sandbox_local_timeout_seconds
+            )
+        if resolved_sandbox_execution_model is not None:
+            normalized_model = str(resolved_sandbox_execution_model).strip().lower()
             if normalized_model not in {"ephemeral", "session"}:
                 raise ValueError(
                     "sandbox_execution_model must be 'ephemeral' or 'session'"
                 )
-            updated["sandbox_execution_model"] = normalized_model
-        if sandbox_session_idle_ttl_seconds is not None:
-            if sandbox_session_idle_ttl_seconds <= 0:
+            updated_sandbox_lifecycle["execution_model"] = normalized_model
+        if resolved_sandbox_session_idle_ttl_seconds is not None:
+            if resolved_sandbox_session_idle_ttl_seconds <= 0:
                 raise ValueError("sandbox_session_idle_ttl_seconds must be > 0")
-            updated["sandbox_session_idle_ttl_seconds"] = (
-                sandbox_session_idle_ttl_seconds
+            updated_sandbox_lifecycle["session_idle_ttl_seconds"] = (
+                resolved_sandbox_session_idle_ttl_seconds
             )
 
         self.session_store.upsert_user_config(user_id, updated)
 
-        recycle_fields = {
-            "sandbox_mode",
-            "sandbox_api_url",
-            "sandbox_template_name",
-            "sandbox_namespace",
-            "sandbox_server_port",
-            "sandbox_execution_model",
-        }
-        should_recycle = any(updated[key] != current[key] for key in recycle_fields)
+        current_runtime = ((current.get("toolkits") or {}).get("sandbox") or {}).get(
+            "runtime"
+        ) or {}
+        current_lifecycle = ((current.get("toolkits") or {}).get("sandbox") or {}).get(
+            "lifecycle"
+        ) or {}
+        should_recycle = any(
+            current_runtime.get(key) != updated_sandbox_runtime.get(key)
+            for key in ["mode", "api_url", "template_name", "namespace", "server_port"]
+        ) or (
+            current_lifecycle.get("execution_model")
+            != updated_sandbox_lifecycle.get("execution_model")
+        )
         if should_recycle:
             self._release_user_session_leases(user_id)
 
@@ -467,8 +566,8 @@ class SandboxedReactAgent:
         arguments_json: str,
         runtime_config: dict[str, Any],
     ) -> tuple[str, list[dict[str, Any]]]:
-        """Execute a tool call through the session-scoped sandbox toolkit."""
-        toolkit = self._build_sandbox_toolkit(session_id, runtime_config)
+        """Execute a tool call through the session-scoped toolkit runtime."""
+        toolkit = self._build_tool_runtime(session_id, runtime_config)
         return asyncio.run(
             toolkit.run_tool_call(
                 tool_call_id=tool_call_id,

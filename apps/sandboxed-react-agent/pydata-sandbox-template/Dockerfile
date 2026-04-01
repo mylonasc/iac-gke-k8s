@@ -20,6 +20,7 @@ RUN set -eux; \
     "${PYTHON_BIN}" -m pip install --no-cache-dir \
       numpy \
       scipy \
+      plotly \
       pandas \
       matplotlib \
       seaborn \

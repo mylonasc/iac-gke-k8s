@@ -12,10 +12,18 @@ from fastapi.testclient import TestClient
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 os.environ.setdefault("SESSION_STORE_PATH", "/tmp/sandboxed-react-agent-test.db")
 os.environ.setdefault("ASSET_STORE_PATH", "/tmp/sandboxed-react-agent-assets")
+os.environ.setdefault(
+    "FRONTEND_LIB_CACHE_PATH", "/tmp/sandboxed-react-agent-frontend-libs"
+)
 os.environ.setdefault("ANON_IDENTITY_ENABLED", "1")
 os.environ.setdefault("ANON_IDENTITY_SECRET", "test-anon-secret")
 
 Path(os.environ["SESSION_STORE_PATH"]).unlink(missing_ok=True)
+Path(os.environ["FRONTEND_LIB_CACHE_PATH"]).mkdir(parents=True, exist_ok=True)
+(Path(os.environ["FRONTEND_LIB_CACHE_PATH"]) / "highcharts.js").write_text(
+    "window.Highcharts = window.Highcharts || {};",
+    encoding="utf-8",
+)
 
 from app.main import agent, app
 import app.main as main_module
@@ -87,21 +95,23 @@ def test_config_roundtrip() -> None:
     response = client.get("/api/config")
     assert response.status_code == 200
     payload = response.json()
-    assert "model" in payload
-    assert "sandbox" in payload
+    assert "agent" in payload
+    assert "toolkits" in payload
 
     update = client.post(
         "/api/config",
         json={
-            "model": "gpt-4o-mini",
-            "max_tool_calls_per_turn": 3,
-            "sandbox_mode": "local",
+            "agent": {
+                "model": "gpt-4o-mini",
+                "max_tool_calls_per_turn": 3,
+            },
+            "toolkits": {"sandbox": {"runtime": {"mode": "local"}}},
         },
     )
     assert update.status_code == 200
     update_payload = update.json()
-    assert update_payload["max_tool_calls_per_turn"] == 3
-    assert update_payload["sandbox"]["mode"] == "local"
+    assert update_payload["agent"]["max_tool_calls_per_turn"] == 3
+    assert update_payload["toolkits"]["sandbox"]["runtime"]["mode"] == "local"
 
 
 def test_me_endpoint_returns_user_tier() -> None:
@@ -148,12 +158,12 @@ def test_config_is_isolated_per_user(monkeypatch) -> None:
     assert get_b.status_code == 200
     payload_a = get_a.json()
     payload_b = get_b.json()
-    assert payload_a["model"] == "gpt-4.1-mini"
-    assert payload_a["max_tool_calls_per_turn"] == 2
-    assert payload_a["sandbox"]["mode"] == "local"
-    assert payload_b["model"] == "gpt-4o-mini"
-    assert payload_b["max_tool_calls_per_turn"] == 6
-    assert payload_b["sandbox"]["mode"] == "cluster"
+    assert payload_a["agent"]["model"] == "gpt-4.1-mini"
+    assert payload_a["agent"]["max_tool_calls_per_turn"] == 2
+    assert payload_a["toolkits"]["sandbox"]["runtime"]["mode"] == "local"
+    assert payload_b["agent"]["model"] == "gpt-4o-mini"
+    assert payload_b["agent"]["max_tool_calls_per_turn"] == 6
+    assert payload_b["toolkits"]["sandbox"]["runtime"]["mode"] == "cluster"
 
 
 def test_config_change_recycles_user_session_leases(monkeypatch) -> None:
@@ -181,14 +191,22 @@ def test_config_updates_sandbox_lifecycle_mode() -> None:
     response = client.post(
         "/api/config",
         json={
-            "sandbox_execution_model": "session",
-            "sandbox_session_idle_ttl_seconds": 900,
+            "toolkits": {
+                "sandbox": {
+                    "lifecycle": {
+                        "execution_model": "session",
+                        "session_idle_ttl_seconds": 900,
+                    }
+                }
+            },
         },
     )
     assert response.status_code == 200
     payload = response.json()
-    assert payload["sandbox"]["execution_model"] == "session"
-    assert payload["sandbox"]["session_idle_ttl_seconds"] == 900
+    assert payload["toolkits"]["sandbox"]["lifecycle"]["execution_model"] == "session"
+    assert (
+        payload["toolkits"]["sandbox"]["lifecycle"]["session_idle_ttl_seconds"] == 900
+    )
 
 
 def test_sandbox_lifecycle_endpoints_roundtrip(monkeypatch) -> None:
@@ -502,6 +520,10 @@ def test_html_asset_endpoint_sets_security_headers() -> None:
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
     assert "content-security-policy" in response.headers
+    assert (
+        "script-src 'self' 'unsafe-inline' https:"
+        in response.headers["content-security-policy"]
+    )
     assert response.headers.get("x-frame-options") == "SAMEORIGIN"
 
 
@@ -519,6 +541,13 @@ def test_python_tool_expose_html_widget_helper() -> None:
         and asset.get("mime_type") == "text/html"
         for asset in result.assets or []
     )
+
+
+def test_frontend_vendor_library_is_served_from_static_route() -> None:
+    response = client.get("/static/vendor/highcharts.js")
+
+    assert response.status_code == 200
+    assert "window.Highcharts" in response.text
 
 
 def test_shared_markdown_includes_tool_asset_links() -> None:

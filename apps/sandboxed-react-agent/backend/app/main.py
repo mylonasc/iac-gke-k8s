@@ -9,6 +9,7 @@ from assistant_stream import create_run
 from assistant_stream.serialization import DataStreamResponse
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .agent import SandboxedReactAgent
@@ -29,6 +30,8 @@ class ChatRequest(BaseModel):
 
 
 class ConfigUpdateRequest(BaseModel):
+    agent: dict[str, Any] | None = None
+    toolkits: dict[str, Any] | None = None
     model: str | None = None
     max_tool_calls_per_turn: int | None = Field(default=None, ge=1, le=20)
     sandbox_mode: str | None = None
@@ -92,6 +95,11 @@ configure_logging()
 logger = logging.getLogger(__name__)
 agent = SandboxedReactAgent()
 app = FastAPI(title="sandboxed-react-agent-backend", version="0.5.0")
+app.mount(
+    "/static/vendor",
+    StaticFiles(directory=str(agent.frontend_library_cache.cache_dir)),
+    name="vendor-static",
+)
 init_tracing(app)
 auth_config = AuthConfig.from_env()
 token_verifier = TokenVerifier(auth_config)
@@ -123,7 +131,7 @@ def _asset_security_headers(asset: dict[str, Any]) -> dict[str, str]:
     return {
         "Content-Security-Policy": (
             "default-src 'none'; "
-            "script-src 'unsafe-inline' https:; "
+            "script-src 'self' 'unsafe-inline' https:; "
             "style-src 'unsafe-inline' https:; "
             "img-src data: blob: https: http:; "
             "font-src data: https:; "
@@ -170,6 +178,11 @@ async def auth_middleware(request: Request, call_next):
             max_age=60 * 60 * 24 * 365,
         )
     return response
+
+
+@app.on_event("startup")
+async def cache_frontend_libraries() -> None:
+    agent.frontend_library_cache.ensure_libraries()
 
 
 @app.middleware("http")
@@ -293,6 +306,8 @@ def update_config(payload: ConfigUpdateRequest, request: Request) -> dict:
     try:
         result = agent.update_runtime_config(
             user_id=user_id,
+            agent=payload.agent,
+            toolkits=payload.toolkits,
             model=payload.model,
             max_tool_calls_per_turn=payload.max_tool_calls_per_turn,
             sandbox_mode=payload.sandbox_mode,

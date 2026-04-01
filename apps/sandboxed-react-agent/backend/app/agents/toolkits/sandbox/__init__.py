@@ -4,9 +4,10 @@ from typing import Any, Awaitable, Callable
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
-from ..tool_events import tool_end_event, tool_start_event
-from ..tool_payloads import ToolExecutionPayload
-from ..integrations.sandbox_sessions import SessionSandboxFacade
+from ..base import ToolkitProvider
+from ...tool_events import tool_end_event, tool_start_event
+from ...tool_payloads import ToolExecutionPayload
+from ...integrations.sandbox_sessions import SessionSandboxFacade
 
 
 class SandboxExecPythonInput(BaseModel):
@@ -190,3 +191,34 @@ class SandboxToolkit:
             exit_code=None,
             error=error,
         ).as_json()
+
+
+class SandboxToolkitProvider:
+    toolkit_id = "sandbox"
+
+    def __init__(self, session_sandbox: SessionSandboxFacade) -> None:
+        self.session_sandbox = session_sandbox
+
+    def build_runtime(
+        self,
+        *,
+        session_id: str,
+        runtime_config: dict[str, Any],
+        now_iso: Callable[[], str],
+        event_sink: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    ) -> SandboxToolkit:
+        sandbox_config = (
+            (runtime_config.get("toolkits") or {}).get("sandbox") or {}
+        ).get("runtime") or {}
+        sandbox_lifecycle = (
+            (runtime_config.get("toolkits") or {}).get("sandbox") or {}
+        ).get("lifecycle") or {}
+        merged_config = dict(sandbox_config)
+        merged_config.update(sandbox_lifecycle)
+        return SandboxToolkit(
+            session_sandbox=self.session_sandbox,
+            session_id=session_id,
+            runtime_config=merged_config,
+            now_iso=now_iso,
+            event_sink=event_sink,
+        )

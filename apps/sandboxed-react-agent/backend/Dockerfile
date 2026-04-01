@@ -16,6 +16,17 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends google-cloud-cli-gke-gcloud-auth-plugin \
     && rm -rf /var/lib/apt/lists/*
 
+RUN mkdir -p /app/vendor/frontend-libs \
+    && for url in \
+      "https://code.highcharts.com/highcharts.js" \
+      "https://cdn.jsdelivr.net/npm/highcharts@12/highcharts.js" \
+      "https://unpkg.com/highcharts@12/highcharts.js"; do \
+      if curl -fsSL -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36" "$url" -o /app/vendor/frontend-libs/highcharts.js; then \
+        break; \
+      fi; \
+    done \
+    && test -s /app/vendor/frontend-libs/highcharts.js
+
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 

@@ -6,6 +6,7 @@ from typing import Any, Awaitable, Callable
 from langgraph.graph import END
 
 from .state import AgentGraphState
+from .toolkits.base import ToolRuntime
 
 
 class AgentRuntime:
@@ -14,7 +15,7 @@ class AgentRuntime:
     def __init__(
         self,
         *,
-        build_sandbox_toolkit: Callable[[str, dict[str, Any]], Any],
+        build_tool_runtime: Callable[[str, dict[str, Any]], ToolRuntime],
         notify_tool_event: Callable[[dict[str, Any]], Awaitable[None]],
         should_stream_model: Callable[[], bool],
         get_create_completion: Callable[[], Callable[..., Awaitable[Any]]],
@@ -23,7 +24,7 @@ class AgentRuntime:
         ],
         tool_error_output: Callable[..., str],
     ) -> None:
-        self.build_sandbox_toolkit = build_sandbox_toolkit
+        self.build_tool_runtime = build_tool_runtime
         self.notify_tool_event = notify_tool_event
         self.should_stream_model = should_stream_model
         self.get_create_completion = get_create_completion
@@ -73,15 +74,13 @@ class AgentRuntime:
     async def graph_model_node(self, state: AgentGraphState) -> AgentGraphState:
         tool_calls: list[Any] = []
         final_text = ""
-        toolkit = self.build_sandbox_toolkit(
-            state["session_id"], state["runtime_config"]
-        )
+        toolkit = self.build_tool_runtime(state["session_id"], state["runtime_config"])
         tools = toolkit.get_openai_tools()
 
         if self.should_stream_model():
             streamed = await self._call_completion_streaming_async(
                 messages=state["messages"],
-                model=str(state["runtime_config"]["model"]),
+                model=str(state["runtime_config"]["agent"]["model"]),
                 tools=tools,
             )
             final_text = str(streamed.get("content") or "")
@@ -89,7 +88,7 @@ class AgentRuntime:
         else:
             completion = await self._call_completion_async(
                 messages=state["messages"],
-                model=str(state["runtime_config"]["model"]),
+                model=str(state["runtime_config"]["agent"]["model"]),
                 tools=tools,
             )
             assistant_message = completion.choices[0].message
@@ -150,9 +149,7 @@ class AgentRuntime:
         limit_reached = False
         error_text = state.get("error", "")
         final_reply = state.get("final_reply", "")
-        toolkit = self.build_sandbox_toolkit(
-            state["session_id"], state["runtime_config"]
-        )
+        toolkit = self.build_tool_runtime(state["session_id"], state["runtime_config"])
 
         for idx, tc in enumerate(pending_tool_calls):
             tool_name = tc.get("function", {}).get("name", "")
@@ -313,7 +310,9 @@ class AgentRuntime:
             "session_id": session_id,
             "messages": list(messages),
             "runtime_config": runtime_config,
-            "max_tool_calls_per_turn": int(runtime_config["max_tool_calls_per_turn"]),
+            "max_tool_calls_per_turn": int(
+                runtime_config["agent"]["max_tool_calls_per_turn"]
+            ),
             "pending_tool_calls": [],
             "turn_tool_calls": [],
             "tool_events": [],
@@ -326,7 +325,8 @@ class AgentRuntime:
             initial_state,
             config={
                 "recursion_limit": max(
-                    20, int(runtime_config["max_tool_calls_per_turn"]) * 4 + 8
+                    20,
+                    int(runtime_config["agent"]["max_tool_calls_per_turn"]) * 4 + 8,
                 ),
                 "configurable": {"session_id": session_id},
             },

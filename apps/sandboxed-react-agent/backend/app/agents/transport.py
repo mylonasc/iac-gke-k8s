@@ -194,16 +194,16 @@ class AssistantTransportRuntime:
                         tool_part_index_by_call[tool_call_id] = part_index
                         self.append_tool_update(
                             controller,
-                            stage="sandbox",
+                            stage="tool",
                             status="running",
-                            detail=f"Waiting for claim/runtime for {tool_name}",
+                            detail=f"Running {tool_name}",
                             tool=tool_name,
                         )
                         await self.stream_text_to_ui(
                             controller,
                             assistant_index=assistant_index,
                             part_index=0,
-                            text=f"Waiting for sandbox claim/runtime: {tool_name}\n",
+                            text=f"Running tool: {tool_name}\n",
                             delay_seconds=0.01,
                         )
                         return
@@ -239,16 +239,16 @@ class AssistantTransportRuntime:
                     if claim_name:
                         self.append_tool_update(
                             controller,
-                            stage="sandbox",
+                            stage="tool",
                             status="completed",
-                            detail=f"Claim ready: {claim_name}",
+                            detail=f"Resource ready: {claim_name}",
                             tool=tool_name,
                         )
                         await self.stream_text_to_ui(
                             controller,
                             assistant_index=assistant_index,
                             part_index=0,
-                            text=f"Claim ready: {claim_name}\n",
+                            text=f"Resource ready: {claim_name}\n",
                             delay_seconds=0.01,
                         )
 
