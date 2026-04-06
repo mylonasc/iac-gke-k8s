@@ -5,6 +5,7 @@ import json
 import secrets
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -89,6 +90,13 @@ class Settings(BaseModel):
     app_base_path: str = Field(
         default_factory=lambda: os.getenv("APP_BASE_PATH", "").strip()
     )
+
+
+@dataclass(frozen=True)
+class JwtVerifier:
+    jwks_url: str
+    issuers: frozenset[str]
+    audience: str
 
 
 class ScaleRequest(BaseModel):
@@ -191,20 +199,20 @@ templates = Jinja2Templates(
 
 class JwksCache:
     def __init__(self) -> None:
-        self._keys: dict[str, dict[str, Any]] = {}
-        self._last_fetch = 0.0
+        self._keys_by_url: dict[str, dict[str, dict[str, Any]]] = {}
+        self._last_fetch_by_url: dict[str, float] = {}
         self._ttl_seconds = 900
 
-    async def get_keys(self, force_refresh: bool = False) -> dict[str, dict[str, Any]]:
+    async def get_keys(
+        self, jwks_url: str, force_refresh: bool = False
+    ) -> dict[str, dict[str, Any]]:
         now = time.time()
-        if (
-            not force_refresh
-            and self._keys
-            and (now - self._last_fetch) < self._ttl_seconds
-        ):
-            return self._keys
+        cached_keys = self._keys_by_url.get(jwks_url, {})
+        last_fetch = self._last_fetch_by_url.get(jwks_url, 0.0)
+        if not force_refresh and cached_keys and (now - last_fetch) < self._ttl_seconds:
+            return cached_keys
         async with httpx.AsyncClient(timeout=5.0) as http_client:
-            response = await http_client.get(settings.jwt_jwks_url)
+            response = await http_client.get(jwks_url)
             response.raise_for_status()
             payload = response.json()
         keys: dict[str, dict[str, Any]] = {}
@@ -214,9 +222,9 @@ class JwksCache:
                 keys[kid] = item
         if not keys:
             raise HTTPException(status_code=503, detail="No JWKS keys available")
-        self._keys = keys
-        self._last_fetch = now
-        return self._keys
+        self._keys_by_url[jwks_url] = keys
+        self._last_fetch_by_url[jwks_url] = now
+        return keys
 
 
 jwks_cache = JwksCache()
@@ -284,15 +292,32 @@ def _claim_groups(claims: dict[str, Any]) -> set[str]:
     return set()
 
 
-def _check_audience(claims: dict[str, Any]) -> bool:
-    if not settings.jwt_audience:
+def _check_audience(claims: dict[str, Any], audience: str) -> bool:
+    if not audience:
         return True
     aud = claims.get("aud")
     if isinstance(aud, str):
-        return aud == settings.jwt_audience
+        return aud == audience
     if isinstance(aud, list):
-        return settings.jwt_audience in [str(x) for x in aud]
+        return audience in [str(x) for x in aud]
     return False
+
+
+def _select_verifier(unverified_claims: dict[str, Any]) -> JwtVerifier:
+    issuer = str(unverified_claims.get("iss", "")).strip()
+    google_issuers = frozenset({"https://accounts.google.com", "accounts.google.com"})
+    if issuer in google_issuers:
+        return JwtVerifier(
+            jwks_url="https://www.googleapis.com/oauth2/v3/certs",
+            issuers=google_issuers,
+            audience=settings.oauth_client_id,
+        )
+
+    return JwtVerifier(
+        jwks_url=settings.jwt_jwks_url,
+        issuers=frozenset(settings.jwt_issuers),
+        audience=settings.jwt_audience,
+    )
 
 
 def _check_authorization(claims: dict[str, Any]) -> None:
@@ -337,13 +362,21 @@ async def _verify_token(token: str, access_token: str | None = None) -> dict[str
         raise HTTPException(
             status_code=401, detail=f"Invalid JWT header: {exc}"
         ) from exc
+    try:
+        unverified_claims = jwt.get_unverified_claims(token)
+    except JWTError as exc:
+        raise HTTPException(
+            status_code=401, detail=f"Invalid JWT claims: {exc}"
+        ) from exc
+
+    verifier = _select_verifier(unverified_claims)
     kid = header.get("kid")
     if not kid:
         raise HTTPException(status_code=401, detail="JWT header missing kid")
-    keys = await jwks_cache.get_keys()
+    keys = await jwks_cache.get_keys(verifier.jwks_url)
     key_data = keys.get(kid)
     if not key_data:
-        keys = await jwks_cache.get_keys(force_refresh=True)
+        keys = await jwks_cache.get_keys(verifier.jwks_url, force_refresh=True)
         key_data = keys.get(kid)
     if not key_data:
         raise HTTPException(status_code=401, detail="JWT key id not found in JWKS")
@@ -373,9 +406,9 @@ async def _verify_token(token: str, access_token: str | None = None) -> dict[str
         ) from exc
 
     issuer = str(claims.get("iss", "")).strip()
-    if settings.jwt_issuers and issuer not in settings.jwt_issuers:
+    if verifier.issuers and issuer not in verifier.issuers:
         raise HTTPException(status_code=401, detail="JWT issuer is not allowed")
-    if not _check_audience(claims):
+    if not _check_audience(claims, verifier.audience):
         raise HTTPException(status_code=401, detail="JWT audience is not allowed")
 
     _check_authorization(claims)

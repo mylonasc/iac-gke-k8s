@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from app.agents.factory import AgentFactory
 from app.agents.integrations.sandbox_sessions import SessionSandboxFacade
+from app.agents.runtime import AgentRuntime
 from app.agents.toolkits.highcharts import HighchartsToolkit, HighchartsToolkitProvider
 from app.agents.toolkits.runtime import CompositeToolRuntime
 from app.agents.toolkits.sandbox import SandboxToolkit
@@ -89,6 +90,20 @@ class _FakeAssetFacade:
                 "download_url": "/api/assets/asset-1/download",
             }
         ]
+
+
+class _FakeToolRuntime:
+    def get_openai_tools(self) -> list[dict[str, object]]:
+        return []
+
+    async def run_tool_call(
+        self,
+        *,
+        tool_call_id: str | None,
+        name: str,
+        arguments_json: str,
+    ) -> tuple[str, list[dict[str, str]]]:
+        raise AssertionError("No tool calls expected")
 
 
 def test_session_sandbox_facade_runs_python_and_persists_assets() -> None:
@@ -206,6 +221,59 @@ def test_composite_tool_runtime_rejects_duplicate_tool_names() -> None:
         return
 
     raise AssertionError("Expected duplicate tool registration to fail")
+
+
+def test_agent_runtime_uses_streaming_model_path_when_enabled() -> None:
+    events: list[dict[str, object]] = []
+
+    async def _notify_tool_event(event: dict[str, object]) -> None:
+        events.append(event)
+
+    async def _create_completion_streaming(
+        messages: list[dict[str, object]], model: str, tools: list[dict[str, object]]
+    ) -> dict[str, object]:
+        assert model == "gpt-4o-mini"
+        assert tools == []
+        return {"content": "streamed reply", "tool_calls": []}
+
+    async def _create_completion(*_args, **_kwargs):
+        raise AssertionError("Expected streaming completion path")
+
+    runtime = AgentRuntime(
+        build_tool_runtime=lambda _session_id, _runtime_config: _FakeToolRuntime(),
+        notify_tool_event=_notify_tool_event,
+        should_stream_model=lambda: True,
+        get_create_completion=lambda: _create_completion,
+        get_create_completion_streaming=lambda: _create_completion_streaming,
+        tool_error_output=lambda **_kwargs: "{}",
+    )
+
+    result = __import__("asyncio").run(
+        runtime.graph_model_node(
+            {
+                "session_id": "session-1",
+                "messages": [{"role": "user", "content": "hello"}],
+                "runtime_config": {
+                    "agent": {
+                        "model": "gpt-4o-mini",
+                        "max_tool_calls_per_turn": 4,
+                    }
+                },
+                "max_tool_calls_per_turn": 4,
+                "pending_tool_calls": [],
+                "turn_tool_calls": [],
+                "tool_events": [],
+                "tool_call_count": 0,
+                "final_reply": "",
+                "error": "",
+                "limit_reached": False,
+            }
+        )
+    )
+
+    assert result["final_reply"] == "streamed reply"
+    assert result["messages"][-1] == {"role": "assistant", "content": "streamed reply"}
+    assert events == []
 
 
 def test_session_store_roundtrips_nested_runtime_config(tmp_path) -> None:
@@ -371,6 +439,45 @@ def test_highcharts_toolkit_creates_html_and_component_assets(tmp_path) -> None:
     )
 
 
+def test_highcharts_toolkit_uses_prefixed_library_url_in_html(tmp_path) -> None:
+    os.environ["ASSET_STORE_PATH"] = str(tmp_path / "assets")
+    store = SessionStore(db_path=str(tmp_path / "charts-prefixed.db"))
+    asset_manager = AssetManager(store)
+    toolkit = HighchartsToolkit(
+        asset_manager=asset_manager,
+        session_id="session-chart",
+        runtime_config={
+            "runtime": {
+                "library_url": "/sandboxed-react-agent/static/vendor/highcharts.js"
+            }
+        },
+        now_iso=lambda: "2026-01-01T00:00:00+00:00",
+    )
+
+    _, stored_assets = __import__("asyncio").run(
+        toolkit.run_tool_call(
+            tool_call_id="tool-chart",
+            name="highcharts_create_bar_chart",
+            arguments_json=json.dumps(
+                {
+                    "title": "Revenue by region",
+                    "categories": ["EMEA", "AMER"],
+                    "series": [{"name": "Revenue", "data": [10, 12]}],
+                }
+            ),
+        )
+    )
+
+    html_asset = next(
+        asset for asset in stored_assets if asset["filename"].endswith(".html")
+    )
+    html_record = store.get_asset(html_asset["asset_id"])
+    assert html_record is not None
+
+    html_content = __import__("pathlib").Path(html_record["storage_path"]).read_text()
+    assert "/sandboxed-react-agent/static/vendor/highcharts.js" in html_content
+
+
 def test_highcharts_toolkit_exposes_expected_chart_tools(tmp_path) -> None:
     os.environ["ASSET_STORE_PATH"] = str(tmp_path / "assets")
     store = SessionStore(db_path=str(tmp_path / "schemas.db"))
@@ -392,6 +499,7 @@ def test_highcharts_toolkit_exposes_expected_chart_tools(tmp_path) -> None:
 
 def test_agent_factory_respects_enabled_toolkits(tmp_path) -> None:
     os.environ["ASSET_STORE_PATH"] = str(tmp_path / "assets")
+    os.environ["FRONTEND_LIB_CACHE_PATH"] = str(tmp_path / "frontend-libs")
     store = SessionStore(db_path=str(tmp_path / "factory.db"))
     factory = AgentFactory(
         model_node=lambda state: state,
@@ -401,7 +509,9 @@ def test_agent_factory_respects_enabled_toolkits(tmp_path) -> None:
     )
 
     runtime = factory.build_tool_runtime(
-        toolkit_providers=[HighchartsToolkitProvider(AssetManager(store))],
+        toolkit_providers=[
+            HighchartsToolkitProvider(AssetManager(store), FrontendLibraryCache())
+        ],
         session_id="session-factory",
         runtime_config={
             "agent": {"enabled_toolkits": []},
@@ -501,3 +611,57 @@ def test_frontend_library_cache_falls_back_to_secondary_source(
     assert cached.exists()
     assert seen_urls[0] == "https://code.highcharts.com/highcharts.js"
     assert seen_urls[1] == "https://cdn.jsdelivr.net/npm/highcharts@12/highcharts.js"
+
+
+def test_frontend_library_cache_prefixes_library_url_with_public_base_path(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("APP_PUBLIC_BASE_PATH", "/sandboxed-react-agent/")
+    cache = FrontendLibraryCache(cache_dir=str(tmp_path / "vendor"))
+
+    assert (
+        cache.get_library_url("highcharts")
+        == "/sandboxed-react-agent/static/vendor/highcharts.js"
+    )
+
+
+def test_highcharts_provider_upgrades_legacy_default_library_url(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("APP_PUBLIC_BASE_PATH", "/sandboxed-react-agent")
+    store = SessionStore(db_path=str(tmp_path / "provider.db"))
+    provider = HighchartsToolkitProvider(
+        asset_manager=AssetManager(store),
+        frontend_library_cache=FrontendLibraryCache(cache_dir=str(tmp_path / "vendor")),
+    )
+
+    merged = provider.merge_config(
+        provider.default_config(),
+        {"enabled": True, "runtime": {"library_url": "/static/vendor/highcharts.js"}},
+    )
+
+    assert (
+        merged["runtime"]["library_url"]
+        == "/sandboxed-react-agent/static/vendor/highcharts.js"
+    )
+
+
+def test_highcharts_provider_preserves_custom_library_url(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("APP_PUBLIC_BASE_PATH", "/sandboxed-react-agent")
+    store = SessionStore(db_path=str(tmp_path / "provider-custom.db"))
+    provider = HighchartsToolkitProvider(
+        asset_manager=AssetManager(store),
+        frontend_library_cache=FrontendLibraryCache(cache_dir=str(tmp_path / "vendor")),
+    )
+
+    merged = provider.merge_config(
+        provider.default_config(),
+        {
+            "enabled": True,
+            "runtime": {"library_url": "https://cdn.example.test/highcharts.js"},
+        },
+    )
+
+    assert merged["runtime"]["library_url"] == "https://cdn.example.test/highcharts.js"

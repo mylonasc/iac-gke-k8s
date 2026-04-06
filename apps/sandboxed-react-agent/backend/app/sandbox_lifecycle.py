@@ -18,8 +18,8 @@ from typing import Any
 
 from k8s_agent_sandbox import SandboxClient
 
+from .repositories.sandbox_lease_repository import SandboxLeaseRepository
 from .sandbox_manager import SandboxExecutionResult, SandboxManager
-from .session_store import SessionStore
 
 
 logger = logging.getLogger(__name__)
@@ -112,10 +112,12 @@ class SandboxLifecycleService:
     """Coordinates lease acquisition/reuse/release for sandbox execution."""
 
     def __init__(
-        self, sandbox_manager: SandboxManager, session_store: SessionStore
+        self,
+        sandbox_manager: SandboxManager,
+        sandbox_lease_repository: SandboxLeaseRepository,
     ) -> None:
         self.sandbox_manager = sandbox_manager
-        self.session_store = session_store
+        self.sandbox_lease_repository = sandbox_lease_repository
 
         self.execution_model = (
             os.getenv("SANDBOX_EXECUTION_MODEL", "session").strip().lower()
@@ -175,7 +177,7 @@ class SandboxLifecycleService:
 
     def _load_active_scope_index(self) -> None:
         """Build in-memory scope index from persisted active leases."""
-        for record in self.session_store.list_active_sandbox_leases():
+        for record in self.sandbox_lease_repository.list_active():
             lease = SandboxLease.from_record(record)
             self._lease_id_by_scope[(lease.scope_type, lease.scope_key)] = (
                 lease.lease_id
@@ -232,7 +234,7 @@ class SandboxLifecycleService:
         created_cap = created + timedelta(seconds=self.max_lease_ttl_seconds)
         lease.last_used_at = _to_iso(now)
         lease.expires_at = _to_iso(min(idle_expiry, hard_expiry, created_cap))
-        self.session_store.upsert_sandbox_lease(lease.as_record())
+        self.sandbox_lease_repository.upsert(lease.as_record())
         return lease
 
     def _build_fresh_lease(
@@ -323,11 +325,13 @@ class SandboxLifecycleService:
         """Resolve persisted lease metadata for a scope if one exists."""
         cached_id = self._lease_id_by_scope.get((scope_type, scope_key))
         if cached_id:
-            record = self.session_store.get_sandbox_lease(cached_id)
+            record = self.sandbox_lease_repository.get(cached_id)
             if record and record.get("status") in {"pending", "ready"}:
                 return SandboxLease.from_record(record)
 
-        record = self.session_store.get_active_sandbox_lease(scope_type, scope_key)
+        record = self.sandbox_lease_repository.get_active_for_scope(
+            scope_type, scope_key
+        )
         if not record:
             return None
         lease = SandboxLease.from_record(record)
@@ -358,7 +362,7 @@ class SandboxLifecycleService:
             )
             error_text = error_text or str(exc)
 
-        self.session_store.mark_sandbox_lease_released(
+        self.sandbox_lease_repository.mark_released(
             lease.lease_id,
             released_at=released_at,
             status=status,
@@ -436,7 +440,7 @@ class SandboxLifecycleService:
                     self._release_runtime_handle(runtime, status="expired")
                 else:
                     self._delete_claim_best_effort(existing_lease)
-                    self.session_store.mark_sandbox_lease_released(
+                    self.sandbox_lease_repository.mark_released(
                         existing_lease.lease_id,
                         released_at=_to_iso(_now_utc()),
                         status="expired",
@@ -453,7 +457,7 @@ class SandboxLifecycleService:
                     self._release_runtime_handle(runtime, status="released")
                 else:
                     self._delete_claim_best_effort(existing_lease)
-                    self.session_store.mark_sandbox_lease_released(
+                    self.sandbox_lease_repository.mark_released(
                         existing_lease.lease_id,
                         released_at=_to_iso(_now_utc()),
                         status="released",
@@ -487,7 +491,7 @@ class SandboxLifecycleService:
                 namespace=namespace,
                 session_idle_ttl_seconds=session_idle_ttl_seconds,
             )
-            self.session_store.upsert_sandbox_lease(lease.as_record())
+            self.sandbox_lease_repository.upsert(lease.as_record())
             return self._create_runtime(
                 lease,
                 api_url=api_url,
@@ -509,7 +513,7 @@ class SandboxLifecycleService:
                 self._release_runtime_handle(runtime, status="released")
             else:
                 self._delete_claim_best_effort(lease)
-                self.session_store.mark_sandbox_lease_released(
+                self.sandbox_lease_repository.mark_released(
                     lease.lease_id,
                     released_at=_to_iso(_now_utc()),
                     status="released",
@@ -532,7 +536,7 @@ class SandboxLifecycleService:
                     self._release_runtime_handle(runtime, status="expired")
                 else:
                     self._delete_claim_best_effort(lease)
-                    self.session_store.mark_sandbox_lease_released(
+                    self.sandbox_lease_repository.mark_released(
                         lease.lease_id,
                         released_at=_to_iso(_now_utc()),
                         status="expired",
@@ -545,7 +549,7 @@ class SandboxLifecycleService:
     def reap_expired_leases(self) -> int:
         """Release all currently expired leases and return the release count."""
         now_iso = _to_iso(_now_utc())
-        expired = self.session_store.list_expired_sandbox_leases(now_iso)
+        expired = self.sandbox_lease_repository.list_expired(now_iso)
         released_count = 0
         with self._state_lock:
             for record in expired:
@@ -555,7 +559,7 @@ class SandboxLifecycleService:
                     self._release_runtime_handle(runtime, status="expired")
                 else:
                     self._delete_claim_best_effort(lease)
-                    self.session_store.mark_sandbox_lease_released(
+                    self.sandbox_lease_repository.mark_released(
                         lease.lease_id,
                         released_at=now_iso,
                         status="expired",
@@ -634,16 +638,16 @@ class SandboxLifecycleService:
 
     def list_sandboxes(self) -> list[dict[str, Any]]:
         """Return all active leases for API inspection endpoints."""
-        return self.session_store.list_active_sandbox_leases()
+        return self.sandbox_lease_repository.list_active()
 
     def get_sandbox(self, lease_id: str) -> dict[str, Any] | None:
         """Return a single lease record by id."""
-        return self.session_store.get_sandbox_lease(lease_id)
+        return self.sandbox_lease_repository.get(lease_id)
 
     def release_sandbox(self, lease_id: str) -> bool:
         """Release a lease by id for manual lifecycle operations."""
         with self._state_lock:
-            record = self.session_store.get_sandbox_lease(lease_id)
+            record = self.sandbox_lease_repository.get(lease_id)
             if not record or record.get("status") not in {"pending", "ready"}:
                 return False
             lease = SandboxLease.from_record(record)
@@ -652,7 +656,7 @@ class SandboxLifecycleService:
                 self._release_runtime_handle(runtime, status="released")
             else:
                 self._delete_claim_best_effort(lease)
-                self.session_store.mark_sandbox_lease_released(
+                self.sandbox_lease_repository.mark_released(
                     lease.lease_id,
                     released_at=_to_iso(_now_utc()),
                     status="released",

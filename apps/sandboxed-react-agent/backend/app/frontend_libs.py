@@ -42,6 +42,12 @@ class FrontendLibraryCache:
             )
         ]
 
+    def _public_base_path(self) -> str:
+        raw = str(os.getenv("APP_PUBLIC_BASE_PATH", "") or "").strip()
+        if not raw or raw == "/":
+            return ""
+        return "/" + raw.strip("/")
+
     @property
     def libraries(self) -> list[FrontendLibrary]:
         return list(self._libraries)
@@ -51,9 +57,10 @@ class FrontendLibraryCache:
             self._ensure_library(library)
 
     def get_library_url(self, name: str) -> str:
+        base_path = self._public_base_path()
         for library in self._libraries:
             if library.name == name:
-                return f"/static/vendor/{library.filename}"
+                return f"{base_path}/static/vendor/{library.filename}"
         raise KeyError(f"Unknown frontend library: {name}")
 
     def _ensure_library(self, library: FrontendLibrary) -> None:

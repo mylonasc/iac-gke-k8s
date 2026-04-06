@@ -1,4 +1,5 @@
 import base64
+import copy
 import json
 import re
 from dataclasses import dataclass
@@ -8,6 +9,7 @@ from typing import Any, Awaitable, Callable
 from pydantic import BaseModel, Field
 
 from ....asset_manager import AssetManager
+from ....frontend_libs import FrontendLibraryCache
 from ...tool_events import tool_end_event, tool_start_event
 from ...tool_payloads import ToolExecutionAsset, ToolExecutionPayload
 
@@ -34,6 +36,18 @@ def _to_timestamp_ms(value: str) -> int:
 
 def _js(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=True, indent=2)
+
+
+def _deep_merge(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
+    merged = copy.deepcopy(base)
+    for key, value in updates.items():
+        if value is None:
+            continue
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(dict(merged.get(key) or {}), value)
+        else:
+            merged[key] = value
+    return merged
 
 
 class TimeSeriesPoint(BaseModel):
@@ -475,8 +489,55 @@ export function {component_name}({{ options }}: {component_name}Props) {{
 class HighchartsToolkitProvider:
     toolkit_id = "highcharts"
 
-    def __init__(self, asset_manager: AssetManager) -> None:
+    def __init__(
+        self,
+        asset_manager: AssetManager,
+        frontend_library_cache: FrontendLibraryCache,
+    ) -> None:
         self.asset_manager = asset_manager
+        self.frontend_library_cache = frontend_library_cache
+
+    def default_config(self) -> dict[str, Any]:
+        return {
+            "enabled": True,
+            "runtime": {
+                "library_url": self.frontend_library_cache.get_library_url("highcharts")
+            },
+        }
+
+    def merge_config(
+        self, defaults: dict[str, Any], stored: dict[str, Any]
+    ) -> dict[str, Any]:
+        merged = _deep_merge(defaults, stored)
+        default_library_url = str(
+            ((defaults.get("runtime") or {}).get("library_url")) or ""
+        )
+        stored_library_url = str(
+            ((stored.get("runtime") or {}).get("library_url")) or ""
+        )
+        if (
+            stored_library_url == "/static/vendor/highcharts.js"
+            and default_library_url
+            and default_library_url != stored_library_url
+        ):
+            merged.setdefault("runtime", {})["library_url"] = default_library_url
+        return merged
+
+    def apply_updates(
+        self,
+        current: dict[str, Any],
+        *,
+        toolkit_updates: dict[str, Any] | None = None,
+        legacy_updates: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        del legacy_updates
+        return self.merge_config(current, toolkit_updates or {})
+
+    def requires_session_recycle(
+        self, previous: dict[str, Any], updated: dict[str, Any]
+    ) -> bool:
+        del previous, updated
+        return False
 
     def build_runtime(
         self,

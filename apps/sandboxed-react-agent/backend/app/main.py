@@ -9,19 +9,14 @@ from assistant_stream import create_run
 from assistant_stream.serialization import DataStreamResponse
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .agent import SandboxedReactAgent
+from .app_factory import create_app_runtime
 from .auth import (
-    AnonymousIdentityConfig,
-    AuthConfig,
-    TokenVerifier,
     authenticate_request,
     ensure_anonymous_user_id,
 )
 from .logging_config import bind_context, configure_logging
-from .tracing import init_tracing
 
 
 class ChatRequest(BaseModel):
@@ -93,17 +88,12 @@ class SandboxReleaseResponse(BaseModel):
 
 configure_logging()
 logger = logging.getLogger(__name__)
-agent = SandboxedReactAgent()
-app = FastAPI(title="sandboxed-react-agent-backend", version="0.5.0")
-app.mount(
-    "/static/vendor",
-    StaticFiles(directory=str(agent.frontend_library_cache.cache_dir)),
-    name="vendor-static",
-)
-init_tracing(app)
-auth_config = AuthConfig.from_env()
-token_verifier = TokenVerifier(auth_config)
-anon_identity_config = AnonymousIdentityConfig.from_env()
+runtime = create_app_runtime()
+app = runtime.app
+agent = runtime.agent
+auth_config = runtime.auth_config
+token_verifier = runtime.token_verifier
+anon_identity_config = runtime.anon_identity_config
 
 
 def _request_user_id(request: Request) -> str:
@@ -178,11 +168,6 @@ async def auth_middleware(request: Request, call_next):
             max_age=60 * 60 * 24 * 365,
         )
     return response
-
-
-@app.on_event("startup")
-async def cache_frontend_libraries() -> None:
-    agent.frontend_library_cache.ensure_libraries()
 
 
 @app.middleware("http")

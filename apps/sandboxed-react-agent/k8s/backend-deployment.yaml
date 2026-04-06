@@ -38,7 +38,7 @@ spec:
         - name: dockerhub-regcred
       containers:
         - name: backend
-          image: docker.io/mylonasc/magarathea:sandboxed-react-agent-backend-0.5.0
+          image: docker.io/mylonasc/magarathea:sandboxed-react-agent-backend-0.5.5
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
@@ -56,6 +56,8 @@ spec:
               value: /app/data/sessions.db
             - name: ASSET_STORE_PATH
               value: /app/data/assets
+            - name: APP_PUBLIC_BASE_PATH
+              value: /sandboxed-react-agent
             - name: SANDBOX_API_URL
               value: http://sandbox-router-svc.alt-default.svc.cluster.local:8080
             - name: SANDBOX_TEMPLATE_NAME

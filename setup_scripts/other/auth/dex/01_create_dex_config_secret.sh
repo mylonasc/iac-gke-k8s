@@ -27,13 +27,7 @@ done
 DEX_OAUTH2_PROXY_CLIENT_ID="${DEX_OAUTH2_PROXY_CLIENT_ID:-oauth2-proxy}"
 DEX_MICROSOFT_TENANT="${DEX_MICROSOFT_TENANT:-common}"
 DEX_ISSUER_URL="${DEX_ISSUER_URL%/}"
-DEX_STATIC_PASSWORDS_FILE="${DEX_STATIC_PASSWORDS_FILE:-}"
 DEX_OAUTH2_PROXY_EXTRA_REDIRECT_URIS="${DEX_OAUTH2_PROXY_EXTRA_REDIRECT_URIS:-}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-if [[ -z "${DEX_STATIC_PASSWORDS_FILE}" && -f "${SCRIPT_DIR}/static-passwords.yaml" ]]; then
-  DEX_STATIC_PASSWORDS_FILE="${SCRIPT_DIR}/static-passwords.yaml"
-fi
 
 declare -a OAUTH2_PROXY_REDIRECT_URIS
 OAUTH2_PROXY_REDIRECT_URIS=("${DEX_OAUTH2_PROXY_REDIRECT_URI}")
@@ -46,17 +40,6 @@ if [[ -n "${DEX_OAUTH2_PROXY_EXTRA_REDIRECT_URIS}" ]]; then
       OAUTH2_PROXY_REDIRECT_URIS+=("${trimmed}")
     fi
   done
-fi
-
-if [[ -n "${DEX_STATIC_PASSWORDS_FILE}" ]]; then
-  if [[ ! -f "${DEX_STATIC_PASSWORDS_FILE}" ]]; then
-    echo "ERROR: DEX_STATIC_PASSWORDS_FILE does not exist: ${DEX_STATIC_PASSWORDS_FILE}" >&2
-    exit 1
-  fi
-  if [[ ! -s "${DEX_STATIC_PASSWORDS_FILE}" ]]; then
-    echo "ERROR: DEX_STATIC_PASSWORDS_FILE is empty: ${DEX_STATIC_PASSWORDS_FILE}" >&2
-    exit 1
-  fi
 fi
 
 command -v kubectl >/dev/null 2>&1 || {
@@ -118,20 +101,6 @@ connectors:
       # Connector callback must be Dex callback endpoint (not oauth2-proxy callback).
       redirectURI: ${DEX_ISSUER_URL}/callback
 EOF
-
-if [[ -n "${DEX_STATIC_PASSWORDS_FILE}" ]]; then
-  {
-    printf '\nenablePasswordDB: true\n'
-    printf 'staticPasswords:\n'
-    while IFS= read -r line || [[ -n "${line}" ]]; do
-      if [[ -n "${line}" ]]; then
-        printf '  %s\n' "${line}"
-      else
-        printf '\n'
-      fi
-    done <"${DEX_STATIC_PASSWORDS_FILE}"
-  } >>"${tmp_file}"
-fi
 
 kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1 || kubectl create namespace "${NAMESPACE}"
 

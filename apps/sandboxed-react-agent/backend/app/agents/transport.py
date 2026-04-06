@@ -1,8 +1,9 @@
-import copy
 import uuid
 from typing import Any, Awaitable, Callable
 
 from assistant_stream import RunController
+
+from .ui_state_adapter import AssistantUIStateAdapter
 
 
 class AssistantTransportRuntime:
@@ -32,6 +33,7 @@ class AssistantTransportRuntime:
         now_iso: Callable[[], str],
         get_tool_event_listener: Callable[[], Any],
         set_tool_event_listener: Callable[[Any], None],
+        ui_state: AssistantUIStateAdapter,
     ) -> None:
         self.get_or_create_session = get_or_create_session
         self.runtime_context_for_user = runtime_context_for_user
@@ -50,15 +52,11 @@ class AssistantTransportRuntime:
         self.now_iso = now_iso
         self.get_tool_event_listener = get_tool_event_listener
         self.set_tool_event_listener = set_tool_event_listener
+        self.ui_state = ui_state
 
     async def run(self, payload: Any, controller: RunController, user_id: str) -> None:
         runtime_config = self.runtime_context_for_user(user_id)
-        if controller.state is None:
-            controller.state = {}
-        if "messages" not in controller.state:
-            controller.state["messages"] = []
-        if "tool_updates" not in controller.state:
-            controller.state["tool_updates"] = []
+        self.ui_state.ensure_state(controller)
 
         existing_session_id = None
         if isinstance(payload.state, dict):
@@ -75,7 +73,7 @@ class AssistantTransportRuntime:
 
         session = self.get_or_create_session(existing_session_id, user_id)
         controller.state["session_id"] = session.session_id
-        controller.state["messages"] = copy.deepcopy(session.ui_messages)
+        self.ui_state.load_session_messages(controller, session.ui_messages)
 
         user_inputs: list[tuple[list[dict[str, str]], str | None]] = []
         for command in payload.commands:
@@ -100,7 +98,7 @@ class AssistantTransportRuntime:
                 user_ui_message = self.new_user_ui_message(
                     normalized_parts, message_id=message_id
                 )
-                controller.state["messages"].append(user_ui_message)
+                self.ui_state.append_message(controller, user_ui_message)
                 session.ui_messages.append(user_ui_message)
 
                 session.messages = self.sanitize_messages(session.messages)
@@ -140,7 +138,7 @@ class AssistantTransportRuntime:
 
                 assistant_ui_message = self.new_assistant_ui_message()
                 assistant_index = len(session.ui_messages)
-                controller.state["messages"].append(assistant_ui_message)
+                self.ui_state.append_message(controller, assistant_ui_message)
                 session.ui_messages.append(assistant_ui_message)
 
                 self.append_tool_update(
@@ -166,9 +164,9 @@ class AssistantTransportRuntime:
                     if phase == "model_token":
                         token = str(event.get("text") or "")
                         if token:
-                            controller.state["messages"][assistant_index]["content"][1][
-                                "text"
-                            ] += token
+                            self.ui_state.append_response_text(
+                                controller, assistant_index, token
+                            )
                             model_text_streamed = True
                         return
 
@@ -179,17 +177,12 @@ class AssistantTransportRuntime:
 
                     if phase == "start":
                         args_text = str(event.get("args_text") or "{}")
-                        part_index = len(
-                            controller.state["messages"][assistant_index]["content"]
-                        )
-                        controller.state["messages"][assistant_index]["content"].append(
-                            {
-                                "type": "tool-call",
-                                "toolCallId": tool_call_id,
-                                "toolName": tool_name,
-                                "argsText": args_text,
-                                "args": {},
-                            }
+                        part_index = self.ui_state.append_tool_call(
+                            controller,
+                            assistant_index,
+                            tool_call_id=tool_call_id,
+                            tool_name=tool_name,
+                            args_text=args_text,
                         )
                         tool_part_index_by_call[tool_call_id] = part_index
                         self.append_tool_update(
@@ -213,23 +206,24 @@ class AssistantTransportRuntime:
 
                     part_index = tool_part_index_by_call.get(tool_call_id)
                     if part_index is not None:
-                        part = controller.state["messages"][assistant_index]["content"][
-                            part_index
-                        ]
-                        part["args"] = (
-                            event.get("args")
-                            if isinstance(event.get("args"), dict)
-                            else {}
+                        self.ui_state.update_tool_call_result(
+                            controller,
+                            assistant_index,
+                            part_index,
+                            args=(
+                                event.get("args")
+                                if isinstance(event.get("args"), dict)
+                                else {}
+                            ),
+                            result=event.get("result"),
+                            is_error=bool(event.get("is_error")),
                         )
-                        part["result"] = event.get("result")
-                        if bool(event.get("is_error")):
-                            part["isError"] = True
 
                     for asset in event.get("stored_assets", []) or []:
                         if str(asset.get("mime_type", "")).startswith("image/"):
-                            controller.state["messages"][assistant_index][
-                                "content"
-                            ].append({"type": "image", "image": asset["view_url"]})
+                            self.ui_state.append_image(
+                                controller, assistant_index, asset["view_url"]
+                            )
 
                     result = event.get("result")
                     claim_name = ""
@@ -291,23 +285,22 @@ class AssistantTransportRuntime:
                     parsed_result = event.get("result")
                     is_error = bool(event.get("is_error"))
 
-                    controller.state["messages"][assistant_index]["content"].append(
-                        {
-                            "type": "tool-call",
-                            "toolCallId": tool_call_id,
-                            "toolName": tool_name,
-                            "argsText": args_text,
-                            "args": parsed_args,
-                            "result": parsed_result,
-                            **({"isError": True} if is_error else {}),
-                        }
+                    self.ui_state.append_completed_tool_call(
+                        controller,
+                        assistant_index,
+                        tool_call_id=tool_call_id,
+                        tool_name=tool_name,
+                        args_text=args_text,
+                        args=parsed_args,
+                        result=parsed_result,
+                        is_error=is_error,
                     )
 
                     for asset in event.get("stored_assets", []) or []:
                         if str(asset.get("mime_type", "")).startswith("image/"):
-                            controller.state["messages"][assistant_index][
-                                "content"
-                            ].append({"type": "image", "image": asset["view_url"]})
+                            self.ui_state.append_image(
+                                controller, assistant_index, asset["view_url"]
+                            )
 
                     self.append_tool_update(
                         controller,
@@ -344,9 +337,7 @@ class AssistantTransportRuntime:
                         delay_seconds=0.001,
                     )
 
-                controller.state["messages"][assistant_index]["status"] = {
-                    "type": "complete"
-                }
+                self.ui_state.set_complete(controller, assistant_index)
                 self.append_tool_update(
                     controller,
                     stage="model",
@@ -377,7 +368,7 @@ class AssistantTransportRuntime:
                 if assistant_index is None:
                     assistant_ui_message = self.new_assistant_ui_message()
                     assistant_index = len(session.ui_messages)
-                    controller.state["messages"].append(assistant_ui_message)
+                    self.ui_state.append_message(controller, assistant_ui_message)
                     session.ui_messages.append(assistant_ui_message)
                 self.append_tool_update(
                     controller,
@@ -385,17 +376,19 @@ class AssistantTransportRuntime:
                     status="error",
                     detail="Agent failed while processing the request",
                 )
-                controller.state["messages"][assistant_index]["content"][0]["text"] += (
-                    "Encountered an error while processing.\n"
+                self.ui_state.append_reasoning_text(
+                    controller,
+                    assistant_index,
+                    "Encountered an error while processing.\n",
                 )
-                controller.state["messages"][assistant_index]["content"][1]["text"] += (
+                self.ui_state.append_response_text(
+                    controller,
+                    assistant_index,
                     "I hit an internal error while processing this message. "
                     "Please verify your OPENAI_API_KEY and try again.\n\n"
-                    f"Error: {error_text}"
+                    f"Error: {error_text}",
                 )
-                controller.state["messages"][assistant_index]["status"] = {
-                    "type": "complete"
-                }
+                self.ui_state.set_complete(controller, assistant_index)
                 self.sync_session_ui_from_controller(session, controller)
                 self.normalize_session_ui_messages(session)
                 await self.persist_session_async(session)

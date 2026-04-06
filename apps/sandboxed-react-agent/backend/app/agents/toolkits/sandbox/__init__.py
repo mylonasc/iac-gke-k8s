@@ -1,3 +1,4 @@
+import copy
 import json
 from typing import Any, Awaitable, Callable
 
@@ -8,6 +9,20 @@ from ..base import ToolkitProvider
 from ...tool_events import tool_end_event, tool_start_event
 from ...tool_payloads import ToolExecutionPayload
 from ...integrations.sandbox_sessions import SessionSandboxFacade
+from ....sandbox_lifecycle import SandboxLifecycleService
+from ....sandbox_manager import SandboxManager
+
+
+def _deep_merge(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
+    merged = copy.deepcopy(base)
+    for key, value in updates.items():
+        if value is None:
+            continue
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(dict(merged.get(key) or {}), value)
+        else:
+            merged[key] = value
+    return merged
 
 
 class SandboxExecPythonInput(BaseModel):
@@ -196,8 +211,122 @@ class SandboxToolkit:
 class SandboxToolkitProvider:
     toolkit_id = "sandbox"
 
-    def __init__(self, session_sandbox: SessionSandboxFacade) -> None:
+    def __init__(
+        self,
+        session_sandbox: SessionSandboxFacade,
+        sandbox_manager: SandboxManager,
+        sandbox_lifecycle: SandboxLifecycleService,
+    ) -> None:
         self.session_sandbox = session_sandbox
+        self.sandbox_manager = sandbox_manager
+        self.sandbox_lifecycle = sandbox_lifecycle
+
+    def default_config(self) -> dict[str, Any]:
+        sandbox_config = self.sandbox_manager.get_config()
+        sandbox_config.update(self.sandbox_lifecycle.get_config())
+        return {
+            "enabled": True,
+            "runtime": {
+                "mode": sandbox_config.get("mode", "cluster"),
+                "api_url": sandbox_config.get("api_url", ""),
+                "template_name": sandbox_config.get(
+                    "template_name", "python-runtime-template-small"
+                ),
+                "namespace": sandbox_config.get("namespace", "alt-default"),
+                "server_port": int(sandbox_config.get("server_port", 8888)),
+                "max_output_chars": int(sandbox_config.get("max_output_chars", 6000)),
+                "local_timeout_seconds": int(
+                    sandbox_config.get("local_timeout_seconds", 20)
+                ),
+            },
+            "lifecycle": {
+                "execution_model": sandbox_config.get("execution_model", "session"),
+                "session_idle_ttl_seconds": int(
+                    sandbox_config.get("session_idle_ttl_seconds", 1800)
+                ),
+                "sandbox_ready_timeout": int(
+                    sandbox_config.get("sandbox_ready_timeout", 420)
+                ),
+                "gateway_ready_timeout": int(
+                    sandbox_config.get("gateway_ready_timeout", 180)
+                ),
+                "max_lease_ttl_seconds": int(
+                    sandbox_config.get("max_lease_ttl_seconds", 21600)
+                ),
+            },
+        }
+
+    def merge_config(
+        self, defaults: dict[str, Any], stored: dict[str, Any]
+    ) -> dict[str, Any]:
+        return _deep_merge(defaults, stored)
+
+    def apply_updates(
+        self,
+        current: dict[str, Any],
+        *,
+        toolkit_updates: dict[str, Any] | None = None,
+        legacy_updates: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        updated = self.merge_config(current, toolkit_updates or {})
+        runtime = updated.setdefault("runtime", {})
+        lifecycle = updated.setdefault("lifecycle", {})
+        legacy = legacy_updates or {}
+
+        if legacy.get("sandbox_mode") is not None:
+            normalized_mode = str(legacy["sandbox_mode"]).strip().lower()
+            if normalized_mode not in {"cluster", "local"}:
+                raise ValueError("sandbox_mode must be 'cluster' or 'local'")
+            runtime["mode"] = normalized_mode
+        if legacy.get("sandbox_api_url") is not None:
+            runtime["api_url"] = legacy["sandbox_api_url"]
+        if legacy.get("sandbox_template_name") is not None:
+            runtime["template_name"] = legacy["sandbox_template_name"]
+        if legacy.get("sandbox_namespace") is not None:
+            runtime["namespace"] = legacy["sandbox_namespace"]
+        if legacy.get("sandbox_server_port") is not None:
+            if int(legacy["sandbox_server_port"]) <= 0:
+                raise ValueError("sandbox_server_port must be > 0")
+            runtime["server_port"] = int(legacy["sandbox_server_port"])
+        if legacy.get("sandbox_max_output_chars") is not None:
+            if int(legacy["sandbox_max_output_chars"]) < 100:
+                raise ValueError("sandbox_max_output_chars must be >= 100")
+            runtime["max_output_chars"] = int(legacy["sandbox_max_output_chars"])
+        if legacy.get("sandbox_local_timeout_seconds") is not None:
+            if int(legacy["sandbox_local_timeout_seconds"]) <= 0:
+                raise ValueError("sandbox_local_timeout_seconds must be > 0")
+            runtime["local_timeout_seconds"] = int(
+                legacy["sandbox_local_timeout_seconds"]
+            )
+        if legacy.get("sandbox_execution_model") is not None:
+            normalized_model = str(legacy["sandbox_execution_model"]).strip().lower()
+            if normalized_model not in {"ephemeral", "session"}:
+                raise ValueError(
+                    "sandbox_execution_model must be 'ephemeral' or 'session'"
+                )
+            lifecycle["execution_model"] = normalized_model
+        if legacy.get("sandbox_session_idle_ttl_seconds") is not None:
+            if int(legacy["sandbox_session_idle_ttl_seconds"]) <= 0:
+                raise ValueError("sandbox_session_idle_ttl_seconds must be > 0")
+            lifecycle["session_idle_ttl_seconds"] = int(
+                legacy["sandbox_session_idle_ttl_seconds"]
+            )
+        return updated
+
+    def requires_session_recycle(
+        self, previous: dict[str, Any], updated: dict[str, Any]
+    ) -> bool:
+        previous_runtime = previous.get("runtime") or {}
+        updated_runtime = updated.get("runtime") or {}
+        previous_lifecycle = previous.get("lifecycle") or {}
+        updated_lifecycle = updated.get("lifecycle") or {}
+        return any(
+            previous_runtime.get(key) != updated_runtime.get(key)
+            for key in ["mode", "api_url", "template_name", "namespace", "server_port"]
+        ) or (
+            previous_lifecycle.get("execution_model")
+            != updated_lifecycle.get("execution_model")
+        )
 
     def build_runtime(
         self,

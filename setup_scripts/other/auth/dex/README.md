@@ -13,8 +13,10 @@ Result:
 
 ## Files in this folder
 
-- `01_create_dex_config_secret.sh`: creates/updates the Dex config Secret from env vars.
+- `01_create_dex_config_secret.sh`: creates/updates the base Dex config Secret from env vars.
 - `02_load_env_from_cluster.sh`: prints `export ...` lines from the deployed Dex secret.
+- `03_create_dex_static_passwords_secret.sh`: creates/updates the dedicated static-passwords Secret.
+- `update_static_passwords.sh`: reloads local static passwords into their dedicated Secret.
 - `manage_static_passwords.py`: Textual TUI to add/update/delete local password users.
 - `dex.yaml`: Dex Namespace + Deployment + Service.
 - `dex-ingress.example.yaml`: example ingress for exposing Dex at `/dex`.
@@ -54,7 +56,7 @@ Important: these are two different callback types and both are required:
 - oauth2-proxy OIDC client callback (configured in Dex static client and oauth2-proxy):
   `https://app.<your-domain>/oauth2/callback`
 
-## 2) Create Dex config Secret (includes connectors + oauth2-proxy client)
+## 2) Create Dex config Secret (connectors + oauth2-proxy client)
 
 If Dex is already deployed and you want to avoid retyping OAuth secrets, load the
 current values from cluster first:
@@ -101,20 +103,33 @@ cp static-passwords.example.yaml static-passwords.yaml
 htpasswd -bnBC 10 "" "<plain-password>" | tr -d ':\n'
 ```
 
-3. Export the file path before running the script:
+3. Export the file path and create the dedicated passwords secret:
 
 ```bash
 export DEX_STATIC_PASSWORDS_FILE="$(pwd)/static-passwords.yaml"
-./01_create_dex_config_secret.sh
+./03_create_dex_static_passwords_secret.sh
 ```
 
 If `DEX_STATIC_PASSWORDS_FILE` is not set but `./static-passwords.yaml` exists,
-the script now auto-loads that file.
+the static-password script auto-loads that file.
 
-When `DEX_STATIC_PASSWORDS_FILE` is set, the script appends:
+To update only local password users without re-entering the other Dex secrets:
 
-- `enablePasswordDB: true`
-- `staticPasswords:` entries loaded from the file
+```bash
+./update_static_passwords.sh
+```
+
+This wrapper script:
+
+- applies your local `static-passwords.yaml` to the dedicated `dex-static-passwords` Secret
+- restarts Dex so the new config is picked up
+
+You can also point it at a different file or skip the restart:
+
+```bash
+./update_static_passwords.sh --file /path/to/static-passwords.yaml
+./update_static_passwords.sh --no-restart
+```
 
 Expected file format is a YAML list of users (no top-level `staticPasswords:` key).
 
@@ -151,7 +166,8 @@ Inside the TUI:
 Notes:
 
 - `DEX_MICROSOFT_TENANT=common` is multi-tenant; set your tenant ID to restrict.
-- The script creates namespace `dex` and applies Secret `dex-config`.
+- The scripts create namespace `dex` and apply Secret `dex-config` plus optional Secret `dex-static-passwords`.
+- `dex.yaml` now merges those two secrets at pod startup, so static password updates do not rewrite the other Dex secrets.
 - Current manifest uses SQLite on pod local storage (`emptyDir`) for Dex state.
   Because that storage is pod-local, run a single Dex replica in this mode.
   For HA/persistence, move Dex storage to a durable backend.

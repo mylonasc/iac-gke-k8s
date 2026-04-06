@@ -58,15 +58,20 @@ Or use the helper script (same pattern as `sandboxed-react-agent`):
 
 Edit `apps/alt-default-ops-console/k8s/configmap.yaml`:
 
-- `JWT_JWKS_URL`: JWKS endpoint
-- `JWT_ISSUERS`: comma-separated allowed issuers
-- `JWT_AUDIENCE`: required audience (OAuth client ID)
+- `JWT_JWKS_URL`: JWKS endpoint for Dex-issued tokens
+- `JWT_ISSUERS`: comma-separated allowed issuers for Dex-issued tokens
+- `JWT_AUDIENCE`: required audience for Dex-issued tokens (for this cluster: `oauth2-proxy`)
 - `JWT_EMAIL_ALLOWLIST`: comma-separated email allowlist (recommended)
 - `JWT_REQUIRED_GROUP`: optional required group claim
 - `APP_BASE_PATH`: external ingress path prefix (set to `/alt-default-ops` in cluster, empty locally)
 
 If `JWT_EMAIL_ALLOWLIST` and `JWT_REQUIRED_GROUP` are both empty, any valid JWT for issuer/audience is accepted.
 For strict single-user access, set `JWT_EMAIL_ALLOWLIST` to exactly your Google account email.
+
+The app accepts two token sources:
+
+- Dex tokens forwarded by ingress/oauth2-proxy, verified with `JWT_JWKS_URL`, `JWT_ISSUERS`, and `JWT_AUDIENCE`
+- Google ID tokens from the built-in `Login with Google` flow, verified against Google's JWKS using `OAUTH_CLIENT_ID` as the expected audience
 
 ## Run locally (UI + auth flow)
 
