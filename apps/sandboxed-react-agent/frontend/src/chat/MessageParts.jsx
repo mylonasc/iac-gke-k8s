@@ -97,8 +97,10 @@ function ToolCallPart(props) {
         ? "Shell"
         : props.toolName;
   const [maximizedWidget, setMaximizedWidget] = useState(null);
+  const [expanded, setExpanded] = useState(false);
   const claimName = props.result?.claim_name || "";
   const leaseId = props.result?.lease_id || "";
+  const isPending = props.result === undefined;
 
   useEffect(() => {
     if (!maximizedWidget || typeof window === "undefined" || typeof document === "undefined") {
@@ -118,14 +120,18 @@ function ToolCallPart(props) {
     };
   }, [maximizedWidget]);
 
-  return (
-    <details className="tool-card" open={false}>
-      <summary>
-        <code>{displayToolName || "Tool call"}</code>
-      </summary>
+  const toolContent = (
+    <>
       <div className="tool-context">
-        {props.result === undefined ? (
-          <span className="pill pill-running">Waiting for sandbox claim/runtime...</span>
+        {isPending ? (
+          <span className="pill pill-running tool-status-pill">
+            Waiting
+            <span className="tool-waiting-dots" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </span>
+          </span>
         ) : claimName ? (
           <span className="pill pill-success">Claim ready: {claimName}</span>
         ) : leaseId ? (
@@ -221,6 +227,38 @@ function ToolCallPart(props) {
           </ul>
         </div>
       ) : null}
+    </>
+  );
+
+  return (
+    <>
+      <div className="tool-card" data-state={expanded ? "expanded" : "collapsed"}>
+        <div className="tool-card-header">
+          <div className="tool-card-title-row">
+            <code>{displayToolName || "Tool call"}</code>
+            {isPending ? (
+              <span className="tool-inline-status">
+                <span className="tool-waiting-dots" aria-hidden="true">
+                  <span />
+                  <span />
+                  <span />
+                </span>
+              </span>
+            ) : null}
+          </div>
+          <button type="button" className="btn btn-subtle tiny" onClick={() => setExpanded((prev) => !prev)}>
+            {expanded ? "Collapse" : "Expand"}
+          </button>
+        </div>
+        {!expanded ? (
+          <div className="tool-card-preview">
+            {isPending ? "Running tool call..." : commandText || argsText || resultText}
+          </div>
+        ) : null}
+        <div className="tool-card-body" hidden={!expanded}>
+          {toolContent}
+        </div>
+      </div>
 
       {maximizedWidget ? (
         <div className="widget-modal-backdrop" onClick={() => setMaximizedWidget(null)} role="presentation">
@@ -254,7 +292,7 @@ function ToolCallPart(props) {
           </div>
         </div>
       ) : null}
-    </details>
+    </>
   );
 }
 

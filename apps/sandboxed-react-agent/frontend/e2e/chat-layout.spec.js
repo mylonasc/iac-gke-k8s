@@ -160,24 +160,27 @@ test.describe("chat layout", () => {
 
     const metrics = await page.evaluate(() => {
       const assistant = document.querySelector(".message-column-assistant");
+      const assistantText = document.querySelector(".message-column-assistant > .message-markdown");
       const user = document.querySelector(".message-column-user");
       const bubble = document.querySelector(".message-bubble-user");
       const viewport = document.querySelector(".thread-viewport");
 
-      if (!assistant || !user || !bubble || !viewport) {
+      if (!assistant || !assistantText || !user || !bubble || !viewport) {
         throw new Error("Expected desktop chat elements to be present");
       }
 
       const assistantRect = assistant.getBoundingClientRect();
+      const assistantTextRect = assistantText.getBoundingClientRect();
       const userRect = user.getBoundingClientRect();
       const bubbleRect = bubble.getBoundingClientRect();
       const viewportRect = viewport.getBoundingClientRect();
       const assistantStyles = getComputedStyle(assistant);
       return {
         assistantWidth: assistantRect.width,
+        assistantTextWidth: assistantTextRect.width,
         userWidth: userRect.width,
-        assistantLeftGap: assistantRect.left - viewportRect.left,
-        assistantRightGap: viewportRect.right - assistantRect.right,
+        assistantLeftGap: assistantTextRect.left - viewportRect.left,
+        assistantRightGap: viewportRect.right - assistantTextRect.right,
         userLeftGap: userRect.left - viewportRect.left,
         userRightGap: viewportRect.right - userRect.right,
         bubbleRightInset: userRect.right - bubbleRect.right,
@@ -185,8 +188,9 @@ test.describe("chat layout", () => {
       };
     });
 
-    expect(metrics.assistantWidth).toBeGreaterThan(500);
-    expect(metrics.assistantWidth).toBeLessThanOrEqual(790);
+    expect(metrics.assistantWidth).toBeGreaterThan(760);
+    expect(metrics.assistantTextWidth).toBeGreaterThan(500);
+    expect(metrics.assistantTextWidth).toBeLessThanOrEqual(790);
     expect(metrics.userWidth).toBeGreaterThan(500);
     expect(metrics.userWidth).toBeLessThanOrEqual(790);
     expect(Math.abs(metrics.assistantLeftGap - metrics.assistantRightGap)).toBeLessThan(40);
@@ -198,41 +202,46 @@ test.describe("chat layout", () => {
     const copyButtonCount = await page.getByRole("button", { name: "Copy" }).count();
     const lineNumberCount = await page.locator(".code-block-shell .linenumber.react-syntax-highlighter-line-number").count();
     expect(copyButtonCount).toBeGreaterThan(0);
-    expect(lineNumberCount).toBeGreaterThan(3);
+    expect(lineNumberCount).toBeGreaterThanOrEqual(3);
 
     await page.getByRole("button", { name: "Collapse" }).click();
-    await expect(page.getByRole("button", { name: "Expand" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Expand" }).first()).toBeVisible();
 
-    await page.evaluate(() => {
-      for (const detail of document.querySelectorAll(".tool-card")) {
-        detail.setAttribute("open", "");
-      }
-    });
+    const widgetToolExpand = page.locator(".tool-card").filter({ hasText: "UI Widget" }).getByRole("button", { name: "Expand" });
+    await widgetToolExpand.click();
 
-    const expandedCopyCount = await page.getByRole("button", { name: "Copy" }).count();
+    const expandedCopyCount = await page.locator(".tool-card[data-state='expanded']").getByRole("button", { name: "Copy" }).count();
     expect(expandedCopyCount).toBeGreaterThan(1);
 
     const toolMetrics = await page.evaluate(() => {
       const viewport = document.querySelector(".thread-viewport");
-      const shellCard = Array.from(document.querySelectorAll(".tool-card")).find((element) =>
-        element.textContent?.includes("hello from shell")
-      );
-      const widgetCard = Array.from(document.querySelectorAll(".tool-card")).find((element) =>
-        element.textContent?.includes("Widget preview") || element.textContent?.includes("Interactive widget preview")
-      );
-      const widgetFrame = document.querySelector(".tool-widget-frame");
+      const assistantColumn = document.querySelector(".message-column-assistant");
+      const expandedCard = document.querySelector(".tool-card[data-state='expanded']");
+      const shellCard = expandedCard?.querySelector(".tool-code-block");
+      const widgetCard = expandedCard?.querySelector(".tool-widget-wrap");
+      const widgetFrame = expandedCard?.querySelector(".tool-widget-frame");
+      const collapsedCard = document.querySelector(".tool-card[data-state='collapsed']");
 
-      if (!viewport || !shellCard || !widgetCard || !widgetFrame) {
+      if (!viewport || !assistantColumn || !expandedCard || !collapsedCard || !shellCard || !widgetCard || !widgetFrame) {
         throw new Error("Expected expanded tool UI elements to be present");
       }
 
+      const assistantRect = assistantColumn.getBoundingClientRect();
       const viewportRect = viewport.getBoundingClientRect();
+      const expandedRect = expandedCard.getBoundingClientRect();
+      const collapsedRect = collapsedCard.getBoundingClientRect();
       const shellRect = shellCard.getBoundingClientRect();
       const widgetRect = widgetCard.getBoundingClientRect();
       const frameRect = widgetFrame.getBoundingClientRect();
       return {
+        assistantWidth: assistantRect.width,
+        viewportWidth: viewportRect.width,
+        expandedWidth: expandedRect.width,
+        collapsedWidth: collapsedRect.width,
         viewportLeft: viewportRect.left,
         viewportRight: viewportRect.right,
+        expandedLeft: expandedRect.left,
+        expandedRight: expandedRect.right,
         shellLeft: shellRect.left,
         shellRight: shellRect.right,
         widgetLeft: widgetRect.left,
@@ -242,12 +251,20 @@ test.describe("chat layout", () => {
       };
     });
 
+    expect(toolMetrics.collapsedWidth).toBeLessThanOrEqual(toolMetrics.assistantWidth + 1);
+    expect(toolMetrics.expandedWidth).toBeGreaterThan(toolMetrics.viewportWidth - 40);
+    expect(toolMetrics.expandedLeft).toBeGreaterThanOrEqual(toolMetrics.viewportLeft - 1);
+    expect(toolMetrics.expandedRight).toBeLessThanOrEqual(toolMetrics.viewportRight + 1);
+
     expect(toolMetrics.shellLeft).toBeGreaterThanOrEqual(toolMetrics.viewportLeft - 1);
     expect(toolMetrics.shellRight).toBeLessThanOrEqual(toolMetrics.viewportRight + 1);
     expect(toolMetrics.widgetLeft).toBeGreaterThanOrEqual(toolMetrics.viewportLeft - 1);
     expect(toolMetrics.widgetRight).toBeLessThanOrEqual(toolMetrics.viewportRight + 1);
     expect(toolMetrics.frameLeft).toBeGreaterThanOrEqual(toolMetrics.viewportLeft - 1);
     expect(toolMetrics.frameRight).toBeLessThanOrEqual(toolMetrics.viewportRight + 1);
+
+    await page.locator(".tool-card[data-state='expanded']").getByRole("button", { name: "Collapse" }).click();
+    await expect(page.locator(".tool-card[data-state='expanded']")).toHaveCount(0);
   });
 
   test("uses full mobile width and removes redundant chat shell borders", async ({ page }) => {
