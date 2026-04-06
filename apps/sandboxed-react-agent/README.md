@@ -28,6 +28,11 @@ The backend now separates responsibilities into four layers:
 
 This lets tool definitions evolve independently from sandbox backend details and keeps resource manipulation behind a stable Python abstraction.
 
+Relevant design notes:
+
+- `docs/sandbox-session-persistence-and-snapshots.md`
+- `docs/sandbox-fuse-workspaces.md`
+
 ## Deployment diagram (KubeDiagrams)
 
 To render diagrams on demand:
@@ -53,7 +58,7 @@ To render diagrams on demand:
   - Uses `k8s-agent-sandbox` SDK in `cluster` mode.
 - 🔐 **Secret + ServiceAccount + RBAC**
   - `sandboxed-react-agent-secrets` provides `OPENAI_API_KEY`.
-  - `default-ksa` (annotated for Workload Identity) is used by backend.
+  - `sandbox-workspace-admin-ksa` (annotated for Workload Identity) is used by backend.
   - Role/RoleBinding (`backend-sandbox-rbac.yaml`) allows creating `SandboxClaim` and reading related Agent Sandbox CRDs.
 - 🛣️ **Sandbox Router (`sandbox-router-svc`, `sandbox-router-deployment`)**
   - Receives backend execution requests and forwards them to a concrete sandbox runtime.
@@ -494,7 +499,7 @@ Persistence model in SQLite:
 - The frontend container expects `BACKEND_UPSTREAM` at runtime.
   - In Kubernetes manifests it is set to `sandboxed-react-agent-backend:80`.
   - In Docker Compose it is set to `backend:8000`.
-- `default-ksa` requires namespaced RBAC to create Agent Sandbox claims.
+- `sandbox-workspace-admin-ksa` requires namespaced RBAC to create Agent Sandbox claims and user-scoped KSAs.
   - This repo includes `apps/sandboxed-react-agent/k8s/backend-sandbox-rbac.yaml`.
   - `start.sh` applies it automatically.
 - `start.sh` can auto-scale the sandbox router deployment (if present).

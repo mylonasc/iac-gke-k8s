@@ -10,6 +10,9 @@ rules:
   - apiGroups: ["agents.x-k8s.io"]
     resources: ["sandboxes"]
     verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["create", "get", "list", "watch", "delete", "patch", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -19,6 +22,9 @@ metadata:
 subjects:
   - kind: ServiceAccount
     name: default-ksa
+    namespace: alt-default
+  - kind: ServiceAccount
+    name: sandbox-workspace-admin-ksa
     namespace: alt-default
 roleRef:
   apiGroup: rbac.authorization.k8s.io

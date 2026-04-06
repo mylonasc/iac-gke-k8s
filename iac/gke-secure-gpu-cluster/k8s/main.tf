@@ -40,3 +40,13 @@ resource "kubernetes_service_account" "default_ksa" {
     }
   }
 }
+
+resource "kubernetes_service_account" "backend_admin_ksa" {
+  metadata {
+    name      = var.backend_admin_ksa_name
+    namespace = kubernetes_namespace.app.metadata[0].name
+    annotations = {
+      "iam.gke.io/gcp-service-account" = "${var.backend_admin_gsa_account_id}@${var.project_id}.iam.gserviceaccount.com"
+    }
+  }
+}

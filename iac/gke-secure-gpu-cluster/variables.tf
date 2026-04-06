@@ -161,3 +161,45 @@ variable "enable_agent_sandbox_pydata_template" {
   type        = bool
   default     = true
 }
+
+variable "enable_gcs_fuse_csi_driver" {
+  description = "When true, enables the GCS FUSE CSI driver addon in the GKE cluster."
+  type        = bool
+  default     = true
+}
+
+variable "backend_admin_gsa_account_id" {
+  description = "Account id for the backend admin Google service account used for lazy workspace provisioning."
+  type        = string
+  default     = "sandbox-workspace-admin"
+}
+
+variable "backend_admin_ksa_name" {
+  description = "Kubernetes service account name used by the backend for workspace provisioning."
+  type        = string
+  default     = "sandbox-workspace-admin-ksa"
+}
+
+variable "enable_sandbox_workspace_bucket" {
+  description = "When true, provisions the shared Cloud Storage bucket for sandbox workspaces."
+  type        = bool
+  default     = true
+}
+
+variable "sandbox_workspace_bucket_name" {
+  description = "Name of the shared Cloud Storage bucket that stores per-user sandbox workspaces."
+  type        = string
+  default     = "magarathea-sandbox-workspace-storage"
+}
+
+variable "sandbox_workspace_bucket_location" {
+  description = "Location for the shared sandbox workspace bucket."
+  type        = string
+  default     = "EU"
+}
+
+variable "sandbox_workspace_bucket_storage_class" {
+  description = "Storage class for the shared sandbox workspace bucket."
+  type        = string
+  default     = "STANDARD"
+}

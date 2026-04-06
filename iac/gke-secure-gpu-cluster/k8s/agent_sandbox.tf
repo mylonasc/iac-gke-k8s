@@ -45,6 +45,8 @@ locals {
     for obj in [for d in local.agent_sandbox_extensions_docs : yamldecode(d)] :
     "${lower(obj.kind)}-${lookup(lookup(obj, "metadata", {}), "namespace", "cluster")}-${obj.metadata.name}" => obj
   }
+
+  warm_pool_template_name = var.enable_agent_sandbox_pydata_template ? "python-runtime-template-pydata" : "python-runtime-template"
 }
 
 resource "kubernetes_manifest" "agent_sandbox_install" {
@@ -414,7 +416,7 @@ resource "kubernetes_manifest" "agent_sandbox_warm_pool" {
     spec = {
       replicas = var.agent_sandbox_warm_pool_replicas
       sandboxTemplateRef = {
-        name = "python-runtime-template"
+        name = local.warm_pool_template_name
       }
     }
   }

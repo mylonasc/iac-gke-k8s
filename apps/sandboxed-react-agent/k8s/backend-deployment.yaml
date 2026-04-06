@@ -20,7 +20,7 @@ spec:
       labels:
         app: sandboxed-react-agent-backend
     spec:
-      serviceAccountName: default-ksa
+      serviceAccountName: sandbox-workspace-admin-ksa
       tolerations:
         - key: purpose
           operator: Equal

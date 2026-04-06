@@ -9,6 +9,9 @@ terraform {
       source  = "hashicorp/google"
       version = "~> 5.10"
     }
+    google-beta = {
+      source = "hashicorp/google-beta"
+    }
   }
 }
 
@@ -33,6 +36,16 @@ resource "google_project_service" "compute_api" {
   disable_on_destroy = false
 }
 
+resource "google_project_service" "iam_api" {
+  service            = "iam.googleapis.com"
+  disable_on_destroy = false
+}
+
+resource "google_project_service" "storage_api" {
+  service            = "storage.googleapis.com"
+  disable_on_destroy = false
+}
+
 # Define the GKE cluster
 # We remove the default node pool to have full control over our custom node pools.
 resource "google_container_cluster" "primary" {
@@ -50,9 +63,17 @@ resource "google_container_cluster" "primary" {
     enabled = true
   }
 
+  addons_config {
+    gcs_fuse_csi_driver_config {
+      enabled = var.enable_gcs_fuse_csi_driver
+    }
+  }
+
   depends_on = [
     google_project_service.gke_api,
-    google_project_service.compute_api
+    google_project_service.compute_api,
+    google_project_service.iam_api,
+    google_project_service.storage_api,
   ]
   deletion_protection = var.cluster_deletion_protection
   workload_identity_config {
@@ -320,12 +341,14 @@ data "google_client_config" "default" {}
 data "google_client_openid_userinfo" "current" {}
 
 module "k8s" {
-  source        = "./k8s"
-  project_id    = var.project_id
-  region        = var.region
-  cluster_name  = var.cluster_name
-  k8s_namespace = var.k8s_namespace
-  environment   = var.environment
+  source                       = "./k8s"
+  project_id                   = var.project_id
+  region                       = var.region
+  cluster_name                 = var.cluster_name
+  k8s_namespace                = var.k8s_namespace
+  environment                  = var.environment
+  backend_admin_gsa_account_id = var.backend_admin_gsa_account_id
+  backend_admin_ksa_name       = var.backend_admin_ksa_name
 
   enable_agent_sandbox                 = var.enable_agent_sandbox
   agent_sandbox_version                = var.agent_sandbox_version

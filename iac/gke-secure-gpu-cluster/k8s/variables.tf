@@ -42,6 +42,18 @@ variable "docker_registry_secret_name" {
   default     = "dockerhub-pull-secret"
 }
 
+variable "backend_admin_gsa_account_id" {
+  description = "Account id for the backend admin Google service account used for lazy workspace provisioning."
+  type        = string
+  default     = "sandbox-workspace-admin"
+}
+
+variable "backend_admin_ksa_name" {
+  description = "Kubernetes service account name used by the backend for workspace provisioning."
+  type        = string
+  default     = "sandbox-workspace-admin-ksa"
+}
+
 variable "enable_agent_sandbox" {
   description = "When true, install and manage Agent Sandbox resources via Terraform."
   type        = bool
