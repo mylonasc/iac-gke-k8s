@@ -5,21 +5,26 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import { MessagePrimitive, useMessagePartImage, useMessagePartText } from "@assistant-ui/react";
 import { resolveAppUrl } from "../api/client";
+import { CodeBlock, MarkdownCode } from "./CodeBlock";
 
 const gfmPlugin = typeof remarkGfm === "function" ? remarkGfm : remarkGfm?.default;
 const mathPlugin = typeof remarkMath === "function" ? remarkMath : remarkMath?.default;
 const katexPlugin = typeof rehypeKatex === "function" ? rehypeKatex : rehypeKatex?.default;
 
-function MarkdownPart({ text, isRunning }) {
-  const [expanded, setExpanded] = useState(false);
+function MarkdownPart({ text, isRunning, defaultExpanded = false }) {
+  const [expanded, setExpanded] = useState(defaultExpanded);
   const value = `${text || ""}${isRunning ? "\n\n●" : ""}`;
   const lineCount = useMemo(() => (value.match(/\n/g)?.length || 0) + 1, [value]);
   const isLong = lineCount > 10;
   const remarkPlugins = [gfmPlugin, mathPlugin].filter(Boolean);
   const rehypePlugins = [katexPlugin].filter(Boolean);
 
+  useEffect(() => {
+    setExpanded(defaultExpanded);
+  }, [defaultExpanded, value]);
+
   const markdownNode = (
-    <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins}>
+    <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={{ code: MarkdownCode }}>
       {value}
     </ReactMarkdown>
   );
@@ -32,15 +37,20 @@ function MarkdownPart({ text, isRunning }) {
     <div className="message-markdown">
       <div className={`message-fade-block ${expanded ? "expanded" : "collapsed"}`}>{markdownNode}</div>
       <button type="button" className="btn btn-subtle tiny" onClick={() => setExpanded((prev) => !prev)}>
-        {expanded ? "Show less" : "Show more"}
+        {expanded ? "Collapse" : "Expand"}
       </button>
     </div>
   );
 }
 
-function MarkdownTextPart() {
+function UserMarkdownTextPart() {
   const part = useMessagePartText();
   return <MarkdownPart text={part.text} isRunning={part.status?.type === "running"} />;
+}
+
+function AssistantMarkdownTextPart() {
+  const part = useMessagePartText();
+  return <MarkdownPart text={part.text} isRunning={part.status?.type === "running"} defaultExpanded />;
 }
 
 function ImagePart() {
@@ -128,40 +138,30 @@ function ToolCallPart(props) {
       <div className="tool-block">
         <strong>{commandText ? commandLabel : "Arguments"}</strong>
         {commandText ? (
-          <pre className="tool-code-block">
-            <code className={`language-${commandLanguage}`}>{commandText}</code>
-          </pre>
+          <CodeBlock code={commandText} language={commandLanguage} label={commandLabel} className="tool-code-block" />
         ) : (
-          <pre className="tool-code-block">
-            <code className="language-json">{argsText}</code>
-          </pre>
+          <CodeBlock code={argsText} language="json" label="Arguments" className="tool-code-block" />
         )}
       </div>
 
       {stdout ? (
         <div className="tool-block">
           <strong>Stdout</strong>
-          <pre className="tool-output-block">
-            <code className="language-text">{stdout}</code>
-          </pre>
+          <CodeBlock code={stdout} language="text" label="Stdout" className="tool-output-block" />
         </div>
       ) : null}
 
       {stderr ? (
         <div className="tool-block">
           <strong>Stderr</strong>
-          <pre className="tool-output-block error">
-            <code className="language-text">{stderr}</code>
-          </pre>
+          <CodeBlock code={stderr} language="text" label="Stderr" className="tool-output-block error" />
         </div>
       ) : null}
 
       {toolError ? (
         <div className="tool-block">
           <strong>Error</strong>
-          <pre className="tool-output-block error">
-            <code className="language-text">{toolError}</code>
-          </pre>
+          <CodeBlock code={toolError} language="text" label="Error" className="tool-output-block error" />
         </div>
       ) : null}
 
@@ -175,9 +175,7 @@ function ToolCallPart(props) {
       {!stdout && !stderr && !toolError ? (
         <div className="tool-block">
           <strong>Result</strong>
-          <pre className="tool-code-block">
-            <code className="language-json">{resultText}</code>
-          </pre>
+          <CodeBlock code={resultText} language="json" label="Result" className="tool-code-block" />
         </div>
       ) : null}
 
@@ -263,9 +261,11 @@ function ToolCallPart(props) {
 export function UserMessage() {
   return (
     <MessagePrimitive.Root className="message-row user">
-      <div className="message-bubble message-bubble-user">
-        <div className="message-label">User</div>
-        <MessagePrimitive.Parts components={{ Text: MarkdownTextPart, Image: ImagePart }} />
+      <div className="message-column message-column-user">
+        <div className="message-bubble message-bubble-user">
+          <div className="message-label">User</div>
+          <MessagePrimitive.Parts components={{ Text: UserMarkdownTextPart, Image: ImagePart }} />
+        </div>
       </div>
     </MessagePrimitive.Root>
   );
@@ -274,7 +274,7 @@ export function UserMessage() {
 export function AssistantMessage() {
   const messageComponents = useMemo(
     () => ({
-      Text: MarkdownTextPart,
+      Text: AssistantMarkdownTextPart,
       Image: ImagePart,
       Reasoning: () => null,
       tools: {
@@ -286,7 +286,7 @@ export function AssistantMessage() {
 
   return (
     <MessagePrimitive.Root className="message-row assistant">
-      <div className="message-bubble message-bubble-assistant">
+      <div className="message-column message-column-assistant">
         <div className="message-label">Assistant</div>
         <MessagePrimitive.Parts components={messageComponents} />
       </div>

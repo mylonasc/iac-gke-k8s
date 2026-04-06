@@ -1,24 +1,10 @@
 import React, { useMemo, useState } from "react";
 import { AuiIf, ThreadPrimitive } from "@assistant-ui/react";
+import { Share2, Trash2 } from "lucide-react";
 import { apiFetch, getAppBasePath } from "../api/client";
 import { AssistantMessage, UserMessage } from "./MessageParts";
 import { Composer } from "./Composer";
 import { ThinkingSidebar } from "./ThinkingSidebar";
-
-function ShareIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" className="icon-svg">
-      <path
-        d="M10.6 13.4a1 1 0 0 1 0-1.4l3-3a3 3 0 1 1 4.2 4.2l-2.2 2.2a3 3 0 0 1-4.2 0 .999.999 0 1 1 1.4-1.4 1 1 0 0 0 1.4 0l2.2-2.2a1 1 0 1 0-1.4-1.4l-3 3a1 1 0 0 1-1.4 0Z"
-        fill="currentColor"
-      />
-      <path
-        d="M13.4 10.6a1 1 0 0 1 0 1.4l-3 3a3 3 0 1 1-4.2-4.2l2.2-2.2a3 3 0 0 1 4.2 0 .999.999 0 1 1-1.4 1.4 1 1 0 0 0-1.4 0l-2.2 2.2a1 1 0 0 0 1.4 1.4l3-3a1 1 0 0 1 1.4 0Z"
-        fill="currentColor"
-      />
-    </svg>
-  );
-}
 
 function ClaimBadge({ session }) {
   const sandbox = session?.sandbox || {};
@@ -108,23 +94,31 @@ export function ChatView({
               title="Share as markdown"
               aria-label="Share as markdown"
             >
-              <ShareIcon />
+              <Share2 className="icon-svg" aria-hidden="true" strokeWidth={2} />
             </button>
           ) : null}
           {!readOnly && !isMobile && onShare ? (
-            <button type="button" className="btn btn-subtle" onClick={() => onShare(session?.session_id)}>
-              Share
+            <button
+              type="button"
+              className="btn btn-subtle icon-only"
+              onClick={() => onShare(session?.session_id)}
+              title="Share"
+              aria-label="Share"
+            >
+              <Share2 className="icon-svg" aria-hidden="true" strokeWidth={2} />
             </button>
           ) : null}
           {!readOnly && copiedMarkdown ? <span className="pill pill-success">Copied markdown URL</span> : null}
           {!readOnly ? (
             <button
               type="button"
-              className="btn btn-subtle"
+              className="btn btn-subtle icon-only"
               onClick={() => onResetSession(session?.session_id)}
               disabled={!session?.session_id}
+              title="Delete thread"
+              aria-label="Delete thread"
             >
-              Reset
+              <Trash2 className="icon-svg" aria-hidden="true" strokeWidth={2} />
             </button>
           ) : null}
         </div>

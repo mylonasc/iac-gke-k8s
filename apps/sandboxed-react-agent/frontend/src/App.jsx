@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { Menu, Share2 } from "lucide-react";
 import { ChatView } from "./chat/ChatView";
 import { TransportProvider } from "./chat/TransportProvider";
 import { useAppState } from "./hooks/useAppState";
@@ -7,29 +8,6 @@ import { MobileDrawer } from "./layout/MobileDrawer";
 import { ThreadsSidebar } from "./layout/ThreadsSidebar";
 import { RuntimePicker } from "./runtime/RuntimePicker";
 import { SettingsPanel } from "./settings/SettingsPanel";
-
-function MenuIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" className="icon-svg">
-      <path d="M4 7h16v2H4V7Zm0 8h16v2H4v-2Zm0-4h16v2H4v-2Z" fill="currentColor" />
-    </svg>
-  );
-}
-
-function ShareIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" className="icon-svg">
-      <path
-        d="M10.6 13.4a1 1 0 0 1 0-1.4l3-3a3 3 0 1 1 4.2 4.2l-2.2 2.2a3 3 0 0 1-4.2 0 .999.999 0 1 1 1.4-1.4 1 1 0 0 0 1.4 0l2.2-2.2a1 1 0 1 0-1.4-1.4l-3 3a1 1 0 0 1-1.4 0Z"
-        fill="currentColor"
-      />
-      <path
-        d="M13.4 10.6a1 1 0 0 1 0 1.4l-3 3a3 3 0 1 1-4.2-4.2l2.2-2.2a3 3 0 0 1 4.2 0 .999.999 0 1 1-1.4 1.4 1 1 0 0 0-1.4 0l-2.2 2.2a1 1 0 0 0 1.4 1.4l3-3a1 1 0 0 1 1.4 0Z"
-        fill="currentColor"
-      />
-    </svg>
-  );
-}
 
 function IdentityBadge({ userId, userTier }) {
   if (!userId) return null;
@@ -63,7 +41,7 @@ function MobileTopBar({ title, canShare, onShare, theme, onToggleTheme, onOpenMe
   return (
     <div className="mobile-topbar">
       <button type="button" className="btn btn-subtle icon-only" onClick={onOpenMenu} aria-label="Open menu">
-        <MenuIcon />
+        <Menu className="icon-svg" aria-hidden="true" strokeWidth={2} />
       </button>
       <div className="mobile-topbar-title" title={title}>
         {title}
@@ -71,7 +49,7 @@ function MobileTopBar({ title, canShare, onShare, theme, onToggleTheme, onOpenMe
       <div className="mobile-topbar-actions">
         {canShare ? (
           <button type="button" className="btn btn-subtle icon-only" onClick={onShare} aria-label="Share thread">
-            <ShareIcon />
+            <Share2 className="icon-svg" aria-hidden="true" strokeWidth={2} />
           </button>
         ) : null}
         <button type="button" className="btn btn-subtle" onClick={onToggleTheme}>

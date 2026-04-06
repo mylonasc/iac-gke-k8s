@@ -1,19 +1,5 @@
 import React from "react";
-
-function ShareIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" className="icon-svg">
-      <path
-        d="M10.6 13.4a1 1 0 0 1 0-1.4l3-3a3 3 0 1 1 4.2 4.2l-2.2 2.2a3 3 0 0 1-4.2 0 .999.999 0 1 1 1.4-1.4 1 1 0 0 0 1.4 0l2.2-2.2a1 1 0 1 0-1.4-1.4l-3 3a1 1 0 0 1-1.4 0Z"
-        fill="currentColor"
-      />
-      <path
-        d="M13.4 10.6a1 1 0 0 1 0 1.4l-3 3a3 3 0 1 1-4.2-4.2l2.2-2.2a3 3 0 0 1 4.2 0 .999.999 0 1 1-1.4 1.4 1 1 0 0 0-1.4 0l-2.2 2.2a1 1 0 0 0 1.4 1.4l3-3a1 1 0 0 1 1.4 0Z"
-        fill="currentColor"
-      />
-    </svg>
-  );
-}
+import { Share2 } from "lucide-react";
 
 export function ThreadsSidebar({
   sessions,
@@ -54,7 +40,7 @@ export function ThreadsSidebar({
                 onClick={() => onShare(session.session_id)}
                 disabled={shareInFlight}
               >
-                <ShareIcon />
+                <Share2 className="icon-svg" aria-hidden="true" strokeWidth={2} />
               </button>
             ) : null}
           </li>
