@@ -87,6 +87,10 @@ resource "kubernetes_service_account" "sandbox_runtime" {
 resource "kubernetes_manifest" "agent_sandbox_template" {
   count = var.enable_agent_sandbox && var.enable_agent_sandbox_runtime ? 1 : 0
 
+  field_manager {
+    force_conflicts = true
+  }
+
   manifest = {
     apiVersion = "extensions.agents.x-k8s.io/v1alpha1"
     kind       = "SandboxTemplate"
@@ -136,7 +140,7 @@ resource "kubernetes_manifest" "agent_sandbox_template" {
                   path = "/"
                   port = 8888
                 }
-                initialDelaySeconds = 0
+                initialDelaySeconds = 10
                 periodSeconds       = 1
               }
               resources = {
@@ -163,6 +167,10 @@ resource "kubernetes_manifest" "agent_sandbox_template" {
 
 resource "kubernetes_manifest" "agent_sandbox_template_small" {
   count = var.enable_agent_sandbox && var.enable_agent_sandbox_runtime ? 1 : 0
+
+  field_manager {
+    force_conflicts = true
+  }
 
   manifest = {
     apiVersion = "extensions.agents.x-k8s.io/v1alpha1"
@@ -213,7 +221,7 @@ resource "kubernetes_manifest" "agent_sandbox_template_small" {
                   path = "/"
                   port = 8888
                 }
-                initialDelaySeconds = 0
+                initialDelaySeconds = 10
                 periodSeconds       = 1
               }
               resources = {
@@ -240,6 +248,10 @@ resource "kubernetes_manifest" "agent_sandbox_template_small" {
 
 resource "kubernetes_manifest" "agent_sandbox_template_large" {
   count = var.enable_agent_sandbox && var.enable_agent_sandbox_runtime ? 1 : 0
+
+  field_manager {
+    force_conflicts = true
+  }
 
   manifest = {
     apiVersion = "extensions.agents.x-k8s.io/v1alpha1"
@@ -290,7 +302,7 @@ resource "kubernetes_manifest" "agent_sandbox_template_large" {
                   path = "/"
                   port = 8888
                 }
-                initialDelaySeconds = 0
+                initialDelaySeconds = 10
                 periodSeconds       = 1
               }
               resources = {
@@ -317,6 +329,10 @@ resource "kubernetes_manifest" "agent_sandbox_template_large" {
 
 resource "kubernetes_manifest" "agent_sandbox_template_pydata" {
   count = var.enable_agent_sandbox && var.enable_agent_sandbox_runtime && var.enable_agent_sandbox_pydata_template ? 1 : 0
+
+  field_manager {
+    force_conflicts = true
+  }
 
   manifest = {
     apiVersion = "extensions.agents.x-k8s.io/v1alpha1"
@@ -372,7 +388,7 @@ resource "kubernetes_manifest" "agent_sandbox_template_pydata" {
                   path = "/"
                   port = 8888
                 }
-                initialDelaySeconds = 0
+                initialDelaySeconds = 10
                 periodSeconds       = 1
               }
               resources = {
@@ -406,6 +422,10 @@ resource "kubernetes_manifest" "agent_sandbox_warm_pool" {
     "spec.replicas",
   ]
 
+  field_manager {
+    force_conflicts = true
+  }
+
   manifest = {
     apiVersion = "extensions.agents.x-k8s.io/v1alpha1"
     kind       = "SandboxWarmPool"
@@ -428,6 +448,10 @@ resource "kubernetes_manifest" "agent_sandbox_warm_pool" {
 
 resource "kubernetes_manifest" "agent_sandbox_runtime_egress_policy" {
   count = var.enable_agent_sandbox && var.enable_agent_sandbox_runtime ? 1 : 0
+
+  field_manager {
+    force_conflicts = true
+  }
 
   manifest = {
     apiVersion = "networking.k8s.io/v1"
@@ -506,6 +530,10 @@ resource "kubernetes_manifest" "agent_sandbox_runtime_egress_policy" {
 resource "kubernetes_manifest" "agent_sandbox_router_service" {
   count = var.enable_agent_sandbox && var.enable_agent_sandbox_runtime ? 1 : 0
 
+  field_manager {
+    force_conflicts = true
+  }
+
   manifest = {
     apiVersion = "v1"
     kind       = "Service"
@@ -545,6 +573,10 @@ resource "kubernetes_manifest" "agent_sandbox_router_deployment" {
     "spec.template.spec.containers[0].resources.requests",
     "spec.template.spec.containers[0].resources.limits",
   ]
+
+  field_manager {
+    force_conflicts = true
+  }
 
   manifest = {
     apiVersion = "apps/v1"
