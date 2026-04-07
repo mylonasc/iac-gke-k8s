@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Protocol
 
 
@@ -281,6 +282,12 @@ class GoogleApiWorkspaceAdminClient:
                 for kept_role, kept_members in kept
             ]
             return True
+        if not hasattr(policy.bindings, "add"):
+            policy.bindings = [
+                {"role": kept_role, "members": kept_members}
+                for kept_role, kept_members in kept
+            ]
+            return True
         del policy.bindings[:]
         for kept_role, kept_members in kept:
             new_binding = policy.bindings.add()
@@ -390,16 +397,29 @@ class GoogleApiWorkspaceAdminClient:
         gsa_email: str,
         role: str,
     ) -> None:
+        from google.api_core.exceptions import BadRequest
         from google.cloud import storage
 
         client = storage.Client(project=self.project_id)
         bucket = client.bucket(bucket_name)
-        policy = bucket.get_iam_policy(requested_policy_version=3)
         member = f"serviceAccount:{gsa_email}"
-        if self._policy_has_member(policy, role=role, member=member):
-            return
-        self._policy_add_member(policy, role=role, member=member)
-        bucket.set_iam_policy(policy)
+        deadline = time.monotonic() + 30
+        last_error = None
+        while time.monotonic() < deadline:
+            try:
+                policy = bucket.get_iam_policy(requested_policy_version=3)
+                if self._policy_has_member(policy, role=role, member=member):
+                    return
+                self._policy_add_member(policy, role=role, member=member)
+                bucket.set_iam_policy(policy)
+                return
+            except BadRequest as exc:
+                if "does not exist" not in str(exc):
+                    raise
+                last_error = exc
+                time.sleep(2)
+        if last_error is not None:
+            raise last_error
 
     def delete_bucket_access(
         self,
@@ -579,7 +599,7 @@ class KubernetesApiWorkspaceAdminClient:
                     "readOnly": False,
                     "volumeAttributes": {
                         "bucketName": bucket_name,
-                        "mountOptions": "implicit-dirs",
+                        "mountOptions": "implicit-dirs,uid=1000,gid=0,file-mode=0664,dir-mode=0775",
                     },
                 },
             }
