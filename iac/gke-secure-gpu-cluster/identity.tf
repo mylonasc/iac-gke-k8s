@@ -50,9 +50,8 @@ resource "google_project_iam_member" "backend_admin_service_account_admin" {
   member  = "serviceAccount:${google_service_account.backend_admin_gsa.email}"
 }
 
-resource "google_storage_bucket_iam_member" "backend_admin_workspace_storage_admin" {
-  count  = var.enable_sandbox_workspace_bucket ? 1 : 0
-  bucket = google_storage_bucket.sandbox_workspace[0].name
-  role   = "roles/storage.admin"
-  member = "serviceAccount:${google_service_account.backend_admin_gsa.email}"
+resource "google_project_iam_member" "backend_admin_storage_admin" {
+  project = var.project_id
+  role    = "roles/storage.admin"
+  member  = "serviceAccount:${google_service_account.backend_admin_gsa.email}"
 }

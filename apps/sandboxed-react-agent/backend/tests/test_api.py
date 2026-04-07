@@ -122,6 +122,89 @@ def test_me_endpoint_returns_user_tier() -> None:
     assert payload["tier"] == "default"
 
 
+def test_workspace_endpoints_roundtrip(monkeypatch) -> None:
+    monkeypatch.setattr(
+        agent,
+        "get_workspace",
+        lambda user_id: None,
+    )
+    monkeypatch.setattr(
+        agent,
+        "get_workspace_status",
+        lambda user_id: {
+            "workspace": None,
+            "provisioning_pending": False,
+            "active_session_leases": [],
+        },
+    )
+    monkeypatch.setattr(
+        agent,
+        "ensure_workspace_async",
+        lambda user_id: (
+            {
+                "workspace_id": "ws-1",
+                "user_id": user_id,
+                "status": "pending",
+            },
+            True,
+        ),
+    )
+    monkeypatch.setattr(
+        agent,
+        "ensure_workspace",
+        lambda user_id: {
+            "workspace_id": "ws-1",
+            "user_id": user_id,
+            "status": "ready",
+        },
+    )
+    monkeypatch.setattr(
+        agent, "delete_workspace", lambda user_id, delete_data=False: True
+    )
+
+    response = client.get("/api/workspace")
+    assert response.status_code == 200
+    assert response.json() == {"workspace": None}
+
+    status_response = client.get("/api/workspace/status")
+    assert status_response.status_code == 200
+    assert status_response.json() == {
+        "workspace": None,
+        "provisioning_pending": False,
+        "active_session_leases": [],
+    }
+
+    async_response = client.post("/api/workspace", json={"wait": False})
+    assert async_response.status_code == 200
+    assert async_response.json()["started"] is True
+    assert async_response.json()["workspace"]["status"] == "pending"
+
+    sync_response = client.post("/api/workspace", json={"wait": True})
+    assert sync_response.status_code == 200
+    assert sync_response.json()["started"] is False
+    assert sync_response.json()["workspace"]["status"] == "ready"
+
+    delete_response = client.request(
+        "DELETE", "/api/workspace", json={"delete_data": True}
+    )
+    assert delete_response.status_code == 200
+    assert delete_response.json() == {"deleted": True, "delete_data": True}
+
+
+def test_workspace_endpoint_returns_503_for_disabled_provisioning(monkeypatch) -> None:
+    monkeypatch.setattr(
+        agent,
+        "ensure_workspace_async",
+        lambda user_id: (_ for _ in ()).throw(
+            RuntimeError("workspace provisioning is disabled")
+        ),
+    )
+
+    response = client.post("/api/workspace", json={"wait": False})
+    assert response.status_code == 503
+    assert response.json()["detail"] == "workspace provisioning is disabled"
+
+
 def test_config_is_isolated_per_user(monkeypatch) -> None:
     monkeypatch.setattr(main_module.auth_config, "enabled", True)
     monkeypatch.setattr(

@@ -11,10 +11,11 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Callable
 
 from k8s_agent_sandbox import SandboxClient
 
@@ -23,6 +24,14 @@ from .sandbox_manager import SandboxExecutionResult, SandboxManager
 
 
 logger = logging.getLogger(__name__)
+
+
+class WorkspaceNotReadyError(RuntimeError):
+    """Raised when a sandbox workspace has not finished provisioning yet."""
+
+
+class WorkspaceProvisioningError(RuntimeError):
+    """Raised when the sandbox workspace provisioning state is terminal/error."""
 
 
 def _now_utc() -> datetime:
@@ -115,9 +124,19 @@ class SandboxLifecycleService:
         self,
         sandbox_manager: SandboxManager,
         sandbox_lease_repository: SandboxLeaseRepository,
+        get_user_id_for_session: Callable[[str], str | None] | None = None,
+        get_workspace_for_user: Callable[[str], dict[str, Any] | None] | None = None,
+        ensure_workspace_async_for_user: Callable[[str], tuple[dict[str, Any], bool]]
+        | None = None,
+        bind_workspace_claim_for_session: Callable[[str, str | None, str | None], None]
+        | None = None,
     ) -> None:
         self.sandbox_manager = sandbox_manager
         self.sandbox_lease_repository = sandbox_lease_repository
+        self.get_user_id_for_session = get_user_id_for_session
+        self.get_workspace_for_user = get_workspace_for_user
+        self.ensure_workspace_async_for_user = ensure_workspace_async_for_user
+        self.bind_workspace_claim_for_session = bind_workspace_claim_for_session
 
         self.execution_model = (
             os.getenv("SANDBOX_EXECUTION_MODEL", "session").strip().lower()
@@ -217,6 +236,69 @@ class SandboxLifecycleService:
                 merged[key] = runtime_config[key]
         return merged
 
+    def _workspace_runtime_overrides(
+        self, session_id: str, effective: dict[str, object]
+    ) -> dict[str, object]:
+        mode = str(effective["mode"])
+        if mode == "local":
+            return effective
+
+        if self.get_user_id_for_session is None:
+            return effective
+
+        user_id = str(self.get_user_id_for_session(session_id) or "").strip()
+        if not user_id:
+            return effective
+
+        workspace = None
+        if self.get_workspace_for_user is not None:
+            workspace = self.get_workspace_for_user(user_id)
+
+        if workspace is None and self.ensure_workspace_async_for_user is not None:
+            workspace, started = self.ensure_workspace_async_for_user(user_id)
+            if workspace and str(workspace.get("status") or "") == "ready":
+                pass
+            elif started:
+                raise WorkspaceNotReadyError(
+                    "Workspace provisioning started. Retry in a few seconds."
+                )
+
+        if not workspace:
+            return effective
+
+        status = str(workspace.get("status") or "")
+        if status == "ready":
+            updated = dict(effective)
+            template_name = workspace.get("derived_template_name")
+            namespace = workspace.get("claim_namespace")
+            if template_name:
+                updated["template_name"] = str(template_name)
+            if namespace:
+                updated["namespace"] = str(namespace)
+            return updated
+
+        if status == "pending":
+            raise WorkspaceNotReadyError(
+                "Workspace is still provisioning. Retry in a few seconds."
+            )
+
+        if status == "error":
+            detail = str(workspace.get("last_error") or "unknown error")
+            raise WorkspaceProvisioningError(f"Workspace provisioning failed: {detail}")
+
+        return effective
+
+    def _sync_workspace_claim_binding(
+        self, scope_type: str, scope_key: str, lease: SandboxLease | None
+    ) -> None:
+        if scope_type != "session" or self.bind_workspace_claim_for_session is None:
+            return
+        self.bind_workspace_claim_for_session(
+            scope_key,
+            lease.claim_name if lease else None,
+            lease.namespace if lease and lease.claim_name else None,
+        )
+
     def _touch_lease(
         self, lease: SandboxLease, *, session_idle_ttl_seconds: int | None = None
     ) -> SandboxLease:
@@ -296,7 +378,37 @@ class SandboxLifecycleService:
             sandbox_ready_timeout=sandbox_ready_timeout,
             gateway_ready_timeout=gateway_ready_timeout,
         )
-        client.__enter__()
+        try:
+            client.__enter__()
+        except Exception as exc:
+            claim_name = getattr(client, "claim_name", None)
+            if claim_name:
+                lease.claim_name = claim_name
+                logger.warning(
+                    "lease.acquire.watch_failed",
+                    extra={
+                        "event": "lease.acquire.watch_failed",
+                        "lease_id": lease.lease_id,
+                        "scope_type": lease.scope_type,
+                        "scope_key": lease.scope_key,
+                        "claim_name": claim_name,
+                        "error": str(exc),
+                    },
+                )
+                if self._wait_for_claim_ready(
+                    lease, timeout_seconds=sandbox_ready_timeout
+                ):
+                    self._cleanup_attach_client(client)
+                    return self._attach_runtime(
+                        lease,
+                        api_url=api_url,
+                        server_port=server_port,
+                        sandbox_ready_timeout=sandbox_ready_timeout,
+                        gateway_ready_timeout=gateway_ready_timeout,
+                        session_idle_ttl_seconds=session_idle_ttl_seconds,
+                    )
+            self._cleanup_attach_client(client)
+            raise
 
         lease.claim_name = getattr(client, "claim_name", None)
         lease.status = "ready"
@@ -306,11 +418,154 @@ class SandboxLifecycleService:
         runtime = _LeaseRuntime(lease=lease, client=client)
         self._runtime_by_lease_id[lease.lease_id] = runtime
         self._lease_id_by_scope[(lease.scope_type, lease.scope_key)] = lease.lease_id
+        self._sync_workspace_claim_binding(lease.scope_type, lease.scope_key, lease)
 
         logger.info(
             "lease.acquire.end",
             extra={
                 "event": "lease.acquire.end",
+                "lease_id": lease.lease_id,
+                "scope_type": lease.scope_type,
+                "scope_key": lease.scope_key,
+                "claim_name": lease.claim_name,
+            },
+        )
+        return runtime
+
+    def _cleanup_attach_client(self, client: SandboxClient) -> None:
+        port_forward_process = getattr(client, "port_forward_process", None)
+        if port_forward_process is None:
+            return
+        try:
+            port_forward_process.terminate()
+            try:
+                port_forward_process.wait(timeout=2)
+            except Exception:
+                port_forward_process.kill()
+        except Exception:
+            logger.debug("lease.attach.cleanup_failed", exc_info=True)
+
+    def _claim_exists(self, lease: SandboxLease) -> bool:
+        if not lease.claim_name:
+            return False
+        try:
+            from kubernetes import client, config
+
+            try:
+                config.load_incluster_config()
+            except Exception:
+                config.load_kube_config()
+
+            api = client.CustomObjectsApi()
+            api.get_namespaced_custom_object(
+                group="extensions.agents.x-k8s.io",
+                version="v1alpha1",
+                namespace=lease.namespace,
+                plural="sandboxclaims",
+                name=lease.claim_name,
+            )
+            return True
+        except Exception:
+            return False
+
+    def _wait_for_claim_ready(
+        self, lease: SandboxLease, *, timeout_seconds: int
+    ) -> bool:
+        if not lease.claim_name:
+            return False
+        try:
+            from kubernetes import client, config
+
+            try:
+                config.load_incluster_config()
+            except Exception:
+                config.load_kube_config()
+
+            api = client.CustomObjectsApi()
+            deadline = time.monotonic() + max(1, timeout_seconds)
+            while time.monotonic() < deadline:
+                claim = api.get_namespaced_custom_object(
+                    group="extensions.agents.x-k8s.io",
+                    version="v1alpha1",
+                    namespace=lease.namespace,
+                    plural="sandboxclaims",
+                    name=lease.claim_name,
+                )
+                status = claim.get("status") or {}
+                for condition in list(status.get("conditions") or []):
+                    if (
+                        condition.get("type") == "Ready"
+                        and condition.get("status") == "True"
+                    ):
+                        return True
+                time.sleep(2)
+        except Exception:
+            logger.debug("lease.claim_ready_poll_failed", exc_info=True)
+        return False
+
+    def _attach_runtime(
+        self,
+        lease: SandboxLease,
+        *,
+        api_url: str,
+        server_port: int,
+        sandbox_ready_timeout: int,
+        gateway_ready_timeout: int,
+        session_idle_ttl_seconds: int,
+    ) -> _LeaseRuntime:
+        if not lease.claim_name:
+            raise RuntimeError("cannot attach runtime without claim_name")
+        if not self._claim_exists(lease):
+            raise RuntimeError(f"sandbox claim {lease.claim_name} no longer exists")
+
+        logger.info(
+            "lease.attach.start",
+            extra={
+                "event": "lease.attach.start",
+                "lease_id": lease.lease_id,
+                "scope_type": lease.scope_type,
+                "scope_key": lease.scope_key,
+                "claim_name": lease.claim_name,
+                "template_name": lease.template_name,
+                "namespace": lease.namespace,
+            },
+        )
+
+        client = SandboxClient(
+            template_name=lease.template_name,
+            api_url=api_url,
+            namespace=lease.namespace,
+            server_port=server_port,
+            sandbox_ready_timeout=sandbox_ready_timeout,
+            gateway_ready_timeout=gateway_ready_timeout,
+        )
+        client.claim_name = lease.claim_name
+
+        try:
+            client._wait_for_sandbox_ready()
+            if client.base_url:
+                pass
+            elif client.gateway_name:
+                client._wait_for_gateway_ip()
+            else:
+                client._start_and_wait_for_port_forward()
+        except Exception:
+            self._cleanup_attach_client(client)
+            raise
+
+        lease.status = "ready"
+        lease.last_error = None
+        self._touch_lease(lease, session_idle_ttl_seconds=session_idle_ttl_seconds)
+
+        runtime = _LeaseRuntime(lease=lease, client=client)
+        self._runtime_by_lease_id[lease.lease_id] = runtime
+        self._lease_id_by_scope[(lease.scope_type, lease.scope_key)] = lease.lease_id
+        self._sync_workspace_claim_binding(lease.scope_type, lease.scope_key, lease)
+
+        logger.info(
+            "lease.attach.end",
+            extra={
+                "event": "lease.attach.end",
                 "lease_id": lease.lease_id,
                 "scope_type": lease.scope_type,
                 "scope_key": lease.scope_key,
@@ -370,6 +625,7 @@ class SandboxLifecycleService:
         )
         self._runtime_by_lease_id.pop(lease.lease_id, None)
         self._lease_id_by_scope.pop((lease.scope_type, lease.scope_key), None)
+        self._sync_workspace_claim_binding(lease.scope_type, lease.scope_key, None)
 
         logger.info(
             "lease.release",
@@ -484,6 +740,38 @@ class SandboxLifecycleService:
                     )
                     return runtime
 
+                if existing_lease.claim_name:
+                    try:
+                        return self._attach_runtime(
+                            existing_lease,
+                            api_url=api_url,
+                            server_port=server_port,
+                            sandbox_ready_timeout=sandbox_ready_timeout,
+                            gateway_ready_timeout=gateway_ready_timeout,
+                            session_idle_ttl_seconds=session_idle_ttl_seconds,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "lease.attach.failed",
+                            extra={
+                                "event": "lease.attach.failed",
+                                "lease_id": existing_lease.lease_id,
+                                "scope_type": existing_lease.scope_type,
+                                "scope_key": existing_lease.scope_key,
+                                "claim_name": existing_lease.claim_name,
+                                "error": str(exc),
+                            },
+                        )
+                        self._delete_claim_best_effort(existing_lease)
+                        self.sandbox_lease_repository.mark_released(
+                            existing_lease.lease_id,
+                            released_at=_to_iso(_now_utc()),
+                            status="released",
+                            last_error=str(exc),
+                        )
+                        self._lease_id_by_scope.pop((scope_type, scope_key), None)
+                        existing_lease = None
+
             lease = existing_lease or self._build_fresh_lease(
                 scope_type,
                 scope_key,
@@ -579,6 +867,17 @@ class SandboxLifecycleService:
     ) -> SandboxExecutionResult:
         """Execute Python code under current lifecycle execution policy."""
         effective = self._effective_runtime(runtime_config)
+        try:
+            effective = self._workspace_runtime_overrides(session_id, effective)
+        except (WorkspaceNotReadyError, WorkspaceProvisioningError) as exc:
+            return SandboxExecutionResult(
+                tool_name="sandbox_exec_python",
+                ok=False,
+                stdout="",
+                stderr="",
+                exit_code=None,
+                error=str(exc),
+            )
         mode = str(effective["mode"])
         execution_model = str(effective["execution_model"])
         self.reap_expired_leases()
@@ -612,6 +911,17 @@ class SandboxLifecycleService:
     ) -> SandboxExecutionResult:
         """Execute a shell command under current lifecycle execution policy."""
         effective = self._effective_runtime(runtime_config)
+        try:
+            effective = self._workspace_runtime_overrides(session_id, effective)
+        except (WorkspaceNotReadyError, WorkspaceProvisioningError) as exc:
+            return SandboxExecutionResult(
+                tool_name="sandbox_exec_shell",
+                ok=False,
+                stdout="",
+                stderr="",
+                exit_code=None,
+                error=str(exc),
+            )
         mode = str(effective["mode"])
         execution_model = str(effective["execution_model"])
         self.reap_expired_leases()

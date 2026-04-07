@@ -10,12 +10,11 @@ The wrapper always runs checks `01` to `03` and conditionally runs later checks 
 
 The target design is:
 
-- one shared Cloud Storage bucket per environment
-- one managed folder per user under `workspaces/<user_id>/`
+- one Cloud Storage bucket per user workspace
 - one Google service account per user
 - one Kubernetes service account per user
 - Workload Identity binding from each per-user KSA to its per-user GSA
-- one user-derived `SandboxTemplate` mounting the user's managed folder at `/workspace`
+- one user-derived `SandboxTemplate` mounting the user's bucket at `/workspace`
 - provisioning and deprovisioning driven by the backend through Google APIs and Kubernetes APIs
 
 ## What Must Exist Before Lazy Provisioning Can Work
@@ -26,8 +25,7 @@ That bootstrap is:
 
 1. a GKE cluster with Workload Identity enabled
 2. Cloud Storage FUSE CSI support in the cluster
-3. a shared workspace bucket configured for managed folders
-4. a backend admin GSA with permission to create and delete per-user identities and managed-folder IAM
+3. a backend admin GSA with permission to create and delete per-user identities and per-user buckets
 5. a backend KSA bound to that admin GSA
 6. backend Kubernetes RBAC allowing creation of per-user KSAs and user-derived sandbox templates
 
@@ -35,7 +33,7 @@ That bootstrap is:
 
 ## 1. Enable required APIs
 
-These APIs must be enabled in the project that hosts the cluster and workspace bucket:
+These APIs must be enabled in the project that hosts the cluster and user workspace buckets:
 
 - `container.googleapis.com`
 - `iam.googleapis.com`
@@ -81,23 +79,19 @@ Checker:
 
 - `./iac/sandbox_workspace_provisioning_setup/03_check_gcs_fuse_support.sh --project-id <PROJECT_ID> --cluster-name <CLUSTER_NAME> --location <LOCATION>`
 
-## 4. Create the shared workspace bucket
+## 4. Decide the per-user bucket naming prefix
 
-Create one shared bucket per environment and configure it with:
-
-- uniform bucket-level access enabled
-- hierarchical namespace enabled
-- public access prevention enabled
+The backend will lazily create one bucket per user workspace.
 
 Recommended naming:
 
-- `gs://<environment>-sandbox-workspaces`
+- `gs://<environment>-sandbox-workspace-<user-suffix>`
 
-Recommended layout:
+Provide the backend with a deterministic prefix through:
 
-- `workspaces/<user_id>/`
+- `SANDBOX_WORKSPACE_BUCKET_PREFIX`
 
-Do not enable object versioning on the mounted workspace bucket path used by Cloud Storage FUSE.
+Do not enable object versioning on the workspace buckets used by Cloud Storage FUSE.
 
 Checker:
 
@@ -123,8 +117,8 @@ The backend admin GSA needs permission to do all of the following:
 
 - create, get, and delete Google service accounts for users
 - manage IAM policy bindings on those Google service accounts
-- create managed folders under the workspace bucket
-- get and set IAM policies on those managed folders
+- create and delete Cloud Storage buckets for users
+- get and set IAM policies on those buckets
 - create and remove Workload Identity bindings between per-user KSAs and GSAs
 
 Use least privilege where practical, but make sure the backend can complete the full user lifecycle:
@@ -137,8 +131,8 @@ At minimum, review roles and equivalent custom-role permissions for:
 
 - service account administration
 - service account IAM policy administration
-- Cloud Storage managed folder administration
-- Cloud Storage managed folder IAM policy management
+- Cloud Storage bucket administration
+- Cloud Storage bucket IAM policy management
 
 If you use predefined roles, verify they cover the exact managed-folder and service-account operations the backend will call.
 
@@ -191,9 +185,9 @@ Recommended default:
 2. delete the user-derived `SandboxTemplate`
 3. delete the per-user KSA
 4. remove Workload Identity binding
-5. remove managed-folder IAM bindings
-6. optionally delete the managed folder contents
-7. optionally delete the managed folder resource
+5. remove bucket IAM bindings
+6. optionally delete bucket contents
+7. optionally delete the bucket
 8. delete the per-user GSA
 9. tombstone the workspace metadata in the backend database
 
@@ -207,7 +201,7 @@ Checker:
 
 The following should be added in Terraform:
 
-1. shared workspace bucket resources
+1. backend admin storage permissions for dynamic per-user buckets
 2. backend admin GSA
 3. Workload Identity binding from backend KSA to backend admin GSA
 4. backend Deployment KSA switch to `sandbox-workspace-admin-ksa`
@@ -223,7 +217,7 @@ Suggested locations:
 
 For a new user on first sandbox use, the backend should create:
 
-1. managed folder `workspaces/<user_id>/`
+1. per-user bucket
 2. per-user GSA
 3. per-user KSA in the app namespace
 4. Workload Identity binding from KSA to GSA
@@ -254,11 +248,15 @@ Before enabling the feature in production, verify:
 
 - backend pod identity is the intended admin GSA
 - backend can create and delete a test GSA
-- backend can create a test managed folder and set IAM on it
+- backend can create a test bucket and set IAM on it
 - backend can create a test KSA and Workload Identity binding
 - a sandbox launched with a test per-user template can mount `/workspace`
-- that sandbox can access only its own managed folder and not a sibling user's folder
+- that sandbox can access only its own bucket
 - deleting a test user workspace fully removes or archives all expected resources
+
+Optional end-to-end smoke test:
+
+- `./iac/sandbox_workspace_provisioning_setup/10_smoke_test_workspace_flow.sh --namespace <NAMESPACE> --user-id <USER_ID> [--backend-label <LABEL>] [--session-id <SESSION_ID>]`
 
 ## Parameter Suggestions
 

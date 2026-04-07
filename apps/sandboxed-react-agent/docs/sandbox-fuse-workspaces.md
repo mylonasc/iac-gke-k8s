@@ -10,7 +10,7 @@ One-time platform bootstrap steps are documented separately in:
 
 Add reusable sandbox workspaces such that:
 
-- each user gets a durable workspace stored under a shared bucket
+- each user gets a durable workspace stored in a dedicated bucket
 - sandboxs for the same user can mount that user's workspace concurrently
 - sandboxs for different users cannot access each other's workspace data at the Cloud Storage API layer
 - active sandbox sessions reconnect to an existing `SandboxClaim` when possible
@@ -22,51 +22,48 @@ Add reusable sandbox workspaces such that:
 - storage is shared through Cloud Storage FUSE, not through PVCs
 - isolation must be enforced by Cloud Storage IAM, not only by mount configuration
 
-## Why This Requires Managed Folders And Per-User Identities
+## Why This Requires Per-User Buckets And Per-User Identities
 
 Mounting a bucket prefix with `Cloud Storage FUSE` is not enough for strict tenant isolation.
 
 - a mount option such as `only-dir` limits what appears in the mounted path
 - it does not by itself prevent a principal with broader Cloud Storage access from reading or writing other prefixes through Cloud Storage APIs
+- GCS FUSE CSI mount startup still requires bucket-level `storage.objects.list`, which makes strong shared-bucket prefix isolation impractical
 
 To make isolation real at the IAM layer, use:
 
-- one shared bucket per environment
-- one managed folder per user, for example `workspaces/<user_id>/`
+- one bucket per user workspace
 - one Google service account per user workspace principal
 - one Kubernetes service account per user workspace principal
-- IAM bindings only on that user's managed folder
+- IAM bindings only on that user's bucket
 
-That gives each sandbox pod an identity that can only access one managed folder.
+That gives each sandbox pod an identity that can only access one bucket.
 
 ## Recommended Storage Layout
 
-Use a dedicated bucket with uniform bucket-level access enabled.
+Use a dedicated bucket per user with uniform bucket-level access enabled.
 
-Example object layout:
+Example layout:
 
-- bucket: `gs://<environment>-sandbox-workspaces`
-- managed folder per user: `workspaces/<user_id>/`
+- bucket: `gs://<environment>-sandbox-workspace-<user-suffix>`
 - mounted path in sandbox: `/workspace`
 
 Notes:
 
-- managed folders require uniform bucket-level access
-- use a bucket with hierarchical namespace enabled so folder semantics are explicit
 - do not enable object versioning on the FUSE-mounted workspace bucket; Cloud Storage FUSE docs call out unpredictable behavior there
 
 ## Security Model
 
 ### Shared infrastructure identity
 
-Keep a platform/admin identity for bucket and managed-folder administration.
+Keep a platform/admin identity for bucket administration.
 
 It is allowed to:
 
-- create managed folders
+- create per-user buckets
 - create per-user Google service accounts
 - create Workload Identity bindings
-- update folder IAM policies
+- update bucket IAM policies
 
 It is not used by sandbox pods.
 
@@ -77,9 +74,9 @@ For each user, create:
 - a Google service account, for example `sandbox-user-<stable-id>@<project>.iam.gserviceaccount.com`
 - a Kubernetes service account, for example `sandbox-user-<stable-id>-ksa`
 
-Grant the Google service account only the minimum roles on that user's managed folder, typically:
+Grant the Google service account only the minimum roles on that user's bucket, typically:
 
-- `roles/storage.objectUser` on `gs://<bucket>/workspaces/<user_id>/`
+- `roles/storage.objectUser` on `gs://<user-workspace-bucket>`
 
 Do not grant broad object access on the bucket to the per-user runtime service accounts.
 
@@ -116,8 +113,8 @@ Add a dedicated GSA for backend-driven workspace administration, separate from t
 
 Grant it enough access to:
 
-- create and manage managed folders
-- set IAM policies on managed folders
+- create and manage per-user buckets
+- set IAM policies on those buckets
 - create and manage per-user Google service accounts
 - manage Workload Identity bindings for per-user KSAs
 
@@ -142,7 +139,7 @@ Update the sandbox pod template strategy so user-derived templates can add:
 - a GCS FUSE CSI volume
 - mount path `/workspace`
 - the target bucket
-- the managed folder path for the user
+- the target per-user bucket for the user
 - any needed mount options such as implicit dirs or cache sizing
 
 This will require changes around:

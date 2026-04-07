@@ -121,6 +121,35 @@ def init_schema(connect: Callable[[], object]) -> None:
         )
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS user_workspaces (
+                workspace_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL,
+                bucket_name TEXT NOT NULL,
+                managed_folder_path TEXT NOT NULL,
+                gsa_email TEXT NOT NULL,
+                ksa_name TEXT NOT NULL,
+                derived_template_name TEXT NOT NULL,
+                claim_name TEXT,
+                claim_namespace TEXT,
+                last_provisioned_at TEXT,
+                last_verified_at TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_user_workspaces_status
+            ON user_workspaces (status, updated_at DESC)
+            """
+        )
+        connection.execute(
+            """
             INSERT OR IGNORE INTO users (user_id, tier, created_at, updated_at)
             SELECT DISTINCT user_id, 'default', ?, ?
             FROM sessions

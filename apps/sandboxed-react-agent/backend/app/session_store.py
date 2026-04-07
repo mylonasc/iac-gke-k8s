@@ -9,6 +9,7 @@ from .persistence.schema import init_schema
 from .persistence.sessions import SQLiteSessionStore
 from .persistence.user_configs import SQLiteUserConfigStore
 from .persistence.users import SQLiteUserStore
+from .persistence.user_workspaces import SQLiteUserWorkspaceStore
 
 
 class SessionStore:
@@ -25,6 +26,7 @@ class SessionStore:
         self.sessions = SQLiteSessionStore(self._connect)
         self.assets = SQLiteAssetStore(self._connect)
         self.sandbox_leases = SQLiteSandboxLeaseStore(self._connect)
+        self.user_workspaces = SQLiteUserWorkspaceStore(self._connect)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
@@ -122,3 +124,15 @@ class SessionStore:
             status=status,
             last_error=last_error,
         )
+
+    def upsert_user_workspace(self, workspace: dict[str, Any]) -> None:
+        self.user_workspaces.upsert_user_workspace(workspace)
+
+    def get_user_workspace(self, user_id: str) -> dict[str, Any] | None:
+        return self.user_workspaces.get_user_workspace(user_id)
+
+    def get_user_workspace_by_id(self, workspace_id: str) -> dict[str, Any] | None:
+        return self.user_workspaces.get_user_workspace_by_id(workspace_id)
+
+    def list_user_workspaces(self) -> list[dict[str, Any]]:
+        return self.user_workspaces.list_user_workspaces()

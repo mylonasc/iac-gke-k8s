@@ -86,6 +86,14 @@ class SandboxReleaseResponse(BaseModel):
     released: bool
 
 
+class WorkspaceEnsureRequest(BaseModel):
+    wait: bool = False
+
+
+class WorkspaceDeleteRequest(BaseModel):
+    delete_data: bool = False
+
+
 configure_logging()
 logger = logging.getLogger(__name__)
 runtime = create_app_runtime()
@@ -283,6 +291,48 @@ def me(request: Request) -> dict[str, str]:
 def get_config(request: Request) -> dict:
     user_id = _request_user_id(request)
     return agent.get_runtime_config(user_id)
+
+
+@app.get("/api/workspace")
+def get_workspace(request: Request) -> dict[str, Any]:
+    user_id = _request_user_id(request)
+    workspace = agent.get_workspace(user_id)
+    return {"workspace": workspace}
+
+
+@app.get("/api/workspace/status")
+def get_workspace_status(request: Request) -> dict[str, Any]:
+    user_id = _request_user_id(request)
+    return agent.get_workspace_status(user_id)
+
+
+@app.post("/api/workspace")
+def ensure_workspace(
+    payload: WorkspaceEnsureRequest, request: Request
+) -> dict[str, Any]:
+    user_id = _request_user_id(request)
+    try:
+        if payload.wait:
+            workspace = agent.ensure_workspace(user_id)
+            return {"workspace": workspace, "started": False}
+        workspace, started = agent.ensure_workspace_async(user_id)
+        return {"workspace": workspace, "started": started}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.delete("/api/workspace")
+def delete_workspace(
+    payload: WorkspaceDeleteRequest, request: Request
+) -> dict[str, Any]:
+    user_id = _request_user_id(request)
+    try:
+        deleted = agent.delete_workspace(user_id, delete_data=payload.delete_data)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"deleted": deleted, "delete_data": payload.delete_data}
 
 
 @app.post("/api/config")

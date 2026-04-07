@@ -27,6 +27,7 @@ from .repositories.sandbox_lease_repository import SandboxLeaseRepository
 from .repositories.session_repository import SessionRepository
 from .repositories.user_config_repository import UserConfigRepository
 from .repositories.user_repository import UserRepository
+from .repositories.user_workspace_repository import UserWorkspaceRepository
 from .sandbox_lifecycle import SandboxLifecycleService
 from .sandbox_manager import SandboxManager
 from .services.runtime_config_service import RuntimeConfigService
@@ -34,6 +35,16 @@ from .services.sandbox_admin_service import SandboxAdminService
 from .services.session_service import SessionService
 from .services.session_state import SessionState, now_iso
 from .services.sharing_service import SharingService
+from .services.workspace_async_service import WorkspaceAsyncService
+from .services.workspace_admin_clients import (
+    DisabledGoogleWorkspaceAdminClient,
+    DisabledKubernetesWorkspaceAdminClient,
+    GoogleApiWorkspaceAdminClient,
+    KubernetesApiWorkspaceAdminClient,
+)
+from .services.workspace_models import WorkspaceInfraConfig
+from .services.workspace_provisioning_service import WorkspaceProvisioningService
+from .services.workspace_service import WorkspaceService
 from .session_store import SessionStore
 
 
@@ -51,12 +62,29 @@ class SandboxedReactAgent:
         self.session_store = SessionStore()
         self.user_repository = UserRepository(self.session_store)
         self.user_config_repository = UserConfigRepository(self.session_store)
+        self.user_workspace_repository = UserWorkspaceRepository(self.session_store)
         self.session_repository = SessionRepository(self.session_store)
         self.asset_repository = AssetRepository(self.session_store)
         self.sandbox_lease_repository = SandboxLeaseRepository(self.session_store)
         self.sandbox_lifecycle = SandboxLifecycleService(
             sandbox_manager=self.sandbox_manager,
             sandbox_lease_repository=self.sandbox_lease_repository,
+            get_user_id_for_session=lambda session_id: (
+                self.sessions.get(session_id).user_id
+                if self.sessions.get(session_id)
+                else None
+            ),
+            get_workspace_for_user=lambda user_id: self.get_workspace(user_id),
+            ensure_workspace_async_for_user=lambda user_id: self.ensure_workspace_async(
+                user_id
+            ),
+            bind_workspace_claim_for_session=lambda session_id, claim_name, namespace: (
+                self._bind_workspace_claim_for_session(
+                    session_id,
+                    claim_name=claim_name,
+                    namespace=namespace,
+                )
+            ),
         )
         self.asset_manager = AssetManager(self.asset_repository)
         self.asset_facade = AssetFacade(self.asset_manager)
@@ -103,6 +131,40 @@ class SandboxedReactAgent:
             session_repository=self.session_repository,
             session_service=self._session_service,
             get_session=self.get_session,
+        )
+        infra_config = WorkspaceInfraConfig(
+            project_id=os.getenv("GCP_PROJECT_ID", ""),
+            bucket_prefix=os.getenv("SANDBOX_WORKSPACE_BUCKET_PREFIX", ""),
+            namespace=os.getenv("SANDBOX_NAMESPACE", self.sandbox_manager.namespace),
+            base_template_name=os.getenv(
+                "SANDBOX_WORKSPACE_BASE_TEMPLATE_NAME",
+                self.sandbox_manager.template_name,
+            ),
+        )
+        provisioning_enabled = self._workspace_provisioning_enabled(infra_config)
+        self._workspace_provisioning_service = WorkspaceProvisioningService(
+            user_repository=self.user_repository,
+            user_workspace_repository=self.user_workspace_repository,
+            google_admin_client=(
+                GoogleApiWorkspaceAdminClient(project_id=infra_config.project_id)
+                if provisioning_enabled
+                else DisabledGoogleWorkspaceAdminClient()
+            ),
+            kubernetes_admin_client=(
+                KubernetesApiWorkspaceAdminClient(namespace=infra_config.namespace)
+                if provisioning_enabled
+                else DisabledKubernetesWorkspaceAdminClient()
+            ),
+            infra_config=infra_config,
+        )
+        self._workspace_async_service = WorkspaceAsyncService(
+            workspace_provisioning_service=self._workspace_provisioning_service,
+            max_workers=int(os.getenv("WORKSPACE_PROVISIONER_MAX_WORKERS", "4")),
+        )
+        self._workspace_service = WorkspaceService(
+            workspace_provisioning_service=self._workspace_provisioning_service,
+            user_workspace_repository=self.user_workspace_repository,
+            workspace_async_service=self._workspace_async_service,
         )
         self._ui_state = AssistantUIStateAdapter()
         self._agent_runtime = AgentRuntime(
@@ -202,14 +264,102 @@ class SandboxedReactAgent:
     def get_user_profile(self, user_id: str) -> dict[str, Any]:
         return self._runtime_config_service.get_user_profile(user_id)
 
+    def get_workspace(self, user_id: str) -> dict[str, Any] | None:
+        workspace = self._workspace_service.get_workspace_for_user(user_id)
+        return workspace.as_record() if workspace else None
+
+    def get_workspace_status(self, user_id: str) -> dict[str, Any]:
+        workspace = self.get_workspace(user_id)
+        active_session_leases = []
+        for session in self.sessions.values():
+            if session.user_id != user_id:
+                continue
+            lease = self.sandbox_lease_facade.get_session_lease(session.session_id)
+            if not lease:
+                continue
+            active_session_leases.append(
+                {
+                    "session_id": session.session_id,
+                    "lease_id": lease.get("lease_id"),
+                    "claim_name": lease.get("claim_name"),
+                    "template_name": lease.get("template_name"),
+                    "namespace": lease.get("namespace"),
+                    "status": lease.get("status"),
+                    "last_used_at": lease.get("last_used_at"),
+                    "expires_at": lease.get("expires_at"),
+                }
+            )
+        return {
+            "workspace": workspace,
+            "provisioning_pending": self._workspace_service.is_workspace_pending(
+                user_id
+            ),
+            "active_session_leases": active_session_leases,
+        }
+
+    def ensure_workspace(self, user_id: str) -> dict[str, Any]:
+        return self._workspace_service.get_or_create_user_workspace(user_id).as_record()
+
+    def ensure_workspace_async(self, user_id: str) -> tuple[dict[str, Any], bool]:
+        workspace, started = self._workspace_service.ensure_workspace_async(user_id)
+        return workspace.as_record(), started
+
+    def delete_workspace(self, user_id: str, *, delete_data: bool = False) -> bool:
+        return self._workspace_service.delete_workspace_for_user(
+            user_id,
+            delete_data=delete_data,
+        )
+
+    def _bind_workspace_claim_for_session(
+        self, session_id: str, *, claim_name: str | None, namespace: str | None
+    ) -> None:
+        session = self.sessions.get(session_id)
+        if not session:
+            return
+        self._workspace_service.bind_claim_for_user(
+            session.user_id,
+            claim_name=claim_name,
+            claim_namespace=namespace,
+        )
+
     def _runtime_context_for_user(self, user_id: str) -> dict[str, Any]:
-        return self._runtime_config_service.resolve_user_runtime_config(user_id)
+        runtime = self._runtime_config_service.resolve_user_runtime_config(user_id)
+        return self._apply_workspace_runtime_overrides(user_id, runtime)
 
     def _default_runtime_context(self) -> dict[str, Any]:
         return self._runtime_config_service.default_runtime_config()
 
     def get_runtime_config(self, user_id: str) -> dict[str, Any]:
         return self._runtime_context_for_user(user_id)
+
+    def _workspace_provisioning_enabled(
+        self, infra_config: WorkspaceInfraConfig
+    ) -> bool:
+        raw = (
+            (os.getenv("SANDBOX_WORKSPACE_PROVISIONING_ENABLED") or "").strip().lower()
+        )
+        if raw:
+            return raw in {"1", "true", "yes", "on"}
+        return bool(infra_config.project_id and infra_config.bucket_prefix)
+
+    def _apply_workspace_runtime_overrides(
+        self, user_id: str, runtime: dict[str, Any]
+    ) -> dict[str, Any]:
+        workspace = self._workspace_service.get_workspace_for_user(user_id)
+        if not workspace or workspace.status != "ready":
+            return runtime
+        updated = json.loads(json.dumps(runtime))
+        sandbox_runtime = (
+            updated.setdefault("toolkits", {})
+            .setdefault("sandbox", {})
+            .setdefault("runtime", {})
+        )
+        sandbox_runtime["template_name"] = workspace.derived_template_name
+        sandbox_runtime["namespace"] = (
+            workspace.claim_namespace or self.sandbox_manager.namespace
+        )
+        updated.setdefault("workspace", workspace.as_record())
+        return updated
 
     def _release_user_session_leases(self, user_id: str) -> None:
         for session in self.sessions.values():

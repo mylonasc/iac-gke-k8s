@@ -81,6 +81,7 @@ class SandboxManager:
             os.getenv("SANDBOX_LOCAL_TIMEOUT_SECONDS", "20")
         )
         self.command_preview_chars = int(os.getenv("LOG_COMMAND_PREVIEW_CHARS", "200"))
+        self.workspace_path = os.getenv("SANDBOX_WORKSPACE_PATH", "/workspace")
         logger.info(
             "sandbox_manager.initialized",
             extra={
@@ -107,6 +108,25 @@ class SandboxManager:
         value = runtime_config.get(key)
         return fallback if value is None else value
 
+    def _workspace_path(self, runtime_config: dict[str, object] | None) -> str:
+        return str(
+            self._value_from_runtime(
+                runtime_config, "workspace_path", self.workspace_path
+            )
+        )
+
+    def _cluster_command_with_workspace(
+        self, command: str, *, runtime_config: dict[str, object] | None = None
+    ) -> str:
+        workspace_path = self._workspace_path(runtime_config)
+        shell_command = (
+            f"export HOME={shlex.quote(workspace_path)} && "
+            f"mkdir -p {shlex.quote(workspace_path)} && "
+            f"cd {shlex.quote(workspace_path)} && "
+            f"{command}"
+        )
+        return f"sh -lc {shlex.quote(shell_command)}"
+
     def get_config(self) -> dict[str, str | int]:
         """Return current sandbox manager runtime settings."""
         return {
@@ -119,6 +139,7 @@ class SandboxManager:
             "gateway_ready_timeout": self.gateway_ready_timeout,
             "max_output_chars": self.max_output_chars,
             "local_timeout_seconds": self.local_timeout_seconds,
+            "workspace_path": self.workspace_path,
         }
 
     def update_config(
@@ -201,9 +222,12 @@ class SandboxManager:
         cleaned_stdout = "\n".join(cleaned_lines)
         return cleaned_stdout, assets
 
-    def _build_python_script(self, code: str) -> str:
+    def _build_python_script(
+        self, code: str, *, runtime_config: dict[str, object] | None = None
+    ) -> str:
         """Wrap user python code with helper utilities and auto-asset behavior."""
         encoded = json.dumps(code)
+        workspace_path = json.dumps(self._workspace_path(runtime_config))
         return textwrap.dedent(
             f"""
             import ast
@@ -221,6 +245,14 @@ class SandboxManager:
             _asset_marker = {json.dumps(self.ASSET_MARKER)}
             _exposed_assets = []
             _candidate_paths = []
+            _workspace_path = {workspace_path}
+
+            os.environ["HOME"] = _workspace_path
+            try:
+                os.makedirs(_workspace_path, exist_ok=True)
+                os.chdir(_workspace_path)
+            except Exception:
+                pass
 
             def expose_asset(path, filename=None, mime_type=None):
                 p = Path(path)
@@ -377,6 +409,10 @@ class SandboxManager:
                 runtime_config, "max_output_chars", self.max_output_chars
             )
         )
+        command = self._cluster_command_with_workspace(
+            command,
+            runtime_config=runtime_config,
+        )
         logger.info(
             "sandbox.cluster.start",
             extra={
@@ -496,6 +532,7 @@ class SandboxManager:
                 runtime_config, "max_output_chars", self.max_output_chars
             )
         )
+        workspace_path = self._workspace_path(runtime_config)
         if isinstance(command, str):
             preview_source = command
         else:
@@ -521,6 +558,8 @@ class SandboxManager:
                 text=True,
                 timeout=local_timeout_seconds,
                 executable="/bin/sh" if shell else None,
+                cwd=workspace_path if os.path.isdir(workspace_path) else None,
+                env={**os.environ, "HOME": workspace_path},
             )
             clean_stdout, assets = self._extract_asset_markers(completed.stdout)
             stdout = self._truncate(clean_stdout, max_output_chars)
@@ -610,7 +649,7 @@ class SandboxManager:
                 "code_len": len(code),
             },
         )
-        script = self._build_python_script(code)
+        script = self._build_python_script(code, runtime_config=runtime_config)
         if mode == "local":
             command = [sys.executable, "-c", script]
             return self._run_local(
@@ -637,7 +676,7 @@ class SandboxManager:
         runtime_config: dict[str, object] | None = None,
     ) -> SandboxExecutionResult:
         """Execute Python against an existing lease-backed cluster sandbox."""
-        script = self._build_python_script(code)
+        script = self._build_python_script(code, runtime_config=runtime_config)
         command = f"python -c {shlex.quote(script)}"
         return self._run_cluster(
             command=command,
