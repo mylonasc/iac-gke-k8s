@@ -11,11 +11,6 @@ This repository manages Agent Sandbox through Terraform (`module.k8s`), not thro
   - label: `workload-isolation=gvisor`
   - taint: `sandbox.gke.io/runtime=gvisor:NoSchedule`
 
-Snapshot-specific investigation and design notes live in:
-
-- `k8s/agent-sandbox-snapshots.md`
-- `../../../apps/sandboxed-react-agent/docs/sandbox-session-persistence-and-snapshots.md`
-
 ## Terraform-managed resources
 
 Agent Sandbox resources are defined in `k8s/agent_sandbox.tf` and include:

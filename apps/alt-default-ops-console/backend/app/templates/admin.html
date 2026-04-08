@@ -63,8 +63,16 @@
         <button class="btn" onclick="createClaim()">Create claim</button>
       </div>
       <table>
-        <thead><tr><th>Claim</th><th>Action</th></tr></thead>
+        <thead><tr><th>Claim</th><th>Template</th><th>Ready</th><th>Created</th><th>Age</th><th>Session</th><th>User</th><th>Workspace</th><th>Action</th></tr></thead>
         <tbody id="claims"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>Sandboxes</h2>
+      <table>
+        <thead><tr><th>Name</th><th>Claim</th><th>Template</th><th>Ready</th><th>Phase</th><th>Created</th><th>Age</th></tr></thead>
+        <tbody id="sandboxesDetailed"></tbody>
       </table>
     </div>
 
@@ -77,8 +85,43 @@
         <button class="btn" onclick="upsertWarmPool()">Start / Update warm pool</button>
       </div>
       <table>
-        <thead><tr><th>Name</th><th>Template</th><th>Ready</th><th>Replicas</th><th>Actions</th></tr></thead>
+        <thead><tr><th>Name</th><th>Template</th><th>Ready</th><th>Replicas</th><th>Created</th><th>Age</th><th>Actions</th></tr></thead>
         <tbody id="warmPools"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>Workspace and Lease Health</h2>
+      <div class="grid" id="workspaceHealthMetrics"></div>
+      <div id="workspaceHealthSummary" class="muted" style="margin-top: 10px;">No workspace/session health data yet.</div>
+      <div class="row" style="margin-top: 10px; margin-bottom: 8px;">
+        <label>
+          Status
+          <select id="leaseStatusFilter" onchange="applyLeaseEventFilters()">
+            <option value="">All statuses</option>
+          </select>
+        </label>
+        <label>
+          User
+          <input id="leaseUserFilter" placeholder="user id" oninput="applyLeaseEventFilters()" />
+        </label>
+        <label>
+          Session
+          <input id="leaseSessionFilter" placeholder="session id" oninput="applyLeaseEventFilters()" />
+        </label>
+        <button class="btn" type="button" onclick="exportLeaseEventsCsv()">Export filtered CSV</button>
+      </div>
+      <table style="margin-top: 8px;">
+        <thead><tr><th>Date</th><th>Leases Created</th><th>Leases Released</th></tr></thead>
+        <tbody id="leaseDaily"></tbody>
+      </table>
+      <table style="margin-top: 8px;">
+        <thead><tr><th>Status</th><th>Samples</th><th>Avg Lifetime</th><th>Min</th><th>Max</th></tr></thead>
+        <tbody id="leaseLifetime"></tbody>
+      </table>
+      <table style="margin-top: 8px;">
+        <thead><tr><th>Status</th><th>Lease</th><th>Claim</th><th>Session</th><th>User</th><th>Created</th><th>Released</th><th>Duration</th></tr></thead>
+        <tbody id="leaseEvents"></tbody>
       </table>
     </div>
 
@@ -136,6 +179,44 @@
 const BASE = "{{ base_path }}";
 let allPods = [];
 let availableTemplates = [];
+let allLeaseEvents = [];
+
+function esc(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function fmtDateTime(value) {
+  if (!value) return '-';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return esc(value);
+  return d.toLocaleString();
+}
+
+function fmtAge(seconds) {
+  if (typeof seconds !== 'number' || Number.isNaN(seconds)) return '-';
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h ${minutes % 60}m`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ${hours % 24}h`;
+}
+
+function fmtDuration(seconds) {
+  return fmtAge(seconds);
+}
+
+function csvEscape(value) {
+  const raw = String(value ?? '');
+  const escaped = raw.replace(/"/g, '""');
+  return `"${escaped}"`;
+}
 
 function withBase(path) {
   return `${BASE}${path}`;
@@ -162,10 +243,16 @@ async function refresh() {
     const ov = await api('/api/overview');
     const now = new Date().toLocaleTimeString();
     setMsg('meta', 'mode: ' + (ov.cluster_mode || 'unknown') + ' | namespace: ' + (ov.namespace || '{{ namespace }}') + ' | last refresh: ' + now, 'muted');
+    const sraAdmin = (((ov || {}).ops_integration || {}).sra_admin || {});
+    if (sraAdmin.enabled && !sraAdmin.reachable) {
+      setMsg('action', 'sandboxed-react-agent admin integration unavailable: ' + (sraAdmin.error || 'unknown error'), 'warn');
+    }
     updateTemplateSelectors(ov.sandboxtemplates || []);
     renderDeployments(ov.deployments || []);
-    renderClaims(ov.sandboxclaims || []);
+    renderClaims((ov.sandboxclaims_detailed && ov.sandboxclaims_detailed.length) ? ov.sandboxclaims_detailed : (ov.sandboxclaims || []));
+    renderSandboxes((ov.sandboxes_detailed && ov.sandboxes_detailed.length) ? ov.sandboxes_detailed : (ov.sandboxes || []));
     renderWarmPools(ov.sandboxwarmpools || []);
+    renderWorkspaceHealth(ov.workspace_session_health || {}, ov.lease_analytics || {});
     renderNodes(ov.nodes || [], ov.node_summary || {});
     renderResourceSummary(ov.resource_summary || {});
     renderCostEstimate(ov.cost_estimate || {});
@@ -234,9 +321,35 @@ function renderDeployments(items) {
 function renderClaims(items) {
   const tbody = document.getElementById('claims');
   tbody.innerHTML = '';
-  items.forEach(name => {
+  items.forEach((item) => {
+    const name = typeof item === 'string' ? item : (item.name || '');
+    const template = typeof item === 'string' ? '' : (item.template || '');
+    const ready = typeof item === 'string' ? '' : (item.ready_condition === true ? 'yes' : (item.ready_condition === false ? 'no' : '-'));
+    const createdAt = typeof item === 'string' ? null : item.created_at;
+    const ageSeconds = typeof item === 'string' ? null : item.age_seconds;
+    const owner = typeof item === 'string' ? {} : (item.owner || {});
+    const session = owner.session_id || '-';
+    const user = owner.user_id || '-';
+    const workspace = owner.workspace_status || '-';
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${name}</td><td><button class="btn" onclick="deleteClaim('${name}')">Delete</button></td>`;
+    tr.innerHTML = `<td>${esc(name)}</td><td>${esc(template)}</td><td>${esc(ready)}</td><td>${fmtDateTime(createdAt)}</td><td>${fmtAge(ageSeconds)}</td><td>${esc(session)}</td><td>${esc(user)}</td><td>${esc(workspace)}</td><td><button class="btn" onclick="deleteClaim('${name}')">Delete</button></td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+function renderSandboxes(items) {
+  const tbody = document.getElementById('sandboxesDetailed');
+  tbody.innerHTML = '';
+  items.forEach((item) => {
+    const name = typeof item === 'string' ? item : (item.name || '');
+    const claim = typeof item === 'string' ? '' : (item.claim_name || '');
+    const template = typeof item === 'string' ? '' : (item.template || '');
+    const ready = typeof item === 'string' ? '' : (item.ready_condition === true ? 'yes' : (item.ready_condition === false ? 'no' : '-'));
+    const phase = typeof item === 'string' ? '' : (item.phase || '');
+    const createdAt = typeof item === 'string' ? null : item.created_at;
+    const ageSeconds = typeof item === 'string' ? null : item.age_seconds;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${esc(name)}</td><td>${esc(claim)}</td><td>${esc(template)}</td><td>${esc(ready)}</td><td>${esc(phase)}</td><td>${fmtDateTime(createdAt)}</td><td>${fmtAge(ageSeconds)}</td>`;
     tbody.appendChild(tr);
   });
 }
@@ -249,10 +362,144 @@ function renderWarmPools(items) {
     const template = typeof pool === 'string' ? '' : (pool.template || '');
     const ready = typeof pool === 'string' ? '' : (pool.ready ?? '');
     const replicas = typeof pool === 'string' ? '' : (pool.replicas ?? '');
+    const createdAt = typeof pool === 'string' ? null : pool.created_at;
+    const ageSeconds = typeof pool === 'string' ? null : pool.age_seconds;
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${name}</td><td>${template}</td><td>${ready}</td><td>${replicas}</td><td><button class="btn" onclick="scaleWarmPool('${name}',0)">0</button> <button class="btn" onclick="scaleWarmPool('${name}',1)">1</button> <button class="btn" onclick="scaleWarmPool('${name}',3)">3</button> <button class="btn" onclick="scaleWarmPool('${name}',5)">5</button></td>`;
+    tr.innerHTML = `<td>${esc(name)}</td><td>${esc(template)}</td><td>${esc(ready)}</td><td>${esc(replicas)}</td><td>${fmtDateTime(createdAt)}</td><td>${fmtAge(ageSeconds)}</td><td><button class="btn" onclick="scaleWarmPool('${name}',0)">0</button> <button class="btn" onclick="scaleWarmPool('${name}',1)">1</button> <button class="btn" onclick="scaleWarmPool('${name}',3)">3</button> <button class="btn" onclick="scaleWarmPool('${name}',5)">5</button></td>`;
     tbody.appendChild(tr);
   });
+}
+
+function renderWorkspaceHealth(summary, analytics) {
+  const metrics = document.getElementById('workspaceHealthMetrics');
+  const summaryEl = document.getElementById('workspaceHealthSummary');
+  const dailyTbody = document.getElementById('leaseDaily');
+  const lifetimeTbody = document.getElementById('leaseLifetime');
+
+  const rows = [
+    { key: 'Active leases', value: `${summary.active_leases ?? 0}` },
+    { key: 'Active session leases', value: `${summary.active_session_leases ?? 0}` },
+    { key: 'Expiring soon', value: `${summary.expiring_soon_leases ?? 0}` },
+    { key: 'Stale active', value: `${summary.stale_active_leases ?? 0}` },
+    { key: 'Unhealthy active', value: `${summary.unhealthy_active_leases ?? 0}` },
+    { key: 'Workspaces', value: `${summary.workspace_total ?? 0}` },
+  ];
+  metrics.innerHTML = rows.map((r) => `<div class="metric"><span class="k">${esc(r.key)}</span><span class="v">${esc(r.value)}</span></div>`).join('');
+
+  const statusCounts = summary.status_counts || {};
+  const workspaceCounts = summary.workspace_status_counts || {};
+  const statusText = Object.keys(statusCounts).sort().map((key) => `${key}:${statusCounts[key]}`).join(', ') || 'none';
+  const workspaceText = Object.keys(workspaceCounts).sort().map((key) => `${key}:${workspaceCounts[key]}`).join(', ') || 'none';
+  summaryEl.textContent = `Lease statuses: ${statusText} | Workspace statuses: ${workspaceText}`;
+
+  const createdSeries = analytics.daily_created || [];
+  const releasedByDate = {};
+  (analytics.daily_released || []).forEach((row) => {
+    releasedByDate[row.date] = row.count ?? 0;
+  });
+  dailyTbody.innerHTML = '';
+  createdSeries.forEach((row) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${esc(row.date || '')}</td><td>${esc(row.count ?? 0)}</td><td>${esc(releasedByDate[row.date] ?? 0)}</td>`;
+    dailyTbody.appendChild(tr);
+  });
+
+  lifetimeTbody.innerHTML = '';
+  (analytics.lifetime_by_status || []).forEach((row) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${esc(row.status || '')}</td><td>${esc(row.samples ?? 0)}</td><td>${fmtDuration(row.avg_seconds)}</td><td>${fmtDuration(row.min_seconds)}</td><td>${fmtDuration(row.max_seconds)}</td>`;
+    lifetimeTbody.appendChild(tr);
+  });
+
+  allLeaseEvents = (analytics.recent_events || []).slice(0, 200);
+  const statusFilter = document.getElementById('leaseStatusFilter');
+  const currentStatus = statusFilter.value;
+  const statuses = Array.from(new Set(allLeaseEvents.map((row) => row.status || '').filter(Boolean))).sort();
+  statusFilter.innerHTML = '<option value="">All statuses</option>';
+  statuses.forEach((status) => {
+    const option = document.createElement('option');
+    option.value = status;
+    option.textContent = status;
+    statusFilter.appendChild(option);
+  });
+  if (statuses.includes(currentStatus)) {
+    statusFilter.value = currentStatus;
+  }
+  applyLeaseEventFilters();
+}
+
+function filteredLeaseEvents() {
+  const status = (document.getElementById('leaseStatusFilter').value || '').trim().toLowerCase();
+  const user = (document.getElementById('leaseUserFilter').value || '').trim().toLowerCase();
+  const session = (document.getElementById('leaseSessionFilter').value || '').trim().toLowerCase();
+  return allLeaseEvents
+    .filter((row) => !status || String(row.status || '').toLowerCase() === status)
+    .filter((row) => !user || String(row.user_id || '').toLowerCase().includes(user))
+    .filter((row) => !session || String(row.session_id || '').toLowerCase().includes(session));
+}
+
+function applyLeaseEventFilters() {
+  const eventsTbody = document.getElementById('leaseEvents');
+  eventsTbody.innerHTML = '';
+  filteredLeaseEvents().slice(0, 50).forEach((row) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${esc(row.status || '')}</td><td>${esc(row.lease_id || '')}</td><td>${esc(row.claim_name || '-')}</td><td>${esc(row.session_id || '-')}</td><td>${esc(row.user_id || '-')}</td><td>${fmtDateTime(row.created_at)}</td><td>${fmtDateTime(row.released_at)}</td><td>${fmtDuration(row.duration_seconds)}</td>`;
+    eventsTbody.appendChild(tr);
+  });
+}
+
+function exportLeaseEventsCsv() {
+  const rows = filteredLeaseEvents();
+  const header = [
+    'status',
+    'lease_id',
+    'scope_type',
+    'scope_key',
+    'claim_name',
+    'session_id',
+    'user_id',
+    'workspace_status',
+    'created_at',
+    'last_used_at',
+    'released_at',
+    'duration_seconds',
+    'idle_seconds',
+    'expires_at',
+    'last_error',
+  ];
+  const lines = [header.map(csvEscape).join(',')];
+  rows.forEach((row) => {
+    lines.push(
+      [
+        row.status,
+        row.lease_id,
+        row.scope_type,
+        row.scope_key,
+        row.claim_name,
+        row.session_id,
+        row.user_id,
+        row.workspace_status,
+        row.created_at,
+        row.last_used_at,
+        row.released_at,
+        row.duration_seconds,
+        row.idle_seconds,
+        row.expires_at,
+        row.last_error,
+      ].map(csvEscape).join(',')
+    );
+  });
+
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  a.download = `lease-events-${stamp}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 function renderNodes(items, summary) {

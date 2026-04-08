@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import json
 import secrets
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -90,6 +92,27 @@ class Settings(BaseModel):
     app_base_path: str = Field(
         default_factory=lambda: os.getenv("APP_BASE_PATH", "").strip()
     )
+    sra_admin_api_base_url: str = Field(
+        default_factory=lambda: os.getenv(
+            "SRA_ADMIN_API_BASE_URL",
+            "http://sandboxed-react-agent-backend.alt-default.svc.cluster.local",
+        ).strip()
+    )
+    sra_admin_api_timeout_seconds: float = Field(
+        default_factory=lambda: float(os.getenv("SRA_ADMIN_API_TIMEOUT_SECONDS", "4"))
+    )
+    sra_admin_enabled: bool = Field(
+        default_factory=lambda: (
+            os.getenv("SRA_ADMIN_ENABLED", "1").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+    )
+    sra_admin_analytics_days: int = Field(
+        default_factory=lambda: int(os.getenv("SRA_ADMIN_ANALYTICS_DAYS", "14"))
+    )
+    sra_admin_recent_limit: int = Field(
+        default_factory=lambda: int(os.getenv("SRA_ADMIN_RECENT_LIMIT", "200"))
+    )
 
 
 @dataclass(frozen=True)
@@ -157,6 +180,71 @@ def _external_path(path: str) -> str:
     normalized = _normalize_base_path(settings.app_base_path)
     suffix = path if path.startswith("/") else f"/{path}"
     return f"{normalized}{suffix}" if normalized else suffix
+
+
+def _to_utc_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _iso(value: Any) -> str | None:
+    parsed = _to_utc_datetime(value)
+    if parsed is None:
+        return None
+    return parsed.isoformat()
+
+
+def _age_seconds(created: Any, *, now: datetime) -> int | None:
+    created_dt = _to_utc_datetime(created)
+    if created_dt is None:
+        return None
+    diff = int((now - created_dt).total_seconds())
+    if diff < 0:
+        return 0
+    return diff
+
+
+def _conditions_summary(conditions: Any) -> list[dict[str, Any]]:
+    if not isinstance(conditions, list):
+        return []
+    summary: list[dict[str, Any]] = []
+    for condition in conditions:
+        if not isinstance(condition, dict):
+            continue
+        summary.append(
+            {
+                "type": str(condition.get("type") or ""),
+                "status": str(condition.get("status") or ""),
+                "reason": str(condition.get("reason") or ""),
+                "message": str(condition.get("message") or ""),
+                "last_transition_time": _iso(condition.get("lastTransitionTime")),
+            }
+        )
+    return summary
+
+
+def _is_ready_from_conditions(conditions: list[dict[str, Any]]) -> bool | None:
+    for condition in conditions:
+        if str(condition.get("type") or "") == "Ready":
+            return str(condition.get("status") or "").lower() == "true"
+    return None
 
 
 use_mock_cluster = settings.mock_cluster
@@ -338,6 +426,85 @@ def _check_authorization(claims: dict[str, Any]) -> None:
     )
 
 
+def _upstream_auth_headers(request: Request) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    authorization = (request.headers.get("authorization") or "").strip()
+    if authorization:
+        headers["Authorization"] = authorization
+        return headers
+
+    forwarded_token = (request.headers.get("x-forwarded-access-token") or "").strip()
+    if forwarded_token:
+        headers["Authorization"] = f"Bearer {forwarded_token}"
+        return headers
+
+    cookie_token = (request.cookies.get("ops_access_token") or "").strip()
+    if cookie_token:
+        headers["Authorization"] = f"Bearer {cookie_token}"
+        return headers
+    return headers
+
+
+async def _fetch_sra_admin_payload(request: Request) -> dict[str, Any]:
+    if not settings.sra_admin_enabled:
+        return {
+            "enabled": False,
+            "reachable": False,
+            "index": {},
+            "analytics": {},
+            "error": "SRA admin integration is disabled",
+        }
+
+    base_url = settings.sra_admin_api_base_url.rstrip("/")
+    if not base_url:
+        return {
+            "enabled": True,
+            "reachable": False,
+            "index": {},
+            "analytics": {},
+            "error": "SRA_ADMIN_API_BASE_URL is empty",
+        }
+
+    headers = _upstream_auth_headers(request)
+    params = {
+        "days": max(1, min(int(settings.sra_admin_analytics_days), 90)),
+        "limit": max(1, min(int(settings.sra_admin_recent_limit), 2000)),
+    }
+
+    timeout = max(float(settings.sra_admin_api_timeout_seconds), 1.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as http_client:
+            index_response, analytics_response = await asyncio.gather(
+                http_client.get(
+                    f"{base_url}/api/admin/ops/sandbox-index",
+                    headers=headers,
+                    params={"limit": params["limit"]},
+                ),
+                http_client.get(
+                    f"{base_url}/api/admin/ops/lease-analytics",
+                    headers=headers,
+                    params=params,
+                ),
+            )
+        index_response.raise_for_status()
+        analytics_response.raise_for_status()
+        return {
+            "enabled": True,
+            "reachable": True,
+            "index": index_response.json(),
+            "analytics": analytics_response.json(),
+            "error": "",
+        }
+    except Exception as exc:
+        return {
+            "enabled": True,
+            "reachable": False,
+            "index": {},
+            "analytics": {},
+            "error": str(exc),
+        }
+
+
 async def require_auth(
     authorization: str | None = Header(default=None),
     x_forwarded_access_token: str | None = Header(default=None),
@@ -455,38 +622,124 @@ async def token_inspect(
         }
 
 
-def _deployment_status(deploy: Any) -> dict[str, Any]:
+def _deployment_status(deploy: Any, *, now: datetime) -> dict[str, Any]:
     spec_replicas = int(deploy.spec.replicas or 0)
     status = deploy.status
+    created_at = _iso(deploy.metadata.creation_timestamp)
     return {
         "name": deploy.metadata.name,
         "desired": spec_replicas,
         "ready": int(status.ready_replicas or 0),
         "available": int(status.available_replicas or 0),
         "updated": int(status.updated_replicas or 0),
+        "created_at": created_at,
+        "age_seconds": _age_seconds(deploy.metadata.creation_timestamp, now=now),
+        "conditions": [
+            {
+                "type": str(condition.type or ""),
+                "status": str(condition.status or ""),
+                "reason": str(condition.reason or ""),
+                "message": str(condition.message or ""),
+            }
+            for condition in (status.conditions or [])
+        ],
         "manageable": deploy.metadata.name in settings.managed_deployments,
     }
 
 
-def _pod_status(pod: Any) -> dict[str, Any]:
+def _pod_status(pod: Any, *, now: datetime) -> dict[str, Any]:
     return {
         "name": pod.metadata.name,
         "phase": pod.status.phase,
         "node": pod.spec.node_name,
         "ready": any((c.ready for c in (pod.status.container_statuses or []))),
+        "created_at": _iso(pod.metadata.creation_timestamp),
+        "age_seconds": _age_seconds(pod.metadata.creation_timestamp, now=now),
     }
 
 
-def _warm_pool_status(warm_pool: dict[str, Any]) -> dict[str, Any]:
+def _warm_pool_status(warm_pool: dict[str, Any], *, now: datetime) -> dict[str, Any]:
     metadata = warm_pool.get("metadata") or {}
     spec = warm_pool.get("spec") or {}
     status = warm_pool.get("status") or {}
     template_ref = spec.get("sandboxTemplateRef") or {}
+    conditions = _conditions_summary(status.get("conditions"))
+    ready_condition = _is_ready_from_conditions(conditions)
+    created_at = _iso(metadata.get("creationTimestamp"))
     return {
         "name": metadata.get("name"),
         "replicas": int(spec.get("replicas") or 0),
         "template": template_ref.get("name") or "",
         "ready": int(status.get("readyReplicas") or 0),
+        "ready_condition": ready_condition,
+        "conditions": conditions,
+        "created_at": created_at,
+        "age_seconds": _age_seconds(metadata.get("creationTimestamp"), now=now),
+    }
+
+
+def _claim_status(
+    claim: dict[str, Any],
+    *,
+    now: datetime,
+    claim_owner_index: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    metadata = claim.get("metadata") or {}
+    spec = claim.get("spec") or {}
+    status = claim.get("status") or {}
+    template_ref = spec.get("sandboxTemplateRef") or {}
+    conditions = _conditions_summary(status.get("conditions"))
+    ready_condition = _is_ready_from_conditions(conditions)
+    name = str(metadata.get("name") or "")
+    owner = claim_owner_index.get(name) or {}
+    return {
+        "name": name,
+        "namespace": str(metadata.get("namespace") or ""),
+        "uid": str(metadata.get("uid") or ""),
+        "template": str(template_ref.get("name") or ""),
+        "created_at": _iso(metadata.get("creationTimestamp")),
+        "age_seconds": _age_seconds(metadata.get("creationTimestamp"), now=now),
+        "generation": int(metadata.get("generation") or 0),
+        "phase": str(status.get("phase") or ""),
+        "claim_status": str(status.get("status") or ""),
+        "ready_condition": ready_condition,
+        "conditions": conditions,
+        "owner": {
+            "lease_id": owner.get("lease_id"),
+            "session_id": owner.get("session_id"),
+            "user_id": owner.get("user_id"),
+            "status": owner.get("status"),
+            "workspace_status": owner.get("workspace_status"),
+            "expires_at": owner.get("expires_at"),
+            "expires_soon": owner.get("expires_soon"),
+            "last_used_at": owner.get("last_used_at"),
+            "known": bool(owner),
+        },
+    }
+
+
+def _sandbox_status(
+    sandbox: dict[str, Any],
+    *,
+    now: datetime,
+) -> dict[str, Any]:
+    metadata = sandbox.get("metadata") or {}
+    spec = sandbox.get("spec") or {}
+    status = sandbox.get("status") or {}
+    claim_ref = spec.get("sandboxClaimRef") or status.get("sandboxClaimRef") or {}
+    conditions = _conditions_summary(status.get("conditions"))
+    ready_condition = _is_ready_from_conditions(conditions)
+    return {
+        "name": str(metadata.get("name") or ""),
+        "namespace": str(metadata.get("namespace") or ""),
+        "uid": str(metadata.get("uid") or ""),
+        "created_at": _iso(metadata.get("creationTimestamp")),
+        "age_seconds": _age_seconds(metadata.get("creationTimestamp"), now=now),
+        "phase": str(status.get("phase") or ""),
+        "ready_condition": ready_condition,
+        "conditions": conditions,
+        "claim_name": str(claim_ref.get("name") or ""),
+        "template": str((spec.get("sandboxTemplateRef") or {}).get("name") or ""),
     }
 
 
@@ -703,8 +956,24 @@ def _node_summary(nodes: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _overview_data() -> dict[str, Any]:
+async def _overview_data(request: Request) -> dict[str, Any]:
     ns = settings.target_namespace
+    now = datetime.now(UTC)
+    sra_admin = await _fetch_sra_admin_payload(request)
+    sra_index = (
+        sra_admin.get("index") if isinstance(sra_admin.get("index"), dict) else {}
+    )
+    sra_analytics = (
+        sra_admin.get("analytics")
+        if isinstance(sra_admin.get("analytics"), dict)
+        else {}
+    )
+    claim_owner_index = (
+        sra_index.get("claim_owner_index")
+        if isinstance(sra_index.get("claim_owner_index"), dict)
+        else {}
+    )
+
     if use_mock_cluster:
         mock_nodes = [
             {
@@ -724,6 +993,48 @@ def _overview_data() -> dict[str, Any]:
                 "phase_counts": {"Running": 1},
             },
         ]
+        claims_detailed = [
+            {
+                "name": name,
+                "namespace": ns,
+                "uid": f"mock-{name}",
+                "template": "python-runtime-template",
+                "created_at": _iso(now),
+                "age_seconds": 0,
+                "generation": 1,
+                "phase": "Ready",
+                "claim_status": "ready",
+                "ready_condition": True,
+                "conditions": [],
+                "owner": {
+                    "lease_id": None,
+                    "session_id": None,
+                    "user_id": None,
+                    "status": None,
+                    "workspace_status": None,
+                    "expires_at": None,
+                    "expires_soon": False,
+                    "last_used_at": None,
+                    "known": False,
+                },
+            }
+            for name in sorted(mock_state["claims"])
+        ]
+        sandboxes_detailed = [
+            {
+                "name": name,
+                "namespace": ns,
+                "uid": f"mock-sandbox-{name}",
+                "created_at": _iso(now),
+                "age_seconds": 0,
+                "phase": "Running",
+                "ready_condition": True,
+                "conditions": [],
+                "claim_name": name,
+                "template": "python-runtime-template",
+            }
+            for name in sorted(mock_state["sandboxes"])
+        ]
         return {
             "cluster_mode": "mock",
             "namespace": ns,
@@ -731,6 +1042,9 @@ def _overview_data() -> dict[str, Any]:
                 {
                     "name": name,
                     **state,
+                    "created_at": _iso(now),
+                    "age_seconds": 0,
+                    "conditions": [],
                     "manageable": name in settings.managed_deployments,
                 }
                 for name, state in sorted(mock_state["deployments"].items())
@@ -741,17 +1055,25 @@ def _overview_data() -> dict[str, Any]:
                     "phase": "Running",
                     "node": "mock-node-local",
                     "ready": True,
+                    "created_at": _iso(now),
+                    "age_seconds": 0,
                 }
             ],
             "services": ["alt-default-ops-console"],
             "sandboxclaims": sorted(mock_state["claims"]),
             "sandboxes": sorted(mock_state["sandboxes"]),
+            "sandboxclaims_detailed": claims_detailed,
+            "sandboxes_detailed": sandboxes_detailed,
             "sandboxwarmpools": [
                 {
                     "name": name,
                     "replicas": int(state.get("replicas") or 0),
                     "template": str(state.get("template") or ""),
                     "ready": int(state.get("replicas") or 0),
+                    "ready_condition": True,
+                    "conditions": [],
+                    "created_at": _iso(now),
+                    "age_seconds": 0,
                 }
                 for name, state in sorted(mock_state["warm_pools"].items())
             ],
@@ -792,6 +1114,15 @@ def _overview_data() -> dict[str, Any]:
                 ],
                 cluster_count=1,
             ),
+            "workspace_session_health": sra_index.get("summary") or {},
+            "lease_analytics": sra_analytics,
+            "ops_integration": {
+                "sra_admin": {
+                    "enabled": bool(sra_admin.get("enabled")),
+                    "reachable": bool(sra_admin.get("reachable")),
+                    "error": str(sra_admin.get("error") or ""),
+                }
+            },
         }
 
     if not apps_api or not core_api or not custom_api:
@@ -899,18 +1230,40 @@ def _overview_data() -> dict[str, Any]:
 
     cost_estimate = _cost_estimate(node_rows, pvc_rows, cluster_count=1)
 
+    claims_detailed = sorted(
+        (
+            _claim_status(
+                claim,
+                now=now,
+                claim_owner_index=claim_owner_index,
+            )
+            for claim in claims
+        ),
+        key=lambda item: str(item.get("name") or ""),
+    )
+    sandboxes_detailed = sorted(
+        (_sandbox_status(sandbox, now=now) for sandbox in sandboxes),
+        key=lambda item: str(item.get("name") or ""),
+    )
+
     return {
         "cluster_mode": "live",
         "namespace": ns,
         "deployments": sorted(
-            (_deployment_status(d) for d in deployments), key=lambda x: x["name"]
+            (_deployment_status(d, now=now) for d in deployments),
+            key=lambda x: x["name"],
         ),
-        "pods": sorted((_pod_status(p) for p in pods), key=lambda x: x["name"]),
+        "pods": sorted(
+            (_pod_status(p, now=now) for p in pods),
+            key=lambda x: x["name"],
+        ),
         "services": sorted((s.metadata.name for s in services)),
         "sandboxclaims": [c.get("metadata", {}).get("name") for c in claims],
         "sandboxes": [s.get("metadata", {}).get("name") for s in sandboxes],
+        "sandboxclaims_detailed": claims_detailed,
+        "sandboxes_detailed": sandboxes_detailed,
         "sandboxwarmpools": sorted(
-            (_warm_pool_status(w) for w in warm_pools),
+            (_warm_pool_status(w, now=now) for w in warm_pools),
             key=lambda x: str(x.get("name") or ""),
         ),
         "sandboxtemplates": sorted(
@@ -921,6 +1274,15 @@ def _overview_data() -> dict[str, Any]:
         "pvcs": sorted(pvc_rows, key=lambda x: str(x.get("name") or "")),
         "resource_summary": resource_summary,
         "cost_estimate": cost_estimate,
+        "workspace_session_health": sra_index.get("summary") or {},
+        "lease_analytics": sra_analytics,
+        "ops_integration": {
+            "sra_admin": {
+                "enabled": bool(sra_admin.get("enabled")),
+                "reachable": bool(sra_admin.get("reachable")),
+                "error": str(sra_admin.get("error") or ""),
+            }
+        },
     }
 
 
@@ -1055,8 +1417,11 @@ async def me(claims: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
 
 
 @app.get("/api/overview")
-async def overview(_: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
-    return _overview_data()
+async def overview(
+    request: Request,
+    _: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
+    return await _overview_data(request)
 
 
 @app.get("/api/sandboxes")

@@ -48,7 +48,3 @@
 
 # Local diagnostics bundles
 gke-diagnostics-*.tgz
-
-# Local DBs
-**/*.db
-

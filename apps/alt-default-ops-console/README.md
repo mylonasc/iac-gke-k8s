@@ -10,6 +10,9 @@ It provides:
 - node inventory with ready count and instance-type breakdown
 - resource snapshot for running nodes and PVCs
 - hourly cost estimate for nodes, PVC capacity, and GKE cluster fee
+- workspace/session lease health and historical lease analytics (via sandboxed-react-agent admin API)
+- richer sandbox claim details (creation time, age, status, ownership mapping to lease/session/user)
+- lease event filtering (status/user/session) and CSV export from the admin UI
 - API endpoints to scale managed deployments up/down
 - API endpoints to create/delete Agent Sandbox claims
 - API endpoints to create/scale Agent Sandbox warm pools
@@ -64,6 +67,11 @@ Edit `apps/alt-default-ops-console/k8s/configmap.yaml`:
 - `JWT_EMAIL_ALLOWLIST`: comma-separated email allowlist (recommended)
 - `JWT_REQUIRED_GROUP`: optional required group claim
 - `APP_BASE_PATH`: external ingress path prefix (set to `/alt-default-ops` in cluster, empty locally)
+- `SRA_ADMIN_ENABLED`: enable integration with sandboxed-react-agent admin endpoints (`1`/`0`)
+- `SRA_ADMIN_API_BASE_URL`: internal base URL for sandboxed-react-agent backend
+- `SRA_ADMIN_API_TIMEOUT_SECONDS`: timeout per request
+- `SRA_ADMIN_ANALYTICS_DAYS`: history window for lease analytics
+- `SRA_ADMIN_RECENT_LIMIT`: max recent lease events shown
 
 If `JWT_EMAIL_ALLOWLIST` and `JWT_REQUIRED_GROUP` are both empty, any valid JWT for issuer/audience is accepted.
 For strict single-user access, set `JWT_EMAIL_ALLOWLIST` to exactly your Google account email.

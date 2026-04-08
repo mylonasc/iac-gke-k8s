@@ -221,7 +221,7 @@ For a new user on first sandbox use, the backend should create:
 2. per-user GSA
 3. per-user KSA in the app namespace
 4. Workload Identity binding from KSA to GSA
-5. managed-folder IAM granting only that GSA access to that folder
+5. bucket IAM granting only that GSA access to that bucket
 6. user-derived `SandboxTemplate`
 
 The backend should do this via Google Cloud APIs and Kubernetes APIs, not by shelling out to `gcloud`.
@@ -234,9 +234,9 @@ When a user workspace is deleted or deactivated, the backend should:
 2. delete the derived sandbox template
 3. remove the per-user KSA
 4. remove the Workload Identity binding
-5. remove managed-folder IAM bindings
-6. delete or archive managed-folder contents according to retention policy
-7. delete the managed folder if allowed
+5. remove bucket IAM bindings
+6. delete or archive bucket contents according to retention policy
+7. delete the bucket if allowed
 8. delete the per-user GSA
 9. mark the workspace as deleted in persistent metadata
 

@@ -12,3 +12,8 @@ data:
   JWT_AUDIENCE: "oauth2-proxy"
   JWT_EMAIL_ALLOWLIST: "mylonas.charilaos@gmail.com"
   JWT_REQUIRED_GROUP: ""
+  SRA_ADMIN_ENABLED: "1"
+  SRA_ADMIN_API_BASE_URL: "http://sandboxed-react-agent-backend.alt-default.svc.cluster.local"
+  SRA_ADMIN_API_TIMEOUT_SECONDS: "4"
+  SRA_ADMIN_ANALYTICS_DAYS: "14"
+  SRA_ADMIN_RECENT_LIMIT: "200"
