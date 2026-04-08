@@ -50,6 +50,16 @@ const baseSession = {
         template_name: "python-runtime-template-small",
       },
     },
+    available_sandboxes: {
+      profiles: ["persistent_workspace", "transient"],
+      execution_models: ["session", "ephemeral"],
+      templates: [
+        { name: "python-runtime-template-small" },
+        { name: "python-runtime-template-large" },
+        { name: "template-one" },
+        { name: "template-two" },
+      ],
+    },
   },
 };
 
@@ -81,8 +91,11 @@ function renderView(overrides = {}) {
 }
 
 describe("ChatView sandbox controls", () => {
-  it("renders workspace and effective runtime status", () => {
+  it("renders workspace and effective runtime status", async () => {
+    const user = userEvent.setup();
     renderView();
+
+    await user.click(screen.getByRole("button", { name: "Sandbox controls" }));
 
     expect(screen.getByText("Workspace: ready")).toBeInTheDocument();
     expect(screen.getByText("Pending: no")).toBeInTheDocument();
@@ -97,6 +110,7 @@ describe("ChatView sandbox controls", () => {
 
     renderView({ onRefreshSandboxStatus, onRunSessionSandboxAction });
 
+    await user.click(screen.getByRole("button", { name: "Sandbox controls" }));
     await user.click(screen.getByRole("button", { name: "Refresh status" }));
     await user.click(screen.getByRole("button", { name: "Release lease" }));
     await user.click(screen.getByRole("button", { name: "Reconcile workspace" }));
@@ -120,15 +134,16 @@ describe("ChatView sandbox controls", () => {
       ...baseSession,
       sandbox_policy: {
         profile: "transient",
-        template_name: "python-runtime-template-large",
+        template_name: "python-runtime-template-small",
         execution_model: "ephemeral",
       },
     };
 
     renderView({ session, onUpdateSessionSandboxPolicy });
 
+    await user.click(screen.getByRole("button", { name: "Sandbox controls" }));
     await user.selectOptions(screen.getByLabelText("Session profile"), "");
-    await user.clear(screen.getByLabelText("Session template"));
+    await user.selectOptions(screen.getByLabelText("Session template"), "");
     await user.selectOptions(screen.getByLabelText("Session execution model"), "");
     await user.click(screen.getByRole("button", { name: "Apply session policy" }));
 
@@ -158,10 +173,9 @@ describe("ChatView sandbox controls", () => {
 
     const { rerender } = renderView({ session: firstSession });
 
-    const templateInput = screen.getByLabelText("Session template");
-    await user.clear(templateInput);
-    await user.type(templateInput, "manual-template");
-    expect(screen.getByLabelText("Session template")).toHaveValue("manual-template");
+    await user.click(screen.getByRole("button", { name: "Sandbox controls" }));
+    await user.selectOptions(screen.getByLabelText("Session template"), "python-runtime-template-small");
+    expect(screen.getByLabelText("Session template")).toHaveValue("python-runtime-template-small");
 
     rerender(
       <ChatView

@@ -141,7 +141,9 @@ resource "kubernetes_manifest" "agent_sandbox_template" {
                   port = 8888
                 }
                 initialDelaySeconds = 10
-                periodSeconds       = 1
+                periodSeconds       = 2
+                timeoutSeconds      = 5
+                failureThreshold    = 30
               }
               resources = {
                 requests = {
@@ -222,7 +224,9 @@ resource "kubernetes_manifest" "agent_sandbox_template_small" {
                   port = 8888
                 }
                 initialDelaySeconds = 10
-                periodSeconds       = 1
+                periodSeconds       = 2
+                timeoutSeconds      = 5
+                failureThreshold    = 30
               }
               resources = {
                 requests = {
@@ -303,7 +307,9 @@ resource "kubernetes_manifest" "agent_sandbox_template_large" {
                   port = 8888
                 }
                 initialDelaySeconds = 10
-                periodSeconds       = 1
+                periodSeconds       = 2
+                timeoutSeconds      = 5
+                failureThreshold    = 30
               }
               resources = {
                 requests = {
@@ -389,7 +395,9 @@ resource "kubernetes_manifest" "agent_sandbox_template_pydata" {
                   port = 8888
                 }
                 initialDelaySeconds = 10
-                periodSeconds       = 1
+                periodSeconds       = 2
+                timeoutSeconds      = 5
+                failureThreshold    = 30
               }
               resources = {
                 requests = {

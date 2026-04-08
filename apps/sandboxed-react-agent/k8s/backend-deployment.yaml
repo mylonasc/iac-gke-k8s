@@ -38,7 +38,7 @@ spec:
         - name: dockerhub-regcred
       containers:
         - name: backend
-          image: docker.io/mylonasc/magarathea:sandboxed-react-agent-backend-0.6.14
+          image: docker.io/mylonasc/magarathea:sandboxed-react-agent-backend-0.6.15
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000

@@ -151,7 +151,7 @@
   min-height: 0;
   height: 100%;
   display: grid;
-  grid-template-columns: 260px 28px minmax(0, 1fr) 28px 260px;
+  grid-template-columns: 260px 28px minmax(0, 1fr);
   gap: 0;
   min-width: 0;
   overflow: hidden;
@@ -175,30 +175,8 @@
   grid-column: 3;
 }
 
-.right-divider-slot {
-  grid-column: 4;
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-}
-
-.right-pane-slot {
-  grid-column: 5;
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-}
-
 .app-grid.threads-collapsed {
-  grid-template-columns: 0 28px minmax(0, 1fr) 28px 260px;
-}
-
-.app-grid.runtime-collapsed {
-  grid-template-columns: 260px 28px minmax(0, 1fr) 28px 0;
-}
-
-.app-grid.threads-collapsed.runtime-collapsed {
-  grid-template-columns: 0 28px minmax(0, 1fr) 28px 0;
+  grid-template-columns: 0 28px minmax(0, 1fr);
 }
 
 .panel,
@@ -353,11 +331,23 @@
 
 .chat-header {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   gap: 0.7rem;
   padding: 0.65rem 0.9rem;
   border-bottom: 1px solid var(--line);
+  min-width: 0;
+}
+
+.chat-header-main {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.7rem;
+  min-width: 0;
+}
+
+.chat-header-main > * {
   min-width: 0;
 }
 
@@ -399,12 +389,13 @@
   min-width: 0;
 }
 
-.sandbox-status-strip {
-  border-bottom: 1px solid var(--line);
-  padding: 0.5rem 1rem;
+.sandbox-controls-panel {
+  border-top: 1px solid var(--line);
+  padding-top: 0.55rem;
   display: grid;
   gap: 0.45rem;
-  background: color-mix(in srgb, var(--bg-soft) 60%, var(--bg));
+  background: color-mix(in srgb, var(--bg-soft) 60%, transparent);
+  border-radius: 10px;
 }
 
 .sandbox-status-row {
@@ -1353,18 +1344,20 @@ code {
   }
 
   .chat-header {
+    width: 100%;
+    gap: 0.5rem;
+  }
+
+  .chat-header-main {
     flex-direction: column;
     align-items: flex-start;
-    width: 100%;
-    border-bottom: 0;
-    padding-bottom: 0.2rem;
   }
 
   .chat-header-mobile {
     gap: 0.45rem;
   }
 
-  .chat-header > * {
+  .chat-header-main > * {
     min-width: 0;
     max-width: 100%;
   }
@@ -1406,6 +1399,18 @@ code {
   .runtime-panel {
     border-left: 0;
     border-right: 0;
+  }
+
+  .sandbox-policy-row {
+    align-items: stretch;
+  }
+
+  .sandbox-policy-row label,
+  .sandbox-policy-row select,
+  .sandbox-policy-row input,
+  .sandbox-policy-row button {
+    width: 100%;
+    min-width: 0;
   }
 }
 

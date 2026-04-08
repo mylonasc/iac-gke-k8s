@@ -6,7 +6,6 @@ import { useAppState } from "./hooks/useAppState";
 import { useMediaQuery } from "./hooks/useMediaQuery";
 import { MobileDrawer } from "./layout/MobileDrawer";
 import { ThreadsSidebar } from "./layout/ThreadsSidebar";
-import { RuntimePicker } from "./runtime/RuntimePicker";
 import { SettingsPanel } from "./settings/SettingsPanel";
 
 function IdentityBadge({ userId, userTier }) {
@@ -16,23 +15,6 @@ function IdentityBadge({ userId, userTier }) {
       <span className="identity-label">User</span>
       <code>{userId}</code>
       <span className="pill">Tier: {userTier}</span>
-    </div>
-  );
-}
-
-function HeaderActions({ isMobile, onOpenThreads, onOpenRuntime, onOpenSettings }) {
-  if (!isMobile) return null;
-  return (
-    <div className="mobile-actions">
-      <button type="button" className="btn btn-subtle" onClick={onOpenThreads}>
-        Threads
-      </button>
-      <button type="button" className="btn btn-subtle" onClick={onOpenRuntime}>
-        Runtime
-      </button>
-      <button type="button" className="btn btn-subtle" onClick={onOpenSettings}>
-        Settings
-      </button>
     </div>
   );
 }
@@ -63,11 +45,9 @@ function MobileTopBar({ title, canShare, onShare, theme, onToggleTheme, onOpenMe
 export default function App() {
   const isMobile = useMediaQuery("(max-width: 980px)");
   const [threadsDrawerOpen, setThreadsDrawerOpen] = useState(false);
-  const [runtimeDrawerOpen, setRuntimeDrawerOpen] = useState(false);
   const [settingsDrawerOpen, setSettingsDrawerOpen] = useState(false);
   const [menuDrawerOpen, setMenuDrawerOpen] = useState(false);
   const [threadsDocked, setThreadsDocked] = useState(true);
-  const [runtimeDocked, setRuntimeDocked] = useState(true);
 
   const {
     apiBase,
@@ -86,7 +66,6 @@ export default function App() {
     handleResetSession,
     handleSaveConfig,
     handleShare,
-    handleTemplateQuickSelect,
     isSharedView,
     loadConfig,
     loadAdminOps,
@@ -101,21 +80,10 @@ export default function App() {
     updateSessionSandboxPolicy,
     shareInFlight,
     tab,
-    templateSaving,
     theme,
     userId,
     userTier,
   } = useAppState();
-
-  const runtimeQuickSwitchDisabled =
-    configLoading ||
-    configSaving ||
-    templateSaving ||
-    config.sandbox_profile !== "transient";
-  const runtimeQuickSwitchReason =
-    config.sandbox_profile !== "transient"
-      ? "Quick template switching is available only in transient sandbox profile."
-      : "";
 
   return (
     <main className="app-v2">
@@ -164,9 +132,7 @@ export default function App() {
       )}
 
       <div
-        className={`app-grid ${!isMobile && !threadsDocked ? "threads-collapsed" : ""} ${
-          !isMobile && !runtimeDocked ? "runtime-collapsed" : ""
-        }`}
+        className={`app-grid ${!isMobile && !threadsDocked ? "threads-collapsed" : ""}`}
       >
         {!isMobile ? (
           <div className="left-pane-slot">
@@ -237,32 +203,6 @@ export default function App() {
           )}
         </section>
 
-        {!isMobile && !isSharedView ? (
-          <div className="right-divider-slot">
-            <button
-              type="button"
-              className="pane-divider"
-              title={runtimeDocked ? "Tuck runtime" : "Untuck runtime"}
-              aria-label={runtimeDocked ? "Tuck runtime" : "Untuck runtime"}
-              onClick={() => setRuntimeDocked((prev) => !prev)}
-            >
-              {runtimeDocked ? ">" : "<"}
-            </button>
-          </div>
-        ) : null}
-
-        {!isMobile && !isSharedView ? (
-          <div className="right-pane-slot">
-            {runtimeDocked ? (
-              <RuntimePicker
-                value={config.sandbox_template_name}
-                onChange={handleTemplateQuickSelect}
-                disabled={runtimeQuickSwitchDisabled}
-                disabledReason={runtimeQuickSwitchReason}
-              />
-            ) : null}
-          </div>
-        ) : null}
       </div>
 
       <MobileDrawer open={threadsDrawerOpen} title="Threads" onClose={() => setThreadsDrawerOpen(false)}>
@@ -282,20 +222,6 @@ export default function App() {
           shareInFlight={shareInFlight}
         />
       </MobileDrawer>
-
-      {!isSharedView ? (
-        <MobileDrawer open={runtimeDrawerOpen} title="Runtime" onClose={() => setRuntimeDrawerOpen(false)}>
-          <RuntimePicker
-            value={config.sandbox_template_name}
-            onChange={(template) => {
-              handleTemplateQuickSelect(template);
-              setRuntimeDrawerOpen(false);
-            }}
-            disabled={runtimeQuickSwitchDisabled}
-            disabledReason={runtimeQuickSwitchReason}
-          />
-        </MobileDrawer>
-      ) : null}
 
       <MobileDrawer open={settingsDrawerOpen} title="Settings" onClose={() => setSettingsDrawerOpen(false)}>
         <SettingsPanel
@@ -343,16 +269,6 @@ export default function App() {
               }}
             >
               Threads
-            </button>
-            <button
-              type="button"
-              className="btn btn-subtle"
-              onClick={() => {
-                setMenuDrawerOpen(false);
-                setRuntimeDrawerOpen(true);
-              }}
-            >
-              Runtime
             </button>
             <button
               type="button"

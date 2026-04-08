@@ -25,7 +25,6 @@ export function useAppState() {
   const [isSharedView, setIsSharedView] = useState(false);
   const [configLoading, setConfigLoading] = useState(false);
   const [configSaving, setConfigSaving] = useState(false);
-  const [templateSaving, setTemplateSaving] = useState(false);
   const [configError, setConfigError] = useState("");
   const [configMessage, setConfigMessage] = useState("");
   const [adminOpsLoading, setAdminOpsLoading] = useState(false);
@@ -275,6 +274,7 @@ export function useAppState() {
   useEffect(() => {
     if (isSharedView || tab !== "chat" || !activeSession?.session_id) return undefined;
     const sessionId = activeSession.session_id;
+    loadSessionSandboxStatus(sessionId, { silent: true }).catch(() => undefined);
     const timer = window.setInterval(() => {
       loadSessionSandboxStatus(sessionId, { silent: true }).catch(() => undefined);
     }, 2500);
@@ -346,34 +346,6 @@ export function useAppState() {
         setConfigError(String(error));
       } finally {
         setConfigSaving(false);
-      }
-    },
-    [config, saveConfig]
-  );
-
-  const handleTemplateQuickSelect = useCallback(
-    async (templateName) => {
-      if (!templateName || templateName === config.sandbox_template_name) return;
-      if (config.sandbox_profile !== "transient") {
-        setConfigMessage(
-          "Quick template switch is available only in transient sandbox profile."
-        );
-        return;
-      }
-      const previousTemplate = config.sandbox_template_name;
-      const nextConfig = { ...config, sandbox_template_name: templateName };
-      setConfig(nextConfig);
-      setTemplateSaving(true);
-      setConfigError("");
-      setConfigMessage("");
-      try {
-        await saveConfig(nextConfig);
-        setConfigMessage(`Runtime switched to ${templateName}.`);
-      } catch (error) {
-        setConfig((prev) => ({ ...prev, sandbox_template_name: previousTemplate }));
-        setConfigError(String(error));
-      } finally {
-        setTemplateSaving(false);
       }
     },
     [config, saveConfig]
@@ -468,7 +440,6 @@ export function useAppState() {
     handleResetSession,
     handleSaveConfig,
     handleShare,
-    handleTemplateQuickSelect,
     isSharedView,
     loadConfig,
     loadAdminOps,
@@ -480,7 +451,6 @@ export function useAppState() {
     setTheme,
     shareInFlight,
     tab,
-    templateSaving,
     theme,
     userId,
     userTier,
