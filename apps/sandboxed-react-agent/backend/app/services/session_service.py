@@ -50,6 +50,11 @@ class SessionService:
             tool_calls=record["tool_calls"],
             last_error=record["last_error"],
             share_id=record.get("share_id"),
+            sandbox_policy=(
+                dict(record.get("sandbox_policy") or {})
+                if isinstance(record.get("sandbox_policy"), dict)
+                else {}
+            ),
         )
         self.session_ui.normalize_session_ui_messages(session)
         self.sessions[session.session_id] = session
@@ -72,6 +77,7 @@ class SessionService:
             updated_at=now,
             title=title or "New chat",
             messages=[{"role": "system", "content": SYSTEM_PROMPT}],
+            sandbox_policy={},
         )
         self.sessions[state.session_id] = state
         self.persist_session(state)
@@ -126,6 +132,7 @@ class SessionService:
                 "share_id": session.share_id,
                 "preview": self._session_preview(session),
                 "sandbox": self.get_session_sandbox(session.session_id),
+                "sandbox_policy": dict(session.sandbox_policy or {}),
             }
             for session in sessions
         ]
@@ -143,6 +150,7 @@ class SessionService:
             "share_id": session.share_id,
             "messages": session.ui_messages,
             "sandbox": self.get_session_sandbox(session_id),
+            "sandbox_policy": dict(session.sandbox_policy or {}),
         }
 
     def title_from_text(self, text: str) -> str:

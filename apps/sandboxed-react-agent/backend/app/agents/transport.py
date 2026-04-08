@@ -13,7 +13,7 @@ class AssistantTransportRuntime:
         self,
         *,
         get_or_create_session: Callable[[str | None, str], Any],
-        runtime_context_for_user: Callable[[str], dict[str, Any]],
+        runtime_context_for_session: Callable[[str, str], dict[str, Any]],
         normalize_user_parts: Callable[[list[Any]], list[dict[str, str]]],
         new_user_ui_message: Callable[
             [list[dict[str, str]], str | None], dict[str, Any]
@@ -36,7 +36,7 @@ class AssistantTransportRuntime:
         ui_state: AssistantUIStateAdapter,
     ) -> None:
         self.get_or_create_session = get_or_create_session
-        self.runtime_context_for_user = runtime_context_for_user
+        self.runtime_context_for_session = runtime_context_for_session
         self.normalize_user_parts = normalize_user_parts
         self.new_user_ui_message = new_user_ui_message
         self.new_assistant_ui_message = new_assistant_ui_message
@@ -55,7 +55,6 @@ class AssistantTransportRuntime:
         self.ui_state = ui_state
 
     async def run(self, payload: Any, controller: RunController, user_id: str) -> None:
-        runtime_config = self.runtime_context_for_user(user_id)
         self.ui_state.ensure_state(controller)
 
         existing_session_id = None
@@ -72,6 +71,7 @@ class AssistantTransportRuntime:
             pass
 
         session = self.get_or_create_session(existing_session_id, user_id)
+        runtime_config = self.runtime_context_for_session(user_id, session.session_id)
         controller.state["session_id"] = session.session_id
         self.ui_state.load_session_messages(controller, session.ui_messages)
 

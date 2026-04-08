@@ -97,6 +97,7 @@ class RuntimeConfigService:
         model: str | None = None,
         max_tool_calls_per_turn: int | None = None,
         sandbox_mode: str | None = None,
+        sandbox_profile: str | None = None,
         sandbox_api_url: str | None = None,
         sandbox_template_name: str | None = None,
         sandbox_namespace: str | None = None,
@@ -128,6 +129,7 @@ class RuntimeConfigService:
 
         legacy_updates = {
             "sandbox_mode": sandbox_mode,
+            "sandbox_profile": sandbox_profile,
             "sandbox_api_url": sandbox_api_url,
             "sandbox_template_name": sandbox_template_name,
             "sandbox_namespace": sandbox_namespace,

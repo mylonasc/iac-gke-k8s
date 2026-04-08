@@ -33,6 +33,37 @@ Relevant design notes:
 - `docs/sandbox-session-persistence-and-snapshots.md`
 - `docs/sandbox-fuse-workspaces.md`
 
+## Session Sandbox Control API
+
+The backend exposes session-scoped sandbox control endpoints so runtime selection
+and lifecycle can be managed per chat session (not only per user/global config).
+
+- `GET /api/sessions/{session_id}/sandbox/status`
+  - Returns effective runtime context, current session sandbox policy, lease
+    metadata, workspace status, and available sandbox options.
+- `GET /api/sessions/{session_id}/sandbox/policy`
+  - Returns current persisted session sandbox policy overlay.
+- `PATCH /api/sessions/{session_id}/sandbox/policy`
+  - Updates session sandbox policy (`profile`, `template_name`,
+    `execution_model`, etc.) and returns updated effective status.
+- `POST /api/sessions/{session_id}/sandbox/actions`
+  - Runs lifecycle actions such as `release_lease`, `reconcile_workspace`,
+    `ensure_workspace_async`, and `ensure_workspace`.
+
+The chat UI polls the status endpoint and provides inline session controls for
+refresh, lease release, workspace reconcile, and policy updates.
+
+## Sandbox Toolkit Surface
+
+The sandbox toolkit includes both execution tools and diagnostic/mutating
+control tools:
+
+- Execution: `sandbox_exec_python`, `sandbox_exec_shell`
+- Diagnostics: `sandbox_get_session_status`, `sandbox_get_workspace_status`,
+  `sandbox_list_available_sandboxes`, `sandbox_wait_for_workspace_ready`
+- Mutations: `sandbox_set_session_policy`, `sandbox_release_session_lease`,
+  `sandbox_reconcile_workspace`
+
 ## Deployment diagram (KubeDiagrams)
 
 To render diagrams on demand:
@@ -130,6 +161,14 @@ The backend can enforce JWT/OIDC validation for all `/api/*` routes (except
 - optional: `AUTH_ALGORITHMS` (default `RS256`)
 - optional: `AUTH_EXEMPT_PATH_PREFIXES` (default `/api/health,/api/public/`)
 - optional: `AUTH_USER_ID_CLAIM` (default `sub`)
+
+Admin-only ops endpoints (`/api/admin/ops/*`) are separately gated. Configure at
+least one allowlist in shared environments:
+
+- `OPS_ADMIN_EMAIL_ALLOWLIST` (comma-separated)
+- `OPS_ADMIN_USER_ID_ALLOWLIST` (comma-separated)
+- `OPS_ADMIN_GROUP_ALLOWLIST` (comma-separated)
+- optional: `OPS_ADMIN_ALLOW_ALL_AUTHENTICATED=1` for trusted dev environments
 
 Session ownership is now scoped per authenticated user id claim. By default,
 the backend stores and filters sessions by JWT `sub`.
@@ -476,15 +515,24 @@ Configurable settings include:
 - OpenAI model (`model`)
 - Tool safety limit per turn (`max_tool_calls_per_turn`)
 - Sandbox mode (`local` or `cluster`)
+- Sandbox profile (`persistent_workspace` or `transient`)
 - Sandbox router/template/namespace and execution limits
 - Sandbox execution model (`ephemeral` or `session`)
 - Session sandbox idle TTL (`sandbox_session_idle_ttl_seconds`)
+
+When profile is `transient`, tool calls explicitly bypass user workspace provisioning
+and run against the configured runtime template without per-user FUSE workspace routing.
 
 The panel calls backend API endpoints:
 
 - `GET /api/config`
 - `POST /api/config`
 - `GET /api/sandboxes`
+
+Admin operators can also load an Ops Snapshot from Settings, backed by:
+
+- `GET /api/admin/ops/sandbox-index`
+- `GET /api/admin/ops/workspace-jobs`
 - `GET /api/sandboxes/{lease_id}`
 - `POST /api/sandboxes/{lease_id}/release`
 
@@ -529,6 +577,8 @@ Optional parameters:
 - `GET /api/config`
 - `POST /api/config`
 - `POST /api/sessions/{session_id}/reset`
+- `GET /api/admin/ops/sandbox-index` (admin-only)
+- `GET /api/admin/ops/lease-analytics` (admin-only)
 
 ## Teardown
 

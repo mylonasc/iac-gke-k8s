@@ -77,6 +77,11 @@ export default function App() {
     configLoading,
     configMessage,
     configSaving,
+    adminOpsData,
+    adminOpsError,
+    adminOpsLoading,
+    sandboxStatusLoading,
+    sandboxStatusError,
     createSession,
     handleResetSession,
     handleSaveConfig,
@@ -84,12 +89,16 @@ export default function App() {
     handleTemplateQuickSelect,
     isSharedView,
     loadConfig,
+    loadAdminOps,
+    loadSessionSandboxStatus,
     loadSession,
+    runSessionSandboxAction,
     runtimeKey,
     sessions,
     setConfig,
     setTab,
     setTheme,
+    updateSessionSandboxPolicy,
     shareInFlight,
     tab,
     templateSaving,
@@ -97,6 +106,16 @@ export default function App() {
     userId,
     userTier,
   } = useAppState();
+
+  const runtimeQuickSwitchDisabled =
+    configLoading ||
+    configSaving ||
+    templateSaving ||
+    config.sandbox_profile !== "transient";
+  const runtimeQuickSwitchReason =
+    config.sandbox_profile !== "transient"
+      ? "Quick template switching is available only in transient sandbox profile."
+      : "";
 
   return (
     <main className="app-v2">
@@ -187,6 +206,11 @@ export default function App() {
                 session={activeSession}
                 config={config}
                 onResetSession={handleResetSession}
+                onRefreshSandboxStatus={loadSessionSandboxStatus}
+                onUpdateSessionSandboxPolicy={updateSessionSandboxPolicy}
+                onRunSessionSandboxAction={runSessionSandboxAction}
+                sandboxStatusLoading={sandboxStatusLoading}
+                sandboxStatusError={sandboxStatusError}
                 readOnly={isSharedView}
                 configError={configError}
                 configMessage={configMessage}
@@ -203,7 +227,11 @@ export default function App() {
               configSaving={configSaving}
               configError={configError}
               configMessage={configMessage}
+              adminOpsData={adminOpsData}
+              adminOpsError={adminOpsError}
+              adminOpsLoading={adminOpsLoading}
               onReload={loadConfig}
+              onLoadAdminOps={loadAdminOps}
               onSave={handleSaveConfig}
             />
           )}
@@ -229,7 +257,8 @@ export default function App() {
               <RuntimePicker
                 value={config.sandbox_template_name}
                 onChange={handleTemplateQuickSelect}
-                disabled={configLoading || configSaving || templateSaving}
+                disabled={runtimeQuickSwitchDisabled}
+                disabledReason={runtimeQuickSwitchReason}
               />
             ) : null}
           </div>
@@ -262,7 +291,8 @@ export default function App() {
               handleTemplateQuickSelect(template);
               setRuntimeDrawerOpen(false);
             }}
-            disabled={configLoading || configSaving || templateSaving}
+            disabled={runtimeQuickSwitchDisabled}
+            disabledReason={runtimeQuickSwitchReason}
           />
         </MobileDrawer>
       ) : null}
@@ -276,7 +306,11 @@ export default function App() {
           configSaving={configSaving}
           configError={configError}
           configMessage={configMessage}
+          adminOpsData={adminOpsData}
+          adminOpsError={adminOpsError}
+          adminOpsLoading={adminOpsLoading}
           onReload={loadConfig}
+          onLoadAdminOps={loadAdminOps}
           onSave={async (event) => {
             await handleSaveConfig(event);
             setSettingsDrawerOpen(false);

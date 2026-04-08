@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.agents.factory import AgentFactory
+from app.agents.integrations.sandbox_leases import SandboxLeaseFacade
 from app.agents.integrations.sandbox_sessions import SessionSandboxFacade
 from app.agents.runtime import AgentRuntime
 from app.agents.toolkits.highcharts import HighchartsToolkit, HighchartsToolkitProvider
@@ -11,6 +12,8 @@ from app.agents.toolkits.runtime import CompositeToolRuntime
 from app.agents.toolkits.sandbox import SandboxToolkit
 from app.asset_manager import AssetManager
 from app.frontend_libs import FrontendLibraryCache
+from app.sandbox_lifecycle import SandboxLifecycleService
+from app.sandbox_manager import SandboxExecutionResult
 from app.session_store import SessionStore
 
 
@@ -175,12 +178,284 @@ def test_sandbox_toolkit_exposes_openai_tool_schemas() -> None:
 
     tools = toolkit.get_openai_tools()
 
-    assert [tool["function"]["name"] for tool in tools] == [
-        "sandbox_exec_python",
-        "sandbox_exec_shell",
-    ]
+    names = [tool["function"]["name"] for tool in tools]
+    assert "sandbox_exec_python" in names
+    assert "sandbox_exec_shell" in names
+    assert "sandbox_get_session_status" in names
+    assert "sandbox_set_session_policy" in names
     assert tools[0]["function"]["parameters"]["required"] == ["code"]
     assert tools[1]["function"]["parameters"]["required"] == ["command"]
+
+
+def test_sandbox_toolkit_supports_diagnostic_and_mutating_controls() -> None:
+    session_sandbox = SessionSandboxFacade(_FakeLeaseFacade(), _FakeAssetFacade())
+    callback_calls: list[tuple[str, object]] = []
+
+    toolkit = SandboxToolkit(
+        session_sandbox=session_sandbox,
+        session_id="session-ctrl",
+        runtime_config={"mode": "cluster"},
+        now_iso=lambda: "2026-01-01T00:00:00+00:00",
+        get_session_status=lambda session_id: {
+            "session_id": session_id,
+            "sandbox": {"status": "ready"},
+        },
+        set_session_policy=lambda session_id, policy: (
+            callback_calls.append((session_id, policy))
+            or {"session_id": session_id, "sandbox_policy": policy}
+        ),
+    )
+
+    status_payload_json, status_assets = __import__("asyncio").run(
+        toolkit.run_tool_call(
+            tool_call_id="tool-status",
+            name="sandbox_get_session_status",
+            arguments_json=json.dumps({}),
+        )
+    )
+    status_payload = json.loads(status_payload_json)
+    assert status_payload["ok"] is True
+    assert status_assets == []
+    assert "session-ctrl" in status_payload["stdout"]
+
+    policy_payload_json, _ = __import__("asyncio").run(
+        toolkit.run_tool_call(
+            tool_call_id="tool-policy",
+            name="sandbox_set_session_policy",
+            arguments_json=json.dumps(
+                {
+                    "profile": "transient",
+                    "template_name": "python-runtime-template-large",
+                }
+            ),
+        )
+    )
+    policy_payload = json.loads(policy_payload_json)
+    assert policy_payload["ok"] is True
+    assert callback_calls == [
+        (
+            "session-ctrl",
+            {
+                "clear": False,
+                "profile": "transient",
+                "template_name": "python-runtime-template-large",
+            },
+        )
+    ]
+
+
+def test_sandbox_toolkit_reports_missing_workspace_template_and_starts_reconcile() -> (
+    None
+):
+    class _Repo:
+        def list_active(self):
+            return []
+
+        def upsert(self, lease):
+            return None
+
+        def list_expired(self, now_iso):
+            return []
+
+        def get(self, lease_id):
+            return None
+
+        def get_active_for_scope(self, scope_type, scope_key):
+            return None
+
+        def mark_released(
+            self, lease_id, *, released_at, status="released", last_error=None
+        ):
+            return None
+
+    class _Manager:
+        def __init__(self) -> None:
+            self.mode = "cluster"
+            self.api_url = "http://sandbox-router"
+            self.template_name = "python-runtime-template-small"
+            self.namespace = "alt-default"
+            self.server_port = 8888
+            self.sandbox_ready_timeout = 420
+            self.gateway_ready_timeout = 180
+            self.max_output_chars = 6000
+            self.local_timeout_seconds = 20
+
+        def exec_python(self, code, runtime_config=None):
+            return SandboxExecutionResult(
+                tool_name="sandbox_exec_python",
+                ok=True,
+                stdout=code,
+                stderr="",
+                exit_code=0,
+            )
+
+        def exec_shell(self, command, runtime_config=None):
+            return SandboxExecutionResult(
+                tool_name="sandbox_exec_shell",
+                ok=True,
+                stdout=command,
+                stderr="",
+                exit_code=0,
+            )
+
+        def exec_python_with_sandbox(self, *args, **kwargs):  # pragma: no cover
+            raise AssertionError("should not execute when template is missing")
+
+        def exec_shell_with_sandbox(self, *args, **kwargs):  # pragma: no cover
+            raise AssertionError("should not execute when template is missing")
+
+    reconcile_calls: list[tuple[str, bool]] = []
+    lifecycle = SandboxLifecycleService(
+        sandbox_manager=_Manager(),
+        sandbox_lease_repository=_Repo(),
+        get_user_id_for_session=lambda session_id: "user-1",
+        get_workspace_for_user=lambda user_id: {
+            "workspace_id": "ws-1",
+            "user_id": user_id,
+            "status": "ready",
+            "derived_template_name": "python-runtime-template-user-missing",
+            "claim_namespace": "alt-default",
+        },
+        ensure_workspace_async_for_user=lambda user_id, reconcile_ready=False: (
+            reconcile_calls.append((user_id, reconcile_ready))
+            or ({"workspace_id": "ws-1", "user_id": user_id, "status": "ready"}, True)
+        ),
+    )
+    lifecycle._sandbox_template_exists = lambda **kwargs: False  # type: ignore[method-assign]
+
+    toolkit = SandboxToolkit(
+        session_sandbox=SessionSandboxFacade(
+            SandboxLeaseFacade(lifecycle),
+            _FakeAssetFacade(),
+        ),
+        session_id="session-x",
+        runtime_config={"mode": "cluster"},
+        now_iso=lambda: "2026-01-01T00:00:00+00:00",
+    )
+
+    payload_json, stored_assets = __import__("asyncio").run(
+        toolkit.run_tool_call(
+            tool_call_id="tool-missing-template",
+            name="sandbox_exec_python",
+            arguments_json=json.dumps({"code": "print('hello')"}),
+        )
+    )
+
+    payload = json.loads(payload_json)
+    assert payload["ok"] is False
+    assert (
+        payload["error"]
+        == "Workspace template missing. Reconciliation started; retry in a few seconds."
+    )
+    assert stored_assets == []
+    assert reconcile_calls == [("user-1", True)]
+
+
+def test_sandbox_toolkit_reports_missing_workspace_template_while_reconcile_in_progress() -> (
+    None
+):
+    class _Repo:
+        def list_active(self):
+            return []
+
+        def upsert(self, lease):
+            return None
+
+        def list_expired(self, now_iso):
+            return []
+
+        def get(self, lease_id):
+            return None
+
+        def get_active_for_scope(self, scope_type, scope_key):
+            return None
+
+        def mark_released(
+            self, lease_id, *, released_at, status="released", last_error=None
+        ):
+            return None
+
+    class _Manager:
+        def __init__(self) -> None:
+            self.mode = "cluster"
+            self.api_url = "http://sandbox-router"
+            self.template_name = "python-runtime-template-small"
+            self.namespace = "alt-default"
+            self.server_port = 8888
+            self.sandbox_ready_timeout = 420
+            self.gateway_ready_timeout = 180
+            self.max_output_chars = 6000
+            self.local_timeout_seconds = 20
+
+        def exec_python(self, code, runtime_config=None):
+            return SandboxExecutionResult(
+                tool_name="sandbox_exec_python",
+                ok=True,
+                stdout=code,
+                stderr="",
+                exit_code=0,
+            )
+
+        def exec_shell(self, command, runtime_config=None):
+            return SandboxExecutionResult(
+                tool_name="sandbox_exec_shell",
+                ok=True,
+                stdout=command,
+                stderr="",
+                exit_code=0,
+            )
+
+        def exec_python_with_sandbox(self, *args, **kwargs):  # pragma: no cover
+            raise AssertionError("should not execute when template is missing")
+
+        def exec_shell_with_sandbox(self, *args, **kwargs):  # pragma: no cover
+            raise AssertionError("should not execute when template is missing")
+
+    reconcile_calls: list[tuple[str, bool]] = []
+    lifecycle = SandboxLifecycleService(
+        sandbox_manager=_Manager(),
+        sandbox_lease_repository=_Repo(),
+        get_user_id_for_session=lambda session_id: "user-1",
+        get_workspace_for_user=lambda user_id: {
+            "workspace_id": "ws-1",
+            "user_id": user_id,
+            "status": "ready",
+            "derived_template_name": "python-runtime-template-user-missing",
+            "claim_namespace": "alt-default",
+        },
+        ensure_workspace_async_for_user=lambda user_id, reconcile_ready=False: (
+            reconcile_calls.append((user_id, reconcile_ready))
+            or ({"workspace_id": "ws-1", "user_id": user_id, "status": "ready"}, False)
+        ),
+    )
+    lifecycle._sandbox_template_exists = lambda **kwargs: False  # type: ignore[method-assign]
+
+    toolkit = SandboxToolkit(
+        session_sandbox=SessionSandboxFacade(
+            SandboxLeaseFacade(lifecycle),
+            _FakeAssetFacade(),
+        ),
+        session_id="session-x",
+        runtime_config={"mode": "cluster"},
+        now_iso=lambda: "2026-01-01T00:00:00+00:00",
+    )
+
+    payload_json, stored_assets = __import__("asyncio").run(
+        toolkit.run_tool_call(
+            tool_call_id="tool-missing-template-in-progress",
+            name="sandbox_exec_python",
+            arguments_json=json.dumps({"code": "print('hello')"}),
+        )
+    )
+
+    payload = json.loads(payload_json)
+    assert payload["ok"] is False
+    assert (
+        payload["error"]
+        == "Workspace template missing. Reconciliation in progress; retry in a few seconds."
+    )
+    assert stored_assets == []
+    assert reconcile_calls == [("user-1", True)]
 
 
 def test_composite_tool_runtime_dispatches_to_registered_toolkit() -> None:

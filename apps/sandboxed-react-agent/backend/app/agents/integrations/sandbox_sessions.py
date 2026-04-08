@@ -11,6 +11,12 @@ class SessionSandboxFacade:
     def __init__(
         self, lease_facade: SandboxLeaseFacade, asset_facade: AssetFacade
     ) -> None:
+        """Initialize the session sandbox facade.
+
+        Args:
+            lease_facade: Lease-aware execution adapter.
+            asset_facade: Asset persistence adapter.
+        """
         self.lease_facade = lease_facade
         self.asset_facade = asset_facade
 
@@ -23,6 +29,18 @@ class SessionSandboxFacade:
         runtime_config: dict[str, Any],
         created_at: str,
     ) -> tuple[ToolExecutionPayload, list[dict[str, Any]]]:
+        """Execute Python for a session and persist emitted assets.
+
+        Args:
+            session_id: Session identifier.
+            tool_call_id: Optional tool call identifier.
+            code: Python code to run.
+            runtime_config: Effective runtime configuration.
+            created_at: Timestamp used for persisted assets.
+
+        Returns:
+            A normalized execution payload and persisted asset records.
+        """
         result = self.lease_facade.exec_python_for_session(
             session_id,
             code,
@@ -45,6 +63,18 @@ class SessionSandboxFacade:
         runtime_config: dict[str, Any],
         created_at: str,
     ) -> tuple[ToolExecutionPayload, list[dict[str, Any]]]:
+        """Execute shell for a session and persist emitted assets.
+
+        Args:
+            session_id: Session identifier.
+            tool_call_id: Optional tool call identifier.
+            command: Shell command to run.
+            runtime_config: Effective runtime configuration.
+            created_at: Timestamp used for persisted assets.
+
+        Returns:
+            A normalized execution payload and persisted asset records.
+        """
         result = self.lease_facade.exec_shell_for_session(
             session_id,
             command,
@@ -61,6 +91,15 @@ class SessionSandboxFacade:
     def _payload_from_result(
         self, result: Any, stored_assets: list[dict[str, Any]]
     ) -> ToolExecutionPayload:
+        """Convert execution and persisted asset output into tool payload shape.
+
+        Args:
+            result: Execution result from the sandbox manager/lifecycle.
+            stored_assets: Persisted asset records.
+
+        Returns:
+            Tool payload consumable by API and UI layers.
+        """
         return ToolExecutionPayload(
             tool=result.tool_name,
             ok=result.ok,

@@ -25,7 +25,10 @@ def create_app_runtime() -> AppRuntime:
     async def lifespan(app: FastAPI):
         app.state.agent = agent
         agent.frontend_library_cache.ensure_libraries()
-        yield
+        try:
+            yield
+        finally:
+            agent.close()
 
     app = FastAPI(
         title="sandboxed-react-agent-backend",

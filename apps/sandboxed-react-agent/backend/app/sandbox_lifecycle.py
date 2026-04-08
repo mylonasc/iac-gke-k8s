@@ -126,11 +126,21 @@ class SandboxLifecycleService:
         sandbox_lease_repository: SandboxLeaseRepository,
         get_user_id_for_session: Callable[[str], str | None] | None = None,
         get_workspace_for_user: Callable[[str], dict[str, Any] | None] | None = None,
-        ensure_workspace_async_for_user: Callable[[str], tuple[dict[str, Any], bool]]
+        ensure_workspace_async_for_user: Callable[..., tuple[dict[str, Any], bool]]
         | None = None,
         bind_workspace_claim_for_session: Callable[[str, str | None, str | None], None]
         | None = None,
     ) -> None:
+        """Initialize lifecycle orchestration dependencies.
+
+        Args:
+            sandbox_manager: Low-level sandbox execution manager.
+            sandbox_lease_repository: Persistence adapter for lease records.
+            get_user_id_for_session: Optional resolver from session id to user id.
+            get_workspace_for_user: Optional resolver for workspace snapshot lookup.
+            ensure_workspace_async_for_user: Optional async workspace ensure callback.
+            bind_workspace_claim_for_session: Optional callback to sync claim binding.
+        """
         self.sandbox_manager = sandbox_manager
         self.sandbox_lease_repository = sandbox_lease_repository
         self.get_user_id_for_session = get_user_id_for_session
@@ -152,6 +162,7 @@ class SandboxLifecycleService:
         )
 
         self._state_lock = threading.RLock()
+        self._scope_lock_by_scope: dict[tuple[str, str], threading.Lock] = {}
         self._runtime_by_lease_id: dict[str, _LeaseRuntime] = {}
         self._lease_id_by_scope: dict[tuple[str, str], str] = {}
         self._load_active_scope_index()
@@ -167,7 +178,11 @@ class SandboxLifecycleService:
         )
 
     def get_config(self) -> dict[str, int | str]:
-        """Return lifecycle-related runtime configuration."""
+        """Return lifecycle-related runtime configuration.
+
+        Returns:
+            Lifecycle configuration values used by runtime and toolkit defaults.
+        """
         return {
             "execution_model": self.execution_model,
             "session_idle_ttl_seconds": self.session_idle_ttl_seconds,
@@ -180,7 +195,15 @@ class SandboxLifecycleService:
         execution_model: str | None = None,
         session_idle_ttl_seconds: int | None = None,
     ) -> None:
-        """Update lifecycle execution settings at runtime with validation."""
+        """Update lifecycle execution settings at runtime.
+
+        Args:
+            execution_model: Execution model (``ephemeral`` or ``session``).
+            session_idle_ttl_seconds: Session lease idle TTL in seconds.
+
+        Raises:
+            ValueError: If any supplied value is invalid.
+        """
         if execution_model is not None:
             normalized = execution_model.strip().lower()
             if normalized not in {"ephemeral", "session"}:
@@ -202,8 +225,37 @@ class SandboxLifecycleService:
                 lease.lease_id
             )
 
+    def _scope_lock_for(self, scope_type: str, scope_key: str) -> threading.Lock:
+        scope = (scope_type, scope_key)
+        with self._state_lock:
+            lock = self._scope_lock_by_scope.get(scope)
+            if lock is None:
+                lock = threading.Lock()
+                self._scope_lock_by_scope[scope] = lock
+            return lock
+
+    def _runtime_for_lease(self, lease_id: str) -> _LeaseRuntime | None:
+        with self._state_lock:
+            return self._runtime_by_lease_id.get(lease_id)
+
+    def _register_runtime(self, runtime: _LeaseRuntime) -> None:
+        with self._state_lock:
+            self._runtime_by_lease_id[runtime.lease.lease_id] = runtime
+            self._lease_id_by_scope[
+                (runtime.lease.scope_type, runtime.lease.scope_key)
+            ] = runtime.lease.lease_id
+
+    def _remove_runtime_index(self, lease: SandboxLease) -> None:
+        with self._state_lock:
+            self._runtime_by_lease_id.pop(lease.lease_id, None)
+            self._lease_id_by_scope.pop((lease.scope_type, lease.scope_key), None)
+
     def _ttl_bounds(self) -> tuple[datetime, datetime]:
-        """Calculate current keepalive expiry and hard max expiry bounds."""
+        """Calculate keepalive and hard-expiry bounds.
+
+        Returns:
+            Tuple of idle-expiry and hard-expiry timestamps.
+        """
         now = _now_utc()
         return (
             now + timedelta(seconds=self.session_idle_ttl_seconds),
@@ -213,9 +265,17 @@ class SandboxLifecycleService:
     def _effective_runtime(
         self, runtime_config: dict[str, object] | None
     ) -> dict[str, object]:
-        """Return effective sandbox runtime values with optional request overrides."""
+        """Resolve effective runtime values from defaults and request overrides.
+
+        Args:
+            runtime_config: Optional partial runtime overrides.
+
+        Returns:
+            Effective runtime dictionary.
+        """
         defaults: dict[str, object] = {
             "mode": self.sandbox_manager.mode,
+            "profile": "persistent_workspace",
             "api_url": self.sandbox_manager.api_url,
             "template_name": self.sandbox_manager.template_name,
             "namespace": self.sandbox_manager.namespace,
@@ -239,8 +299,27 @@ class SandboxLifecycleService:
     def _workspace_runtime_overrides(
         self, session_id: str, effective: dict[str, object]
     ) -> dict[str, object]:
+        """Apply workspace-aware runtime routing for persistent profile.
+
+        Args:
+            session_id: Session identifier.
+            effective: Effective runtime dictionary.
+
+        Returns:
+            Updated runtime dictionary.
+
+        Raises:
+            WorkspaceNotReadyError: If workspace is provisioning/reconciling.
+            WorkspaceProvisioningError: If workspace is in terminal error state.
+        """
         mode = str(effective["mode"])
         if mode == "local":
+            return effective
+
+        profile = (
+            str(effective.get("profile") or "persistent_workspace").strip().lower()
+        )
+        if profile == "transient":
             return effective
 
         if self.get_user_id_for_session is None:
@@ -255,7 +334,10 @@ class SandboxLifecycleService:
             workspace = self.get_workspace_for_user(user_id)
 
         if workspace is None and self.ensure_workspace_async_for_user is not None:
-            workspace, started = self.ensure_workspace_async_for_user(user_id)
+            workspace, started = self._ensure_workspace_async_for_user(
+                user_id,
+                reconcile_ready=False,
+            )
             if workspace and str(workspace.get("status") or "") == "ready":
                 pass
             elif started:
@@ -269,28 +351,176 @@ class SandboxLifecycleService:
         status = str(workspace.get("status") or "")
         if status == "ready":
             updated = dict(effective)
-            template_name = workspace.get("derived_template_name")
-            namespace = workspace.get("claim_namespace")
+            template_name = str(workspace.get("derived_template_name") or "").strip()
+            namespace = str(workspace.get("claim_namespace") or "").strip()
             if template_name:
-                updated["template_name"] = str(template_name)
+                updated["template_name"] = template_name
             if namespace:
-                updated["namespace"] = str(namespace)
+                updated["namespace"] = namespace
+
+            resolved_template = str(updated.get("template_name") or "").strip()
+            resolved_namespace = str(updated.get("namespace") or "").strip()
+            if (
+                resolved_template
+                and resolved_namespace
+                and not self._sandbox_template_exists(
+                    namespace=resolved_namespace,
+                    template_name=resolved_template,
+                )
+            ):
+                logger.warning(
+                    "workspace.template_missing",
+                    extra={
+                        "event": "workspace.template_missing",
+                        "user_id": user_id,
+                        "workspace_id": workspace.get("workspace_id"),
+                        "template_name": resolved_template,
+                        "namespace": resolved_namespace,
+                    },
+                )
+                if self.ensure_workspace_async_for_user is not None:
+                    _, started = self._ensure_workspace_async_for_user(
+                        user_id,
+                        reconcile_ready=True,
+                    )
+                    if started:
+                        logger.info(
+                            "workspace.reconcile.started",
+                            extra={
+                                "event": "workspace.reconcile.started",
+                                "user_id": user_id,
+                                "workspace_id": workspace.get("workspace_id"),
+                                "template_name": resolved_template,
+                                "namespace": resolved_namespace,
+                            },
+                        )
+                        raise WorkspaceNotReadyError(
+                            "Workspace template missing. Reconciliation started; retry in a few seconds."
+                        )
+                    logger.warning(
+                        "workspace.reconcile.not_started",
+                        extra={
+                            "event": "workspace.reconcile.not_started",
+                            "user_id": user_id,
+                            "workspace_id": workspace.get("workspace_id"),
+                            "template_name": resolved_template,
+                            "namespace": resolved_namespace,
+                        },
+                    )
+                    raise WorkspaceNotReadyError(
+                        "Workspace template missing. Reconciliation in progress; retry in a few seconds."
+                    )
+                raise WorkspaceProvisioningError(
+                    f"Workspace template '{resolved_template}' not found in namespace '{resolved_namespace}'."
+                )
             return updated
 
-        if status == "pending":
+        if status in {"pending", "reconciling"}:
+            reason = str(workspace.get("status_reason") or "").strip()
+            reason_suffix = f" (reason={reason})" if reason else ""
             raise WorkspaceNotReadyError(
-                "Workspace is still provisioning. Retry in a few seconds."
+                f"Workspace is still provisioning. Retry in a few seconds.{reason_suffix}"
             )
 
         if status == "error":
             detail = str(workspace.get("last_error") or "unknown error")
-            raise WorkspaceProvisioningError(f"Workspace provisioning failed: {detail}")
+            reason = str(workspace.get("status_reason") or "unknown_error")
+            raise WorkspaceProvisioningError(
+                f"Workspace provisioning failed ({reason}): {detail}"
+            )
 
         return effective
+
+    def _ensure_workspace_async_for_user(
+        self, user_id: str, *, reconcile_ready: bool
+    ) -> tuple[dict[str, Any], bool]:
+        """Call workspace async ensure callback with compatibility fallback.
+
+        Args:
+            user_id: User identifier.
+            reconcile_ready: Whether reconcile should run for ready workspace.
+
+        Returns:
+            Tuple of workspace snapshot and started flag.
+        """
+        if self.ensure_workspace_async_for_user is None:
+            return {}, False
+        try:
+            return self.ensure_workspace_async_for_user(
+                user_id,
+                reconcile_ready=reconcile_ready,
+            )
+        except TypeError:
+            return self.ensure_workspace_async_for_user(user_id)
+
+    def _sandbox_template_exists(self, *, namespace: str, template_name: str) -> bool:
+        """Check whether a SandboxTemplate exists in Kubernetes.
+
+        The method fails open for non-404 API errors to avoid false negatives
+        during transient control-plane issues.
+
+        Args:
+            namespace: Kubernetes namespace.
+            template_name: SandboxTemplate name.
+
+        Returns:
+            ``True`` when template exists or lookup is inconclusive, ``False`` on
+            authoritative 404.
+        """
+        try:
+            from kubernetes import client, config
+
+            try:
+                config.load_incluster_config()
+            except Exception:
+                config.load_kube_config()
+
+            api = client.CustomObjectsApi()
+            try:
+                api.get_namespaced_custom_object(
+                    group="extensions.agents.x-k8s.io",
+                    version="v1alpha1",
+                    namespace=namespace,
+                    plural="sandboxtemplates",
+                    name=template_name,
+                )
+                return True
+            except client.exceptions.ApiException as exc:
+                if getattr(exc, "status", None) == 404:
+                    return False
+                logger.warning(
+                    "workspace.template_lookup_failed",
+                    extra={
+                        "event": "workspace.template_lookup_failed",
+                        "template_name": template_name,
+                        "namespace": namespace,
+                        "status": getattr(exc, "status", None),
+                        "error": str(exc),
+                    },
+                )
+                return True
+        except Exception as exc:
+            logger.warning(
+                "workspace.template_lookup_failed",
+                extra={
+                    "event": "workspace.template_lookup_failed",
+                    "template_name": template_name,
+                    "namespace": namespace,
+                    "error": str(exc),
+                },
+            )
+            return True
 
     def _sync_workspace_claim_binding(
         self, scope_type: str, scope_key: str, lease: SandboxLease | None
     ) -> None:
+        """Synchronize claim metadata back to workspace/session view.
+
+        Args:
+            scope_type: Lease scope type.
+            scope_key: Lease scope key.
+            lease: Lease object or ``None`` when clearing binding.
+        """
         if scope_type != "session" or self.bind_workspace_claim_for_session is None:
             return
         self.bind_workspace_claim_for_session(
@@ -302,7 +532,15 @@ class SandboxLifecycleService:
     def _touch_lease(
         self, lease: SandboxLease, *, session_idle_ttl_seconds: int | None = None
     ) -> SandboxLease:
-        """Refresh lease activity timestamps and persist the update."""
+        """Refresh lease activity timestamps and persist update.
+
+        Args:
+            lease: Lease to refresh.
+            session_idle_ttl_seconds: Optional per-call idle TTL override.
+
+        Returns:
+            Updated lease.
+        """
         now = _now_utc()
         idle_ttl = (
             int(session_idle_ttl_seconds)
@@ -328,7 +566,18 @@ class SandboxLifecycleService:
         namespace: str,
         session_idle_ttl_seconds: int,
     ) -> SandboxLease:
-        """Create a new lease model using current sandbox defaults."""
+        """Create a fresh lease model before runtime acquisition.
+
+        Args:
+            scope_type: Scope type (for example ``session``).
+            scope_key: Scope key.
+            template_name: Template name to use for claim acquisition.
+            namespace: Namespace for claim.
+            session_idle_ttl_seconds: Initial idle TTL.
+
+        Returns:
+            New lease object in pending state.
+        """
         now = _now_utc()
         idle_expiry = now + timedelta(seconds=session_idle_ttl_seconds)
         return SandboxLease(
@@ -357,7 +606,19 @@ class SandboxLifecycleService:
         gateway_ready_timeout: int,
         session_idle_ttl_seconds: int,
     ) -> _LeaseRuntime:
-        """Create and enter a sandbox client for the provided lease."""
+        """Create and enter a sandbox client for provided lease.
+
+        Args:
+            lease: Lease metadata object.
+            api_url: Sandbox router URL.
+            server_port: Sandbox runtime server port.
+            sandbox_ready_timeout: Sandbox readiness timeout.
+            gateway_ready_timeout: Gateway readiness timeout.
+            session_idle_ttl_seconds: Lease idle TTL for keepalive updates.
+
+        Returns:
+            Runtime wrapper with entered sandbox client.
+        """
         logger.info(
             "lease.acquire.start",
             extra={
@@ -416,8 +677,7 @@ class SandboxLifecycleService:
         self._touch_lease(lease, session_idle_ttl_seconds=session_idle_ttl_seconds)
 
         runtime = _LeaseRuntime(lease=lease, client=client)
-        self._runtime_by_lease_id[lease.lease_id] = runtime
-        self._lease_id_by_scope[(lease.scope_type, lease.scope_key)] = lease.lease_id
+        self._register_runtime(runtime)
         self._sync_workspace_claim_binding(lease.scope_type, lease.scope_key, lease)
 
         logger.info(
@@ -433,6 +693,11 @@ class SandboxLifecycleService:
         return runtime
 
     def _cleanup_attach_client(self, client: SandboxClient) -> None:
+        """Best-effort cleanup for partially attached sandbox client.
+
+        Args:
+            client: Sandbox client instance.
+        """
         port_forward_process = getattr(client, "port_forward_process", None)
         if port_forward_process is None:
             return
@@ -446,6 +711,14 @@ class SandboxLifecycleService:
             logger.debug("lease.attach.cleanup_failed", exc_info=True)
 
     def _claim_exists(self, lease: SandboxLease) -> bool:
+        """Check whether lease claim still exists in cluster.
+
+        Args:
+            lease: Lease metadata.
+
+        Returns:
+            ``True`` when claim lookup succeeds.
+        """
         if not lease.claim_name:
             return False
         try:
@@ -471,6 +744,15 @@ class SandboxLifecycleService:
     def _wait_for_claim_ready(
         self, lease: SandboxLease, *, timeout_seconds: int
     ) -> bool:
+        """Poll claim conditions until Ready=True or timeout.
+
+        Args:
+            lease: Lease metadata containing claim name.
+            timeout_seconds: Poll timeout seconds.
+
+        Returns:
+            ``True`` when claim becomes ready.
+        """
         if not lease.claim_name:
             return False
         try:
@@ -513,6 +795,22 @@ class SandboxLifecycleService:
         gateway_ready_timeout: int,
         session_idle_ttl_seconds: int,
     ) -> _LeaseRuntime:
+        """Attach runtime client to an existing claim-backed lease.
+
+        Args:
+            lease: Existing persisted lease with claim name.
+            api_url: Sandbox router URL.
+            server_port: Sandbox runtime server port.
+            sandbox_ready_timeout: Sandbox readiness timeout.
+            gateway_ready_timeout: Gateway readiness timeout.
+            session_idle_ttl_seconds: Lease idle TTL.
+
+        Returns:
+            Runtime wrapper with attached client.
+
+        Raises:
+            RuntimeError: If claim metadata is missing or claim no longer exists.
+        """
         if not lease.claim_name:
             raise RuntimeError("cannot attach runtime without claim_name")
         if not self._claim_exists(lease):
@@ -558,8 +856,7 @@ class SandboxLifecycleService:
         self._touch_lease(lease, session_idle_ttl_seconds=session_idle_ttl_seconds)
 
         runtime = _LeaseRuntime(lease=lease, client=client)
-        self._runtime_by_lease_id[lease.lease_id] = runtime
-        self._lease_id_by_scope[(lease.scope_type, lease.scope_key)] = lease.lease_id
+        self._register_runtime(runtime)
         self._sync_workspace_claim_binding(lease.scope_type, lease.scope_key, lease)
 
         logger.info(
@@ -577,8 +874,17 @@ class SandboxLifecycleService:
     def _lookup_scope_lease(
         self, scope_type: str, scope_key: str
     ) -> SandboxLease | None:
-        """Resolve persisted lease metadata for a scope if one exists."""
-        cached_id = self._lease_id_by_scope.get((scope_type, scope_key))
+        """Resolve persisted active lease for scope.
+
+        Args:
+            scope_type: Scope type.
+            scope_key: Scope key.
+
+        Returns:
+            Active lease object if found.
+        """
+        with self._state_lock:
+            cached_id = self._lease_id_by_scope.get((scope_type, scope_key))
         if cached_id:
             record = self.sandbox_lease_repository.get(cached_id)
             if record and record.get("status") in {"pending", "ready"}:
@@ -590,17 +896,31 @@ class SandboxLifecycleService:
         if not record:
             return None
         lease = SandboxLease.from_record(record)
-        self._lease_id_by_scope[(scope_type, scope_key)] = lease.lease_id
+        with self._state_lock:
+            self._lease_id_by_scope[(scope_type, scope_key)] = lease.lease_id
         return lease
 
     def _is_expired(self, lease: SandboxLease) -> bool:
-        """Return True if a lease is past its expiry timestamp."""
+        """Determine whether lease expiry has passed.
+
+        Args:
+            lease: Lease metadata.
+
+        Returns:
+            ``True`` if lease is expired.
+        """
         return _from_iso(lease.expires_at) <= _now_utc()
 
     def _release_runtime_handle(
         self, runtime: _LeaseRuntime, *, status: str, error_text: str | None = None
     ) -> None:
-        """Close an active runtime handle and mark the lease terminal."""
+        """Close runtime handle and mark lease terminal.
+
+        Args:
+            runtime: Active runtime wrapper.
+            status: Terminal lease status.
+            error_text: Optional error text to persist.
+        """
         lease = runtime.lease
         released_at = _to_iso(_now_utc())
         try:
@@ -623,8 +943,7 @@ class SandboxLifecycleService:
             status=status,
             last_error=error_text,
         )
-        self._runtime_by_lease_id.pop(lease.lease_id, None)
-        self._lease_id_by_scope.pop((lease.scope_type, lease.scope_key), None)
+        self._remove_runtime_index(lease)
         self._sync_workspace_claim_binding(lease.scope_type, lease.scope_key, None)
 
         logger.info(
@@ -641,7 +960,11 @@ class SandboxLifecycleService:
         )
 
     def _delete_claim_best_effort(self, lease: SandboxLease) -> None:
-        """Best-effort deletion path for persisted leases without in-memory clients."""
+        """Best-effort deletion of claim for detached persisted leases.
+
+        Args:
+            lease: Lease metadata.
+        """
         if not lease.claim_name:
             return
         try:
@@ -679,7 +1002,16 @@ class SandboxLifecycleService:
         *,
         runtime_config: dict[str, object] | None = None,
     ) -> _LeaseRuntime:
-        """Acquire or reuse a lease runtime for the provided logical scope."""
+        """Acquire or reuse a lease runtime for a logical scope.
+
+        Args:
+            scope_type: Scope type (for example ``session``).
+            scope_key: Scope key.
+            runtime_config: Optional runtime override map.
+
+        Returns:
+            Lease runtime wrapper containing active sandbox client.
+        """
         effective = self._effective_runtime(runtime_config)
         template_name = str(effective["template_name"])
         namespace = str(effective["namespace"])
@@ -688,10 +1020,11 @@ class SandboxLifecycleService:
         sandbox_ready_timeout = int(effective["sandbox_ready_timeout"])
         gateway_ready_timeout = int(effective["gateway_ready_timeout"])
         session_idle_ttl_seconds = int(effective["session_idle_ttl_seconds"])
-        with self._state_lock:
+        scope_lock = self._scope_lock_for(scope_type, scope_key)
+        with scope_lock:
             existing_lease = self._lookup_scope_lease(scope_type, scope_key)
             if existing_lease and self._is_expired(existing_lease):
-                runtime = self._runtime_by_lease_id.get(existing_lease.lease_id)
+                runtime = self._runtime_for_lease(existing_lease.lease_id)
                 if runtime:
                     self._release_runtime_handle(runtime, status="expired")
                 else:
@@ -701,14 +1034,15 @@ class SandboxLifecycleService:
                         released_at=_to_iso(_now_utc()),
                         status="expired",
                     )
-                    self._lease_id_by_scope.pop((scope_type, scope_key), None)
+                    self._remove_runtime_index(existing_lease)
+                    self._sync_workspace_claim_binding(scope_type, scope_key, None)
                 existing_lease = None
 
             if existing_lease and (
                 existing_lease.template_name != template_name
                 or existing_lease.namespace != namespace
             ):
-                runtime = self._runtime_by_lease_id.get(existing_lease.lease_id)
+                runtime = self._runtime_for_lease(existing_lease.lease_id)
                 if runtime:
                     self._release_runtime_handle(runtime, status="released")
                 else:
@@ -718,11 +1052,12 @@ class SandboxLifecycleService:
                         released_at=_to_iso(_now_utc()),
                         status="released",
                     )
-                    self._lease_id_by_scope.pop((scope_type, scope_key), None)
+                    self._remove_runtime_index(existing_lease)
+                    self._sync_workspace_claim_binding(scope_type, scope_key, None)
                 existing_lease = None
 
             if existing_lease:
-                runtime = self._runtime_by_lease_id.get(existing_lease.lease_id)
+                runtime = self._runtime_for_lease(existing_lease.lease_id)
                 if runtime:
                     self._touch_lease(
                         runtime.lease,
@@ -769,7 +1104,8 @@ class SandboxLifecycleService:
                             status="released",
                             last_error=str(exc),
                         )
-                        self._lease_id_by_scope.pop((scope_type, scope_key), None)
+                        self._remove_runtime_index(existing_lease)
+                        self._sync_workspace_claim_binding(scope_type, scope_key, None)
                         existing_lease = None
 
             lease = existing_lease or self._build_fresh_lease(
@@ -790,13 +1126,22 @@ class SandboxLifecycleService:
             )
 
     def release_scope(self, scope_type: str, scope_key: str) -> bool:
-        """Release an active lease for a scope and return whether one existed."""
-        with self._state_lock:
+        """Release active lease for a scope.
+
+        Args:
+            scope_type: Scope type.
+            scope_key: Scope key.
+
+        Returns:
+            ``True`` if a lease existed and was released.
+        """
+        scope_lock = self._scope_lock_for(scope_type, scope_key)
+        with scope_lock:
             lease = self._lookup_scope_lease(scope_type, scope_key)
             if not lease:
                 return False
 
-            runtime = self._runtime_by_lease_id.get(lease.lease_id)
+            runtime = self._runtime_for_lease(lease.lease_id)
             if runtime:
                 self._release_runtime_handle(runtime, status="released")
             else:
@@ -806,20 +1151,38 @@ class SandboxLifecycleService:
                     released_at=_to_iso(_now_utc()),
                     status="released",
                 )
-                self._lease_id_by_scope.pop((scope_type, scope_key), None)
+                self._remove_runtime_index(lease)
+                self._sync_workspace_claim_binding(scope_type, scope_key, None)
             return True
 
     def get_active_scope_lease(
         self, scope_type: str, scope_key: str
     ) -> dict[str, Any] | None:
-        """Return active lease metadata for a scope when available."""
-        with self._state_lock:
+        """Return active lease metadata for scope when available.
+
+        Args:
+            scope_type: Scope type.
+            scope_key: Scope key.
+
+        Returns:
+            Active lease record or ``None``.
+        """
+        scope_lock = self._scope_lock_for(scope_type, scope_key)
+        acquired = scope_lock.acquire(blocking=False)
+        if not acquired:
+            lease = self._lookup_scope_lease(scope_type, scope_key)
+            if not lease:
+                return None
+
+            return lease.as_record()
+
+        try:
             lease = self._lookup_scope_lease(scope_type, scope_key)
             if not lease:
                 return None
 
             if self._is_expired(lease):
-                runtime = self._runtime_by_lease_id.get(lease.lease_id)
+                runtime = self._runtime_for_lease(lease.lease_id)
                 if runtime:
                     self._release_runtime_handle(runtime, status="expired")
                 else:
@@ -829,31 +1192,48 @@ class SandboxLifecycleService:
                         released_at=_to_iso(_now_utc()),
                         status="expired",
                     )
-                    self._lease_id_by_scope.pop((scope_type, scope_key), None)
+                    self._remove_runtime_index(lease)
+                    self._sync_workspace_claim_binding(scope_type, scope_key, None)
                 return None
 
             return lease.as_record()
+        finally:
+            scope_lock.release()
 
     def reap_expired_leases(self) -> int:
-        """Release all currently expired leases and return the release count."""
+        """Release expired leases.
+
+        Returns:
+            Number of leases released during this call.
+        """
         now_iso = _to_iso(_now_utc())
         expired = self.sandbox_lease_repository.list_expired(now_iso)
         released_count = 0
-        with self._state_lock:
-            for record in expired:
-                lease = SandboxLease.from_record(record)
-                runtime = self._runtime_by_lease_id.get(lease.lease_id)
+        for record in expired:
+            lease = SandboxLease.from_record(record)
+            scope_lock = self._scope_lock_for(lease.scope_type, lease.scope_key)
+            with scope_lock:
+                latest = self.sandbox_lease_repository.get(lease.lease_id)
+                if not latest or latest.get("status") not in {"pending", "ready"}:
+                    continue
+
+                latest_lease = SandboxLease.from_record(latest)
+                if not self._is_expired(latest_lease):
+                    continue
+
+                runtime = self._runtime_for_lease(latest_lease.lease_id)
                 if runtime:
                     self._release_runtime_handle(runtime, status="expired")
                 else:
-                    self._delete_claim_best_effort(lease)
+                    self._delete_claim_best_effort(latest_lease)
                     self.sandbox_lease_repository.mark_released(
-                        lease.lease_id,
+                        latest_lease.lease_id,
                         released_at=now_iso,
                         status="expired",
                     )
-                    self._lease_id_by_scope.pop(
-                        (lease.scope_type, lease.scope_key), None
+                    self._remove_runtime_index(latest_lease)
+                    self._sync_workspace_claim_binding(
+                        latest_lease.scope_type, latest_lease.scope_key, None
                     )
                 released_count += 1
         return released_count
@@ -865,7 +1245,16 @@ class SandboxLifecycleService:
         *,
         runtime_config: dict[str, object] | None = None,
     ) -> SandboxExecutionResult:
-        """Execute Python code under current lifecycle execution policy."""
+        """Execute Python according to lifecycle policy.
+
+        Args:
+            session_id: Session identifier.
+            code: Python source code.
+            runtime_config: Optional runtime override map.
+
+        Returns:
+            Normalized sandbox execution result.
+        """
         effective = self._effective_runtime(runtime_config)
         try:
             effective = self._workspace_runtime_overrides(session_id, effective)
@@ -909,7 +1298,16 @@ class SandboxLifecycleService:
         *,
         runtime_config: dict[str, object] | None = None,
     ) -> SandboxExecutionResult:
-        """Execute a shell command under current lifecycle execution policy."""
+        """Execute shell command according to lifecycle policy.
+
+        Args:
+            session_id: Session identifier.
+            command: Shell command string.
+            runtime_config: Optional runtime override map.
+
+        Returns:
+            Normalized sandbox execution result.
+        """
         effective = self._effective_runtime(runtime_config)
         try:
             effective = self._workspace_runtime_overrides(session_id, effective)
@@ -947,21 +1345,50 @@ class SandboxLifecycleService:
             )
 
     def list_sandboxes(self) -> list[dict[str, Any]]:
-        """Return all active leases for API inspection endpoints."""
+        """Return active lease records.
+
+        Returns:
+            Active lease dictionaries.
+        """
         return self.sandbox_lease_repository.list_active()
 
+    def list_all_sandboxes(self, limit: int | None = None) -> list[dict[str, Any]]:
+        """Return active and historical lease records.
+
+        Args:
+            limit: Optional row limit.
+
+        Returns:
+            Lease dictionaries ordered by recency.
+        """
+        return self.sandbox_lease_repository.list_all(limit=limit)
+
     def get_sandbox(self, lease_id: str) -> dict[str, Any] | None:
-        """Return a single lease record by id."""
+        """Return a single lease record.
+
+        Args:
+            lease_id: Lease identifier.
+
+        Returns:
+            Lease record if found, otherwise ``None``.
+        """
         return self.sandbox_lease_repository.get(lease_id)
 
     def release_sandbox(self, lease_id: str) -> bool:
-        """Release a lease by id for manual lifecycle operations."""
+        """Release lease by identifier.
+
+        Args:
+            lease_id: Lease identifier.
+
+        Returns:
+            ``True`` when active lease existed and was released.
+        """
         with self._state_lock:
             record = self.sandbox_lease_repository.get(lease_id)
             if not record or record.get("status") not in {"pending", "ready"}:
                 return False
             lease = SandboxLease.from_record(record)
-            runtime = self._runtime_by_lease_id.get(lease.lease_id)
+            runtime = self._runtime_for_lease(lease.lease_id)
             if runtime:
                 self._release_runtime_handle(runtime, status="released")
             else:
@@ -971,5 +1398,8 @@ class SandboxLifecycleService:
                     released_at=_to_iso(_now_utc()),
                     status="released",
                 )
-                self._lease_id_by_scope.pop((lease.scope_type, lease.scope_key), None)
+                self._remove_runtime_index(lease)
+                self._sync_workspace_claim_binding(
+                    lease.scope_type, lease.scope_key, None
+                )
             return True

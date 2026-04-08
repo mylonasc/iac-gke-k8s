@@ -13,7 +13,7 @@ RUN apt-get update \
     && echo "deb [signed-by=/etc/apt/keyrings/cloud.google.gpg] http://packages.cloud.google.com/apt cloud-sdk main" \
       > /etc/apt/sources.list.d/google-cloud-sdk.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends google-cloud-cli-gke-gcloud-auth-plugin \
+    && apt-get install -y --no-install-recommends google-cloud-cli-gke-gcloud-auth-plugin kubectl \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /app/vendor/frontend-libs \

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass, field
 
 from app.repositories.user_repository import UserRepository
 from app.repositories.user_workspace_repository import UserWorkspaceRepository
+from app.repositories.workspace_job_repository import WorkspaceJobRepository
 from app.services.workspace_async_service import WorkspaceAsyncService
 from app.services.workspace_models import WorkspaceInfraConfig, normalize_dns_label
 from app.services.workspace_provisioning_service import WorkspaceProvisioningService
@@ -135,6 +137,7 @@ class FakeKubernetesAdminClient:
 
 def _build_service(tmp_path, *, fail_on_service_account: bool = False):
     store = SessionStore(db_path=str(tmp_path / "workspace.db"))
+    workspace_job_repository = WorkspaceJobRepository(store)
     google_client = FakeGoogleAdminClient(
         fail_on_service_account=fail_on_service_account
     )
@@ -152,11 +155,18 @@ def _build_service(tmp_path, *, fail_on_service_account: bool = False):
         ),
     )
     service = WorkspaceService(workspace_provisioning_service=provisioning)
-    return store, provisioning, service, google_client, kubernetes_client
+    return (
+        store,
+        provisioning,
+        service,
+        google_client,
+        kubernetes_client,
+        workspace_job_repository,
+    )
 
 
 def test_workspace_provisioning_creates_and_persists_workspace(tmp_path) -> None:
-    store, _, service, google_client, kubernetes_client = _build_service(tmp_path)
+    store, _, service, google_client, kubernetes_client, _ = _build_service(tmp_path)
 
     workspace = service.get_or_create_user_workspace("user-1")
 
@@ -170,10 +180,11 @@ def test_workspace_provisioning_creates_and_persists_workspace(tmp_path) -> None
     stored = store.get_user_workspace("user-1")
     assert stored is not None
     assert stored["status"] == "ready"
+    assert stored["status_reason"] == "provisioned"
 
 
 def test_workspace_provisioning_is_idempotent_for_ready_workspace(tmp_path) -> None:
-    _, _, service, google_client, kubernetes_client = _build_service(tmp_path)
+    _, _, service, google_client, kubernetes_client, _ = _build_service(tmp_path)
 
     first = service.get_or_create_user_workspace("user-1")
     second = service.get_or_create_user_workspace("user-1")
@@ -184,7 +195,7 @@ def test_workspace_provisioning_is_idempotent_for_ready_workspace(tmp_path) -> N
 
 
 def test_workspace_provisioning_marks_error_on_failure(tmp_path) -> None:
-    store, _, service, _, _ = _build_service(tmp_path, fail_on_service_account=True)
+    store, _, service, _, _, _ = _build_service(tmp_path, fail_on_service_account=True)
 
     try:
         service.get_or_create_user_workspace("broken-user")
@@ -196,11 +207,12 @@ def test_workspace_provisioning_marks_error_on_failure(tmp_path) -> None:
     stored = store.get_user_workspace("broken-user")
     assert stored is not None
     assert stored["status"] == "error"
+    assert stored["status_reason"] == "service_account_failed"
     assert stored["last_error"] == "service account creation failed"
 
 
 def test_workspace_deprovisioning_tombstones_workspace(tmp_path) -> None:
-    store, _, service, google_client, kubernetes_client = _build_service(tmp_path)
+    store, _, service, google_client, kubernetes_client, _ = _build_service(tmp_path)
 
     workspace = service.get_or_create_user_workspace("user-1")
     deleted = service.delete_workspace_for_user("user-1", delete_data=True)
@@ -216,11 +228,12 @@ def test_workspace_deprovisioning_tombstones_workspace(tmp_path) -> None:
     stored = store.get_user_workspace("user-1")
     assert stored is not None
     assert stored["status"] == "deleted"
+    assert stored["status_reason"] == "deprovisioned"
     assert stored["deleted_at"]
 
 
 def test_workspace_delete_returns_false_when_missing(tmp_path) -> None:
-    _, _, service, _, _ = _build_service(tmp_path)
+    _, _, service, _, _, _ = _build_service(tmp_path)
 
     assert service.delete_workspace_for_user("missing-user", delete_data=False) is False
 
@@ -235,24 +248,28 @@ def test_workspace_dns_name_normalization_is_stable() -> None:
 
 
 def test_workspace_async_service_starts_background_provisioning(tmp_path) -> None:
-    _, provisioning, _, _, _ = _build_service(tmp_path)
+    _, provisioning, _, _, _, workspace_job_repository = _build_service(tmp_path)
     async_service = WorkspaceAsyncService(
         workspace_provisioning_service=provisioning,
+        workspace_job_repository=workspace_job_repository,
         max_workers=1,
     )
 
-    workspace, started = async_service.ensure_workspace_async("user-1")
+    try:
+        workspace, started = async_service.ensure_workspace_async("user-1")
 
-    assert workspace.status in {"pending", "ready"}
-    assert started is True
-    future = async_service.get_pending_future("user-1")
-    if future is not None:
-        resolved = future.result(timeout=5)
-        assert resolved.status == "ready"
+        assert workspace.status in {"pending", "ready"}
+        assert started is True
+        future = async_service.get_pending_future("user-1")
+        if future is not None:
+            resolved = future.result(timeout=5)
+            assert resolved.status == "ready"
+    finally:
+        async_service.shutdown(wait=False)
 
 
 def test_workspace_async_service_does_not_duplicate_pending_work(tmp_path) -> None:
-    _, provisioning, _, _, _ = _build_service(tmp_path)
+    _, provisioning, _, _, _, workspace_job_repository = _build_service(tmp_path)
     gate = threading.Event()
     original = provisioning.provision_prepared_workspace
 
@@ -263,12 +280,184 @@ def test_workspace_async_service_does_not_duplicate_pending_work(tmp_path) -> No
     provisioning.provision_prepared_workspace = delayed_provision  # type: ignore[method-assign]
     async_service = WorkspaceAsyncService(
         workspace_provisioning_service=provisioning,
+        workspace_job_repository=workspace_job_repository,
         max_workers=1,
     )
 
-    _, started_first = async_service.ensure_workspace_async("user-1")
-    _, started_second = async_service.ensure_workspace_async("user-1")
-    gate.set()
+    try:
+        _, started_first = async_service.ensure_workspace_async("user-1")
+        _, started_second = async_service.ensure_workspace_async("user-1")
+        gate.set()
 
-    assert started_first is True
-    assert started_second is False
+        assert started_first is True
+        assert started_second is False
+    finally:
+        gate.set()
+        async_service.shutdown(wait=False)
+
+
+def test_workspace_async_service_can_reconcile_ready_workspace(tmp_path) -> None:
+    (
+        _,
+        provisioning,
+        _,
+        _,
+        kubernetes_client,
+        workspace_job_repository,
+    ) = _build_service(tmp_path)
+    async_service = WorkspaceAsyncService(
+        workspace_provisioning_service=provisioning,
+        workspace_job_repository=workspace_job_repository,
+        max_workers=1,
+    )
+
+    try:
+        ready_workspace = provisioning.ensure_workspace_for_user("user-1")
+        initial_template_calls = len(kubernetes_client.created_templates)
+
+        workspace, started = async_service.ensure_workspace_async(
+            "user-1",
+            reconcile_ready=True,
+        )
+
+        assert workspace.workspace_id == ready_workspace.workspace_id
+        assert started is True
+        future = async_service.get_pending_future("user-1")
+        if future is not None:
+            resolved = future.result(timeout=5)
+            assert resolved.status == "ready"
+
+        assert len(kubernetes_client.created_templates) >= initial_template_calls
+    finally:
+        async_service.shutdown(wait=False)
+
+
+def test_workspace_async_service_pending_state_is_db_backed(tmp_path) -> None:
+    (
+        _,
+        provisioning,
+        _,
+        _,
+        _,
+        workspace_job_repository,
+    ) = _build_service(tmp_path)
+    gate = threading.Event()
+    original = provisioning.provision_prepared_workspace
+
+    def delayed_provision(workspace):
+        gate.wait(timeout=5)
+        return original(workspace)
+
+    provisioning.provision_prepared_workspace = delayed_provision  # type: ignore[method-assign]
+    async_service = WorkspaceAsyncService(
+        workspace_provisioning_service=provisioning,
+        workspace_job_repository=workspace_job_repository,
+        max_workers=1,
+    )
+
+    async_service_2 = WorkspaceAsyncService(
+        workspace_provisioning_service=provisioning,
+        workspace_job_repository=workspace_job_repository,
+        max_workers=1,
+    )
+    try:
+        _, started = async_service.ensure_workspace_async("user-1")
+        assert started is True
+        assert async_service.is_pending("user-1") is True
+
+        assert async_service_2.is_pending("user-1") is True
+
+        gate.set()
+        pending = async_service.get_pending_future("user-1")
+        if pending is not None:
+            pending.result(timeout=5)
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if not async_service_2.is_pending("user-1"):
+                break
+            time.sleep(0.05)
+        assert async_service_2.is_pending("user-1") is False
+    finally:
+        gate.set()
+        async_service.shutdown(wait=False)
+        async_service_2.shutdown(wait=False)
+
+
+def test_workspace_async_service_retries_transient_failures(tmp_path) -> None:
+    (
+        _,
+        provisioning,
+        _,
+        _,
+        _,
+        workspace_job_repository,
+    ) = _build_service(tmp_path)
+    original = provisioning.provision_prepared_workspace
+    calls = {"count": 0}
+
+    def flaky_provision(workspace):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("transient provisioning error")
+        return original(workspace)
+
+    provisioning.provision_prepared_workspace = flaky_provision  # type: ignore[method-assign]
+    async_service = WorkspaceAsyncService(
+        workspace_provisioning_service=provisioning,
+        workspace_job_repository=workspace_job_repository,
+        max_workers=1,
+        poll_interval_seconds=0.05,
+        max_retry_attempts=3,
+        retry_backoff_seconds=0.05,
+    )
+
+    try:
+        _, started = async_service.ensure_workspace_async("user-1")
+        assert started is True
+
+        deadline = time.time() + 8
+        while time.time() < deadline:
+            if not async_service.is_pending("user-1"):
+                break
+            time.sleep(0.05)
+
+        assert async_service.is_pending("user-1") is False
+        workspace = provisioning.get_workspace_for_user("user-1")
+        assert workspace is not None
+        assert workspace.status == "ready"
+
+        jobs = workspace_job_repository.list_jobs(limit=5, include_terminal=True)
+        assert jobs
+        latest = jobs[0]
+        assert latest["status"] == "succeeded"
+        assert int(latest["attempt_count"]) >= 2
+    finally:
+        async_service.shutdown(wait=False)
+
+
+def test_workspace_async_service_shutdown_stops_dispatcher(tmp_path) -> None:
+    _, provisioning, _, _, _, workspace_job_repository = _build_service(tmp_path)
+    async_service = WorkspaceAsyncService(
+        workspace_provisioning_service=provisioning,
+        workspace_job_repository=workspace_job_repository,
+        max_workers=1,
+        poll_interval_seconds=0.05,
+    )
+
+    assert async_service._dispatcher.is_alive() is True
+    async_service.shutdown(wait=False)
+    time.sleep(0.1)
+    assert async_service._dispatcher.is_alive() is False
+
+
+def test_workspace_transition_guard_rejects_invalid_state_change(tmp_path) -> None:
+    _, provisioning, _, _, _, _ = _build_service(tmp_path)
+    workspace = provisioning.ensure_workspace_for_user("user-1")
+    workspace.status = "deleting"
+
+    try:
+        provisioning.provision_prepared_workspace(workspace)
+    except RuntimeError as exc:
+        assert "invalid workspace status transition" in str(exc)
+    else:
+        raise AssertionError("expected invalid transition to raise RuntimeError")

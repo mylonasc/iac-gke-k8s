@@ -32,7 +32,11 @@ class SandboxExecutionResult:
     claim_name: str | None = None
 
     def as_tool_payload(self) -> str:
-        """Serialize the result into a stable JSON payload for tool responses."""
+        """Serialize the execution result into tool payload JSON.
+
+        Returns:
+            JSON string consumed by transport and UI layers.
+        """
         payload = {
             "tool": self.tool_name,
             "ok": self.ok,
@@ -57,6 +61,7 @@ class SandboxManager:
     """
 
     def __init__(self) -> None:
+        """Initialize manager defaults from environment configuration."""
         self.mode = os.getenv("SANDBOX_MODE", "cluster").strip().lower()
         if self.mode not in {"cluster", "local"}:
             self.mode = "cluster"
@@ -95,7 +100,14 @@ class SandboxManager:
         )
 
     def _command_preview(self, command: str) -> str:
-        """Return a bounded preview for logging potentially long commands."""
+        """Return a bounded command preview for logs.
+
+        Args:
+            command: Full command string.
+
+        Returns:
+            Original command or truncated preview.
+        """
         if len(command) <= self.command_preview_chars:
             return command
         return command[: self.command_preview_chars] + "..."
@@ -128,7 +140,11 @@ class SandboxManager:
         return f"sh -lc {shlex.quote(shell_command)}"
 
     def get_config(self) -> dict[str, str | int]:
-        """Return current sandbox manager runtime settings."""
+        """Return current sandbox manager runtime settings.
+
+        Returns:
+            Runtime configuration map used by toolkit defaults.
+        """
         return {
             "mode": self.mode,
             "api_url": self.api_url,
@@ -154,7 +170,22 @@ class SandboxManager:
         max_output_chars: int | None = None,
         local_timeout_seconds: int | None = None,
     ) -> None:
-        """Apply runtime configuration updates with basic validation."""
+        """Apply runtime configuration updates with validation.
+
+        Args:
+            mode: Execution mode (``cluster`` or ``local``).
+            api_url: Sandbox API base URL.
+            template_name: Default SandboxTemplate name.
+            namespace: Kubernetes namespace for sandbox resources.
+            server_port: Sandbox server port.
+            sandbox_ready_timeout: Sandbox readiness timeout in seconds.
+            gateway_ready_timeout: Gateway readiness timeout in seconds.
+            max_output_chars: Output truncation cap.
+            local_timeout_seconds: Local subprocess timeout in seconds.
+
+        Raises:
+            ValueError: If supplied values fail validation rules.
+        """
         if mode is not None:
             normalized = mode.strip().lower()
             if normalized not in {"cluster", "local"}:
@@ -188,13 +219,28 @@ class SandboxManager:
             self.local_timeout_seconds = local_timeout_seconds
 
     def _truncate(self, value: str, max_output_chars: int) -> str:
-        """Trim stdout/stderr to configured maximum output length."""
+        """Trim output text to configured maximum length.
+
+        Args:
+            value: Raw output text.
+            max_output_chars: Maximum output length.
+
+        Returns:
+            Truncated output with marker when truncation occurs.
+        """
         if len(value) <= max_output_chars:
             return value
         return value[:max_output_chars] + "\n...[truncated]"
 
     def _extract_asset_markers(self, stdout: str) -> tuple[str, list[dict[str, str]]]:
-        """Extract and remove asset marker lines emitted by sandbox helpers."""
+        """Extract asset marker lines from stdout.
+
+        Args:
+            stdout: Raw stdout stream.
+
+        Returns:
+            Tuple of cleaned stdout and extracted asset payloads.
+        """
         assets: list[dict[str, str]] = []
         cleaned_lines: list[str] = []
         for line in stdout.splitlines():
@@ -225,7 +271,15 @@ class SandboxManager:
     def _build_python_script(
         self, code: str, *, runtime_config: dict[str, object] | None = None
     ) -> str:
-        """Wrap user python code with helper utilities and auto-asset behavior."""
+        """Build wrapped Python script with helper utilities.
+
+        Args:
+            code: User Python source code.
+            runtime_config: Optional runtime configuration overrides.
+
+        Returns:
+            Executable Python script text.
+        """
         encoded = json.dumps(code)
         workspace_path = json.dumps(self._workspace_path(runtime_config))
         return textwrap.dedent(
@@ -323,7 +377,18 @@ class SandboxManager:
         lease_id: str | None = None,
         claim_name: str | None = None,
     ) -> SandboxExecutionResult:
-        """Convert low-level cluster execution output into normalized result."""
+        """Convert raw cluster result into normalized execution output.
+
+        Args:
+            tool_name: Tool name for payload reporting.
+            result: Raw result object returned by sandbox client.
+            max_output_chars: Output truncation cap.
+            lease_id: Optional lease identifier.
+            claim_name: Optional claim name.
+
+        Returns:
+            Normalized sandbox execution result.
+        """
         full_stdout = str(getattr(result, "stdout", "") or "")
         clean_stdout, assets = self._extract_asset_markers(full_stdout)
         stdout = self._truncate(clean_stdout, max_output_chars)
@@ -358,7 +423,19 @@ class SandboxManager:
         lease_id: str | None = None,
         claim_name: str | None = None,
     ) -> SandboxExecutionResult:
-        """Execute a command using an already-initialized sandbox client."""
+        """Execute command using an existing sandbox client.
+
+        Args:
+            sandbox: Initialized sandbox client.
+            command: Command to execute.
+            tool_name: Tool name for payload reporting.
+            max_output_chars: Output truncation cap.
+            lease_id: Optional lease identifier.
+            claim_name: Optional claim name.
+
+        Returns:
+            Normalized execution result.
+        """
         result = sandbox.run(command)
         return self._cluster_result_from_execution(
             tool_name=tool_name,
@@ -378,7 +455,19 @@ class SandboxManager:
         claim_name: str | None = None,
         sandbox: SandboxClient | None = None,
     ) -> SandboxExecutionResult:
-        """Execute a command in cluster mode using a fresh or provided client."""
+        """Execute command in cluster mode.
+
+        Args:
+            command: Command to execute.
+            tool_name: Tool name for payload reporting.
+            runtime_config: Optional runtime overrides.
+            lease_id: Optional lease identifier.
+            claim_name: Optional claim name.
+            sandbox: Optional existing sandbox client.
+
+        Returns:
+            Normalized execution result.
+        """
         started = time.perf_counter()
         exec_result: SandboxExecutionResult | None = None
         mode = str(self._value_from_runtime(runtime_config, "mode", self.mode))
@@ -518,7 +607,17 @@ class SandboxManager:
         *,
         runtime_config: dict[str, object] | None = None,
     ) -> SandboxExecutionResult:
-        """Execute a local command and normalize outputs consistently."""
+        """Execute command in local subprocess mode.
+
+        Args:
+            command: Shell string or argv sequence.
+            tool_name: Tool name for payload reporting.
+            shell: Whether command should execute through shell.
+            runtime_config: Optional runtime overrides.
+
+        Returns:
+            Normalized execution result.
+        """
         started = time.perf_counter()
         exec_result: SandboxExecutionResult | None = None
         mode = str(self._value_from_runtime(runtime_config, "mode", self.mode))
@@ -638,7 +737,15 @@ class SandboxManager:
     def exec_python(
         self, code: str, *, runtime_config: dict[str, object] | None = None
     ) -> SandboxExecutionResult:
-        """Execute Python in local mode or in an ephemeral cluster sandbox."""
+        """Execute Python code in local or cluster runtime.
+
+        Args:
+            code: Python source code.
+            runtime_config: Optional runtime overrides.
+
+        Returns:
+            Normalized execution result.
+        """
         mode = str(self._value_from_runtime(runtime_config, "mode", self.mode))
         logger.info(
             "sandbox.exec_python",
@@ -675,7 +782,18 @@ class SandboxManager:
         claim_name: str | None,
         runtime_config: dict[str, object] | None = None,
     ) -> SandboxExecutionResult:
-        """Execute Python against an existing lease-backed cluster sandbox."""
+        """Execute Python against an existing lease-backed sandbox.
+
+        Args:
+            code: Python source code.
+            sandbox: Existing sandbox client.
+            lease_id: Lease identifier.
+            claim_name: Claim name associated with the lease.
+            runtime_config: Optional runtime overrides.
+
+        Returns:
+            Normalized execution result.
+        """
         script = self._build_python_script(code, runtime_config=runtime_config)
         command = f"python -c {shlex.quote(script)}"
         return self._run_cluster(
@@ -690,7 +808,15 @@ class SandboxManager:
     def exec_shell(
         self, shell_command: str, *, runtime_config: dict[str, object] | None = None
     ) -> SandboxExecutionResult:
-        """Execute shell in local mode or in an ephemeral cluster sandbox."""
+        """Execute shell command in local or cluster runtime.
+
+        Args:
+            shell_command: Shell command string.
+            runtime_config: Optional runtime overrides.
+
+        Returns:
+            Normalized execution result.
+        """
         mode = str(self._value_from_runtime(runtime_config, "mode", self.mode))
         logger.info(
             "sandbox.exec_shell",
@@ -725,7 +851,18 @@ class SandboxManager:
         claim_name: str | None,
         runtime_config: dict[str, object] | None = None,
     ) -> SandboxExecutionResult:
-        """Execute shell against an existing lease-backed cluster sandbox."""
+        """Execute shell against an existing lease-backed sandbox.
+
+        Args:
+            shell_command: Shell command string.
+            sandbox: Existing sandbox client.
+            lease_id: Lease identifier.
+            claim_name: Claim name associated with the lease.
+            runtime_config: Optional runtime overrides.
+
+        Returns:
+            Normalized execution result.
+        """
         return self._run_cluster(
             command=shell_command,
             tool_name="sandbox_exec_shell",

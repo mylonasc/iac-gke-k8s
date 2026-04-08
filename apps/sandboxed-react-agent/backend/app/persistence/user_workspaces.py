@@ -10,6 +10,9 @@ class SQLiteUserWorkspaceStore:
             "workspace_id": row["workspace_id"],
             "user_id": row["user_id"],
             "status": row["status"],
+            "status_reason": row["status_reason"]
+            if "status_reason" in row.keys()
+            else None,
             "bucket_name": row["bucket_name"],
             "managed_folder_path": row["managed_folder_path"],
             "gsa_email": row["gsa_email"],
@@ -33,6 +36,7 @@ class SQLiteUserWorkspaceStore:
                     workspace_id,
                     user_id,
                     status,
+                    status_reason,
                     bucket_name,
                     managed_folder_path,
                     gsa_email,
@@ -46,10 +50,11 @@ class SQLiteUserWorkspaceStore:
                     created_at,
                     updated_at,
                     deleted_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(workspace_id) DO UPDATE SET
                     user_id=excluded.user_id,
                     status=excluded.status,
+                    status_reason=excluded.status_reason,
                     bucket_name=excluded.bucket_name,
                     managed_folder_path=excluded.managed_folder_path,
                     gsa_email=excluded.gsa_email,
@@ -67,6 +72,7 @@ class SQLiteUserWorkspaceStore:
                     workspace["workspace_id"],
                     workspace["user_id"],
                     workspace["status"],
+                    workspace.get("status_reason"),
                     workspace["bucket_name"],
                     workspace["managed_folder_path"],
                     workspace["gsa_email"],

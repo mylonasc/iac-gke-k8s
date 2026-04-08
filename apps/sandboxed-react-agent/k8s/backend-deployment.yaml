@@ -38,7 +38,7 @@ spec:
         - name: dockerhub-regcred
       containers:
         - name: backend
-          image: docker.io/mylonasc/magarathea:sandboxed-react-agent-backend-0.6.8
+          image: docker.io/mylonasc/magarathea:sandboxed-react-agent-backend-0.6.14
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
@@ -72,6 +72,8 @@ spec:
               value: magarathea-sandbox-workspace
             - name: SANDBOX_WORKSPACE_PROVISIONING_ENABLED
               value: "1"
+            - name: SANDBOX_ALLOW_LOCAL_MODE
+              value: "0"
             - name: SANDBOX_WORKSPACE_BASE_TEMPLATE_NAME
               value: python-runtime-template-small
             - name: WORKSPACE_PROVISIONER_MAX_WORKERS
@@ -107,6 +109,14 @@ spec:
               value: /api/health,/api/public/
             - name: AUTH_USER_ID_CLAIM
               value: sub
+            - name: OPS_ADMIN_EMAIL_ALLOWLIST
+              value: mylonas.charilaos@gmail.com
+            - name: OPS_ADMIN_GROUP_ALLOWLIST
+              value: ""
+            - name: OPS_ADMIN_USER_ID_ALLOWLIST
+              value: ""
+            - name: OPS_ADMIN_ALLOW_ALL_AUTHENTICATED
+              value: "0"
             - name: ANON_IDENTITY_ENABLED
               value: "0"
             - name: ANON_IDENTITY_SECRET

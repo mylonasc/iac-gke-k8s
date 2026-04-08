@@ -105,6 +105,16 @@ class SQLiteSandboxLeaseStore:
             ).fetchall()
         return [self._to_record(row) for row in rows]
 
+    def list_sandbox_leases(self, limit: int | None = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM sandbox_leases ORDER BY created_at DESC"
+        params: tuple[object, ...] = ()
+        if limit is not None and limit > 0:
+            query += " LIMIT ?"
+            params = (int(limit),)
+        with self.connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [self._to_record(row) for row in rows]
+
     def list_expired_sandbox_leases(self, now_iso: str) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(

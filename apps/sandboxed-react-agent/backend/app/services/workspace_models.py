@@ -8,15 +8,55 @@ from datetime import UTC, datetime
 
 
 def now_iso() -> str:
+    """Return current UTC timestamp as ISO-8601 string.
+
+    Returns:
+        Current UTC timestamp.
+    """
     return datetime.now(UTC).isoformat()
 
 
+WORKSPACE_STATUS_PENDING = "pending"
+WORKSPACE_STATUS_RECONCILING = "reconciling"
+WORKSPACE_STATUS_READY = "ready"
+WORKSPACE_STATUS_ERROR = "error"
+WORKSPACE_STATUS_DELETING = "deleting"
+WORKSPACE_STATUS_DELETED = "deleted"
+
+WORKSPACE_REASON_PROVISIONING_REQUESTED = "provisioning_requested"
+WORKSPACE_REASON_RECONCILE_REQUESTED = "reconcile_requested"
+WORKSPACE_REASON_PROVISIONED = "provisioned"
+WORKSPACE_REASON_TEMPLATE_MISSING = "template_missing"
+WORKSPACE_REASON_DEPROVISION_REQUESTED = "deprovision_requested"
+WORKSPACE_REASON_DEPROVISIONED = "deprovisioned"
+WORKSPACE_REASON_UNKNOWN_ERROR = "unknown_error"
+
+
 def stable_suffix(value: str, *, length: int = 12) -> str:
+    """Generate a deterministic hash suffix for a value.
+
+    Args:
+        value: Input value.
+        length: Number of hex characters to include.
+
+    Returns:
+        Deterministic hash prefix of requested length.
+    """
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
     return digest[:length]
 
 
 def normalize_dns_label(prefix: str, value: str, *, max_length: int = 63) -> str:
+    """Build a Kubernetes/DNS-safe name with deterministic truncation.
+
+    Args:
+        prefix: Prefix to prepend.
+        value: User-specific value to normalize.
+        max_length: Maximum output length.
+
+    Returns:
+        DNS-safe label string.
+    """
     cleaned = re.sub(r"[^a-z0-9-]+", "-", value.lower())
     cleaned = re.sub(r"-+", "-", cleaned).strip("-")
     if not cleaned:
@@ -31,6 +71,8 @@ def normalize_dns_label(prefix: str, value: str, *, max_length: int = 63) -> str
 
 @dataclass
 class WorkspaceRecord:
+    """In-memory representation of one user workspace record."""
+
     workspace_id: str
     user_id: str
     status: str
@@ -47,9 +89,18 @@ class WorkspaceRecord:
     created_at: str
     updated_at: str
     deleted_at: str | None = None
+    status_reason: str | None = None
 
     @classmethod
     def from_record(cls, record: dict[str, object]) -> "WorkspaceRecord":
+        """Deserialize a workspace record from persistence payload.
+
+        Args:
+            record: Storage dictionary.
+
+        Returns:
+            Parsed workspace record instance.
+        """
         return cls(
             workspace_id=str(record["workspace_id"]),
             user_id=str(record["user_id"]),
@@ -79,9 +130,17 @@ class WorkspaceRecord:
             created_at=str(record["created_at"]),
             updated_at=str(record["updated_at"]),
             deleted_at=str(record["deleted_at"]) if record.get("deleted_at") else None,
+            status_reason=(
+                str(record["status_reason"]) if record.get("status_reason") else None
+            ),
         )
 
     def as_record(self) -> dict[str, object]:
+        """Serialize workspace object to persistence payload.
+
+        Returns:
+            Storage dictionary compatible with repositories.
+        """
         return {
             "workspace_id": self.workspace_id,
             "user_id": self.user_id,
@@ -99,11 +158,14 @@ class WorkspaceRecord:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "deleted_at": self.deleted_at,
+            "status_reason": self.status_reason,
         }
 
 
 @dataclass(frozen=True)
 class WorkspaceInfraConfig:
+    """Deterministic naming and target-location config for workspaces."""
+
     project_id: str
     bucket_prefix: str
     namespace: str
@@ -113,34 +175,91 @@ class WorkspaceInfraConfig:
     template_prefix: str = "python-runtime-template-user"
 
     def bucket_name(self, user_id: str) -> str:
+        """Return per-user bucket name.
+
+        Args:
+            user_id: User identifier.
+
+        Returns:
+            Bucket name.
+        """
         return normalize_dns_label(self.bucket_prefix, user_id)
 
     def managed_folder_path(self, user_id: str) -> str:
+        """Return managed folder path inside bucket.
+
+        Args:
+            user_id: User identifier.
+
+        Returns:
+            Managed folder path string.
+        """
         return ""
 
     def gsa_account_id(self, user_id: str) -> str:
+        """Return per-user GSA account identifier.
+
+        Args:
+            user_id: User identifier.
+
+        Returns:
+            GSA account id.
+        """
         return normalize_dns_label(self.gsa_account_prefix, user_id, max_length=30)
 
     def gsa_email(self, user_id: str) -> str:
+        """Return per-user GSA email.
+
+        Args:
+            user_id: User identifier.
+
+        Returns:
+            GSA email address.
+        """
         return (
             f"{self.gsa_account_id(user_id)}@{self.project_id}.iam.gserviceaccount.com"
         )
 
     def ksa_name(self, user_id: str) -> str:
+        """Return per-user Kubernetes service account name.
+
+        Args:
+            user_id: User identifier.
+
+        Returns:
+            KSA name.
+        """
         return normalize_dns_label(self.ksa_prefix, user_id)
 
     def template_name(self, user_id: str) -> str:
+        """Return per-user derived SandboxTemplate name.
+
+        Args:
+            user_id: User identifier.
+
+        Returns:
+            Template name.
+        """
         return normalize_dns_label(self.template_prefix, user_id)
 
 
 def build_pending_workspace(
     user_id: str, infra: WorkspaceInfraConfig
 ) -> WorkspaceRecord:
+    """Construct a new pending workspace record with derived identifiers.
+
+    Args:
+        user_id: User identifier.
+        infra: Infrastructure naming/config object.
+
+    Returns:
+        Newly initialized pending workspace record.
+    """
     timestamp = now_iso()
     return WorkspaceRecord(
         workspace_id=f"ws-{uuid.uuid4().hex}",
         user_id=user_id,
-        status="pending",
+        status=WORKSPACE_STATUS_PENDING,
         bucket_name=infra.bucket_name(user_id),
         managed_folder_path=infra.managed_folder_path(user_id),
         gsa_email=infra.gsa_email(user_id),
@@ -154,4 +273,5 @@ def build_pending_workspace(
         created_at=timestamp,
         updated_at=timestamp,
         deleted_at=None,
+        status_reason=WORKSPACE_REASON_PROVISIONING_REQUESTED,
     )

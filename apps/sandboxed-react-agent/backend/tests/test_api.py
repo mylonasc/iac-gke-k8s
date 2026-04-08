@@ -39,6 +39,7 @@ def setup_function() -> None:
         connection.execute("DELETE FROM sessions")
         connection.execute("DELETE FROM assets")
         connection.execute("DELETE FROM sandbox_leases")
+        connection.execute("DELETE FROM user_workspaces")
         connection.execute("DELETE FROM user_configs")
         connection.execute("DELETE FROM users")
     shutil.rmtree(os.environ["ASSET_STORE_PATH"], ignore_errors=True)
@@ -111,7 +112,21 @@ def test_config_roundtrip() -> None:
     assert update.status_code == 200
     update_payload = update.json()
     assert update_payload["agent"]["max_tool_calls_per_turn"] == 3
-    assert update_payload["toolkits"]["sandbox"]["runtime"]["mode"] == "local"
+    assert update_payload["toolkits"]["sandbox"]["runtime"]["mode"] == "cluster"
+
+
+def test_config_endpoint_does_not_query_workspace_overrides(monkeypatch) -> None:
+    monkeypatch.setattr(
+        agent._workspace_service,
+        "get_workspace_for_user",
+        lambda user_id: (_ for _ in ()).throw(
+            AssertionError("workspace lookup should not happen on /api/config")
+        ),
+    )
+
+    response = client.get("/api/config")
+
+    assert response.status_code == 200
 
 
 def test_me_endpoint_returns_user_tier() -> None:
@@ -243,7 +258,7 @@ def test_config_is_isolated_per_user(monkeypatch) -> None:
     payload_b = get_b.json()
     assert payload_a["agent"]["model"] == "gpt-4.1-mini"
     assert payload_a["agent"]["max_tool_calls_per_turn"] == 2
-    assert payload_a["toolkits"]["sandbox"]["runtime"]["mode"] == "local"
+    assert payload_a["toolkits"]["sandbox"]["runtime"]["mode"] == "cluster"
     assert payload_b["agent"]["model"] == "gpt-4o-mini"
     assert payload_b["agent"]["max_tool_calls_per_turn"] == 6
     assert payload_b["toolkits"]["sandbox"]["runtime"]["mode"] == "cluster"
@@ -290,6 +305,47 @@ def test_config_updates_sandbox_lifecycle_mode() -> None:
     assert (
         payload["toolkits"]["sandbox"]["lifecycle"]["session_idle_ttl_seconds"] == 900
     )
+
+
+def test_config_updates_sandbox_profile() -> None:
+    response = client.post(
+        "/api/config",
+        json={
+            "sandbox_profile": "transient",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["toolkits"]["sandbox"]["runtime"]["profile"] == "transient"
+
+
+def test_admin_workspace_jobs_endpoint_roundtrip(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_admin_workspace_jobs(
+        *, limit: int, include_terminal: bool
+    ) -> dict[str, object]:
+        captured["limit"] = limit
+        captured["include_terminal"] = include_terminal
+        return {
+            "generated_at": "2026-01-01T00:00:00+00:00",
+            "limit": limit,
+            "include_terminal": include_terminal,
+            "summary": {"total_jobs": 0},
+            "jobs": [],
+        }
+
+    monkeypatch.setattr(agent, "get_admin_workspace_jobs", _fake_admin_workspace_jobs)
+
+    response = client.get(
+        "/api/admin/ops/workspace-jobs?limit=123&include_terminal=false"
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert captured == {"limit": 123, "include_terminal": False}
+    assert payload["limit"] == 123
+    assert payload["include_terminal"] is False
 
 
 def test_sandbox_lifecycle_endpoints_roundtrip(monkeypatch) -> None:
@@ -358,6 +414,72 @@ def test_session_sandbox_endpoint() -> None:
     payload = response.json()
     assert payload["session_id"] == session_id
     assert payload["sandbox"]["has_active_lease"] is False
+
+
+def test_session_sandbox_status_policy_and_actions_endpoints(monkeypatch) -> None:
+    created = client.post("/api/sessions", json={})
+    assert created.status_code == 200
+    session_id = created.json()["session_id"]
+
+    status_payload = {
+        "session_id": session_id,
+        "sandbox": {"has_active_lease": False, "status": None},
+        "sandbox_policy": {"profile": "persistent_workspace"},
+        "effective": {"runtime": {"profile": "persistent_workspace"}, "lifecycle": {}},
+        "workspace_status": {"workspace": None, "provisioning_pending": False},
+        "available_sandboxes": {"profiles": ["persistent_workspace", "transient"]},
+    }
+
+    monkeypatch.setattr(
+        agent,
+        "get_session_sandbox_status",
+        lambda session_id_value, user_id: status_payload,
+    )
+    monkeypatch.setattr(
+        agent,
+        "get_session_sandbox_policy",
+        lambda session_id_value, user_id: {"profile": "persistent_workspace"},
+    )
+    monkeypatch.setattr(
+        agent,
+        "update_session_sandbox_policy",
+        lambda session_id_value, user_id, policy_updates, clear=False: {
+            "session_id": session_id_value,
+            "sandbox_policy": policy_updates,
+            "lease_released": True,
+        },
+    )
+    monkeypatch.setattr(
+        agent,
+        "perform_session_sandbox_action",
+        lambda session_id_value, user_id, action, wait=False: {
+            "action": action,
+            "wait": wait,
+            "status": status_payload,
+        },
+    )
+
+    status_response = client.get(f"/api/sessions/{session_id}/sandbox/status")
+    assert status_response.status_code == 200
+    assert status_response.json()["session_id"] == session_id
+
+    policy_response = client.get(f"/api/sessions/{session_id}/sandbox/policy")
+    assert policy_response.status_code == 200
+    assert policy_response.json()["sandbox_policy"]["profile"] == "persistent_workspace"
+
+    patch_response = client.patch(
+        f"/api/sessions/{session_id}/sandbox/policy",
+        json={"profile": "transient", "template_name": "python-runtime-template-small"},
+    )
+    assert patch_response.status_code == 200
+    assert patch_response.json()["sandbox_policy"]["profile"] == "transient"
+
+    action_response = client.post(
+        f"/api/sessions/{session_id}/sandbox/actions",
+        json={"action": "release_lease", "wait": False},
+    )
+    assert action_response.status_code == 200
+    assert action_response.json()["action"] == "release_lease"
 
 
 def test_sessions_list_and_share() -> None:
@@ -697,8 +819,37 @@ def test_python_tool_auto_exposes_detected_image_path() -> None:
 
 
 def test_assistant_transport_emits_image_asset_in_message(monkeypatch) -> None:
-    updated = client.post("/api/config", json={"sandbox_mode": "local"})
-    assert updated.status_code == 200
+    def fake_run_python(*, session_id, tool_call_id, code, runtime_config, created_at):
+        from app.agents.tool_payloads import ToolExecutionPayload
+
+        stored_assets = [
+            {
+                "asset_id": "asset-plot",
+                "filename": "sinusoid_plot.png",
+                "mime_type": "image/png",
+                "size_bytes": 68,
+                "sha256": "fake",
+                "created_at": created_at,
+                "url": "/api/assets/asset-plot/content",
+            }
+        ]
+        payload = ToolExecutionPayload(
+            tool="sandbox_exec_python",
+            ok=True,
+            stdout="created sinusoid",
+            stderr="",
+            exit_code=0,
+            assets=[
+                {
+                    "path": "/tmp/sinusoid_plot.png",
+                    "filename": "sinusoid_plot.png",
+                    "mime_type": "image/png",
+                    "asset_id": "asset-plot",
+                    "url": "/api/assets/asset-plot/content",
+                }
+            ],
+        )
+        return payload, stored_assets
 
     calls = {"count": 0}
 
@@ -744,6 +895,7 @@ def test_assistant_transport_emits_image_asset_in_message(monkeypatch) -> None:
         )
 
     monkeypatch.setattr(agent, "_create_completion_async", fake_completion)
+    monkeypatch.setattr(agent.session_sandbox_facade, "run_python", fake_run_python)
 
     response = client.post(
         "/api/assistant",

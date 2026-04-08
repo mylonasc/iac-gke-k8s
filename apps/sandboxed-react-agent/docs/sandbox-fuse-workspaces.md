@@ -154,11 +154,11 @@ Terraform is the right place for stable infrastructure, but per-user identities 
 
 For each new user workspace, the backend should provision:
 
-1. managed folder `workspaces/<user_id>/`
-2. Google service account for that user workspace
-3. Kubernetes service account in the app namespace
-4. Workload Identity binding from that KSA to that GSA
-5. IAM bindings on the managed folder for that GSA
+1. a per-user bucket
+2. a Google service account for that user workspace
+3. a Kubernetes service account in the app namespace
+4. a Workload Identity binding from that KSA to that GSA
+5. IAM bindings on the bucket for that GSA
 6. a user-derived `SandboxTemplate` that references the KSA and FUSE mount
 
 Per-user provisioning should be done by the backend through Google Cloud APIs and Kubernetes APIs, not by shelling out to `gcloud`.
@@ -167,8 +167,8 @@ Use Google Cloud APIs for:
 
 - service account creation and deletion
 - service account IAM policy management
-- managed folder creation and deletion
-- managed folder IAM policy management
+- bucket creation and deletion
+- bucket IAM policy management
 
 Use Kubernetes APIs for:
 
@@ -187,7 +187,7 @@ Extend `backend/app/persistence/schema.py` with workspace records such as:
   - `workspace_id`
   - `user_id`
   - `bucket_name`
-  - `managed_folder`
+  - `managed_folder_path`
   - `gsa_email`
   - `ksa_name`
   - `derived_template_name`
@@ -210,11 +210,11 @@ This lets the app track what identity and template belong to a user.
 Create a backend service, for example `WorkspaceProvisioningService`, responsible for:
 
 - ensuring the user workspace exists
-- creating the per-user managed folder if missing
+- creating the per-user bucket if missing
 - creating the per-user GSA if missing
 - creating the per-user KSA if missing
 - binding Workload Identity
-- setting folder IAM on the managed folder
+- setting bucket IAM on the per-user bucket
 - creating or refreshing the derived sandbox template
 
 This service should be called before the first sandbox is launched for a user.
@@ -262,8 +262,8 @@ The app should create deterministic per-user template names, for example:
 The derived template should:
 
 - reference the per-user KSA
-- mount the shared bucket through the GCS FUSE CSI driver
-- mount only the user's managed folder path at `/workspace`
+- mount the user's bucket through the GCS FUSE CSI driver
+- mount the bucket at `/workspace`
 - keep the rest of the base runtime settings from the existing template
 
 ## 7. Authz checks in the app
@@ -286,9 +286,9 @@ It should:
 2. delete the user-derived `SandboxTemplate`
 3. delete the per-user KSA
 4. remove the Workload Identity binding from the per-user GSA
-5. remove IAM bindings from the managed folder
-6. delete or archive managed-folder contents according to retention policy
-7. delete the managed folder resource if allowed
+5. remove IAM bindings from the per-user bucket
+6. delete or archive bucket contents according to retention policy
+7. delete the per-user bucket if allowed
 8. delete the per-user GSA
 9. mark the workspace metadata as deleted or tombstoned in the database
 
@@ -302,13 +302,13 @@ This flow should be idempotent and safe to retry after partial failure.
 2. app ensures workspace resources exist for that user
 3. app resolves the per-user derived template
 4. app creates a `SandboxClaim` against that template
-5. sandbox mounts `gs://<bucket>/workspaces/<user_id>/` at `/workspace`
+5. sandbox mounts `gs://<user-workspace-bucket>/` at `/workspace`
 
 ### Additional sandbox for the same user
 
 1. app reuses the same workspace metadata
 2. app either reconnects to an existing active claim or creates another claim against the same user-derived template
-3. multiple sandboxs for that user can mount the same managed folder concurrently
+3. multiple sandboxs for that user can mount the same bucket concurrently
 
 ### Future call in the same session
 
@@ -321,9 +321,9 @@ This flow should be idempotent and safe to retry after partial failure.
 1. app blocks new sandbox acquisition for that workspace
 2. app terminates active claims for that user
 3. app removes the user-derived template and KSA
-4. app removes Workload Identity and managed-folder IAM bindings
+4. app removes Workload Identity and bucket IAM bindings
 5. app archives or deletes workspace objects according to retention policy
-6. app deletes the managed folder and per-user GSA if policy allows
+6. app deletes the per-user bucket and GSA if policy allows
 
 ## Non-Goals And Caveats
 
@@ -344,9 +344,9 @@ Even though multiple sandboxs can mount the same user workspace, add guardrails:
 
 ## Suggested Implementation Order
 
-1. Terraform bucket and cluster-wide admin identity
+1. Terraform/project IAM for dynamic per-user buckets and cluster-wide admin identity
 2. backend workspace schema and repositories
-3. backend provisioning service for per-user managed folders, GSAs, KSAs, and IAM
+3. backend provisioning service for per-user buckets, GSAs, KSAs, and IAM
 4. dynamic user-derived sandbox templates with GCS FUSE mounts
 5. reconnect-to-existing-claim logic in `sandbox_lifecycle.py`
 6. default tool execution under `/workspace`
@@ -356,9 +356,9 @@ Even though multiple sandboxs can mount the same user workspace, add guardrails:
 
 ## Minimum Acceptance Criteria
 
-- a new user gets a deterministic managed folder under the shared bucket
+- a new user gets a deterministic per-user bucket
 - the sandbox pod for that user authenticates as a per-user GSA through Workload Identity
-- that GSA can read and write only that managed folder, not sibling user folders
+- that GSA can read and write only that bucket, not sibling user buckets
 - a sandbox mounts the user's workspace at `/workspace`
 - a second sandbox for the same user can mount the same workspace concurrently
 - a future tool call in the same session reconnects to the existing `SandboxClaim` when it still exists

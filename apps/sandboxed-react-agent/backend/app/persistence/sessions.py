@@ -18,6 +18,11 @@ class SQLiteSessionStore:
             "tool_calls": row["tool_calls"],
             "last_error": row["last_error"],
             "share_id": row["share_id"],
+            "sandbox_policy": (
+                json.loads(row["sandbox_policy_json"])
+                if row["sandbox_policy_json"]
+                else {}
+            ),
         }
 
     def upsert_session(self, session: dict[str, Any]) -> None:
@@ -34,8 +39,9 @@ class SQLiteSessionStore:
                     ui_messages_json,
                     tool_calls,
                     last_error,
-                    share_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    share_id,
+                    sandbox_policy_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     user_id=excluded.user_id,
                     updated_at=excluded.updated_at,
@@ -44,7 +50,8 @@ class SQLiteSessionStore:
                     ui_messages_json=excluded.ui_messages_json,
                     tool_calls=excluded.tool_calls,
                     last_error=excluded.last_error,
-                    share_id=COALESCE(excluded.share_id, sessions.share_id)
+                    share_id=COALESCE(excluded.share_id, sessions.share_id),
+                    sandbox_policy_json=excluded.sandbox_policy_json
                 """,
                 (
                     session["session_id"],
@@ -57,6 +64,7 @@ class SQLiteSessionStore:
                     int(session["tool_calls"]),
                     session.get("last_error"),
                     session.get("share_id"),
+                    json.dumps(session.get("sandbox_policy") or {}, ensure_ascii=True),
                 ),
             )
 

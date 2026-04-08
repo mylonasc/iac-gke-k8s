@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { AuiIf, ThreadPrimitive } from "@assistant-ui/react";
 import { Share2, Trash2 } from "lucide-react";
 import { apiFetch, getAppBasePath } from "../api/client";
@@ -32,6 +32,11 @@ export function ChatView({
   session,
   config,
   onResetSession,
+  onRefreshSandboxStatus,
+  onUpdateSessionSandboxPolicy,
+  onRunSessionSandboxAction,
+  sandboxStatusLoading,
+  sandboxStatusError,
   readOnly,
   configError,
   configMessage,
@@ -41,6 +46,21 @@ export function ChatView({
   const title = readOnly ? "Shared Thread" : session?.title || "New Chat";
   const [copiedMarkdown, setCopiedMarkdown] = useState(false);
   const [showThinking, setShowThinking] = useState(false);
+  const [sessionProfile, setSessionProfile] = useState(
+    session?.sandbox_policy?.profile || ""
+  );
+  const [sessionTemplate, setSessionTemplate] = useState(
+    session?.sandbox_policy?.template_name || ""
+  );
+  const [sessionExecutionModel, setSessionExecutionModel] = useState(
+    session?.sandbox_policy?.execution_model || ""
+  );
+
+  useEffect(() => {
+    setSessionProfile(session?.sandbox_policy?.profile || "");
+    setSessionTemplate(session?.sandbox_policy?.template_name || "");
+    setSessionExecutionModel(session?.sandbox_policy?.execution_model || "");
+  }, [session?.sandbox_policy, session?.session_id]);
 
   const threadComponents = useMemo(
     () => ({ UserMessage, AssistantMessage }),
@@ -62,6 +82,20 @@ export function ChatView({
     window.setTimeout(() => setCopiedMarkdown(false), 1500);
   };
 
+  const sessionStatus = session?.sandbox_status || null;
+  const workspace = sessionStatus?.workspace_status?.workspace || null;
+  const provisioningPending = sessionStatus?.workspace_status?.provisioning_pending;
+
+  const applySessionPolicy = async () => {
+    if (!session?.session_id || !onUpdateSessionSandboxPolicy) return;
+    const patch = {
+      profile: sessionProfile || null,
+      template_name: sessionTemplate || null,
+      execution_model: sessionExecutionModel || null,
+    };
+    await onUpdateSessionSandboxPolicy(session.session_id, patch);
+  };
+
   return (
     <section className="chat-card">
       <header className={`chat-header ${isMobile ? "chat-header-mobile" : ""}`}>
@@ -71,6 +105,9 @@ export function ChatView({
           {!readOnly && !isMobile ? (
             <div className="chat-meta-row">
               <span className="pill">Model: {config?.model || "gpt-4o-mini"}</span>
+              <span className="pill">
+                Profile: {config?.sandbox_profile || "persistent_workspace"}
+              </span>
               <span className="pill">Runtime: {config?.sandbox_template_name || "default"}</span>
             </div>
           ) : null}
@@ -123,6 +160,94 @@ export function ChatView({
           ) : null}
         </div>
       </header>
+
+      {!readOnly ? (
+        <div className="sandbox-status-strip">
+          <div className="sandbox-status-row">
+            <span className="pill">Workspace: {workspace?.status || "none"}</span>
+            <span className="pill">
+              Pending: {provisioningPending ? "yes" : "no"}
+            </span>
+            <span className="pill">
+              Effective profile: {sessionStatus?.effective?.runtime?.profile || config?.sandbox_profile}
+            </span>
+            <span className="pill">
+              Effective template: {sessionStatus?.effective?.runtime?.template_name || config?.sandbox_template_name}
+            </span>
+            <button
+              type="button"
+              className="btn btn-subtle tiny"
+              disabled={!session?.session_id || sandboxStatusLoading}
+              onClick={() => onRefreshSandboxStatus?.(session.session_id)}
+            >
+              {sandboxStatusLoading ? "Refreshing..." : "Refresh status"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-subtle tiny"
+              disabled={!session?.session_id || sandboxStatusLoading}
+              onClick={() =>
+                onRunSessionSandboxAction?.(session.session_id, "release_lease", {
+                  wait: false,
+                })
+              }
+            >
+              Release lease
+            </button>
+            <button
+              type="button"
+              className="btn btn-subtle tiny"
+              disabled={!session?.session_id || sandboxStatusLoading}
+              onClick={() =>
+                onRunSessionSandboxAction?.(session.session_id, "reconcile_workspace", {
+                  wait: false,
+                })
+              }
+            >
+              Reconcile workspace
+            </button>
+          </div>
+          <div className="sandbox-policy-row">
+            <label>
+              Session profile
+              <select value={sessionProfile} onChange={(event) => setSessionProfile(event.target.value)}>
+                <option value="">(inherit)</option>
+                <option value="persistent_workspace">persistent_workspace</option>
+                <option value="transient">transient</option>
+              </select>
+            </label>
+            <label>
+              Session template
+              <input
+                type="text"
+                value={sessionTemplate}
+                onChange={(event) => setSessionTemplate(event.target.value)}
+                placeholder="(inherit)"
+              />
+            </label>
+            <label>
+              Session execution model
+              <select
+                value={sessionExecutionModel}
+                onChange={(event) => setSessionExecutionModel(event.target.value)}
+              >
+                <option value="">(inherit)</option>
+                <option value="session">session</option>
+                <option value="ephemeral">ephemeral</option>
+              </select>
+            </label>
+            <button
+              type="button"
+              className="btn btn-primary tiny"
+              disabled={!session?.session_id || sandboxStatusLoading}
+              onClick={applySessionPolicy}
+            >
+              Apply session policy
+            </button>
+          </div>
+          {sandboxStatusError ? <p className="feedback feedback-error">{sandboxStatusError}</p> : null}
+        </div>
+      ) : null}
 
       <ThreadPrimitive.Root className="thread-root">
         <div className={`thread-layout ${showThinking ? "has-thinking" : ""}`}>

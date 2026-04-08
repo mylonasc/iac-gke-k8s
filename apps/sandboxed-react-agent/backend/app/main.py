@@ -7,7 +7,7 @@ from typing import Any
 
 from assistant_stream import create_run
 from assistant_stream.serialization import DataStreamResponse
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
@@ -30,6 +30,7 @@ class ConfigUpdateRequest(BaseModel):
     model: str | None = None
     max_tool_calls_per_turn: int | None = Field(default=None, ge=1, le=20)
     sandbox_mode: str | None = None
+    sandbox_profile: str | None = None
     sandbox_api_url: str | None = None
     sandbox_template_name: str | None = None
     sandbox_namespace: str | None = None
@@ -94,6 +95,21 @@ class WorkspaceDeleteRequest(BaseModel):
     delete_data: bool = False
 
 
+class SessionSandboxPolicyPatchRequest(BaseModel):
+    clear: bool = False
+    mode: str | None = None
+    profile: str | None = None
+    template_name: str | None = None
+    namespace: str | None = None
+    execution_model: str | None = None
+    session_idle_ttl_seconds: int | None = Field(default=None, ge=1, le=86400)
+
+
+class SessionSandboxActionRequest(BaseModel):
+    action: str
+    wait: bool = False
+
+
 configure_logging()
 logger = logging.getLogger(__name__)
 runtime = create_app_runtime()
@@ -104,6 +120,26 @@ token_verifier = runtime.token_verifier
 anon_identity_config = runtime.anon_identity_config
 
 
+def _as_bool(value: str | None, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _csv_env_set(name: str) -> set[str]:
+    raw = str(os.getenv(name, "") or "")
+    return {item.strip().lower() for item in raw.split(",") if item.strip()}
+
+
+OPS_ADMIN_USER_ID_ALLOWLIST = _csv_env_set("OPS_ADMIN_USER_ID_ALLOWLIST")
+OPS_ADMIN_EMAIL_ALLOWLIST = _csv_env_set("OPS_ADMIN_EMAIL_ALLOWLIST")
+OPS_ADMIN_GROUP_ALLOWLIST = _csv_env_set("OPS_ADMIN_GROUP_ALLOWLIST")
+OPS_ADMIN_ALLOW_ALL_AUTHENTICATED = _as_bool(
+    os.getenv("OPS_ADMIN_ALLOW_ALL_AUTHENTICATED"),
+    default=False,
+)
+
+
 def _request_user_id(request: Request) -> str:
     user_id = str(getattr(request.state, "auth_user_id", "") or "").strip()
     if not user_id and not auth_config.enabled:
@@ -111,6 +147,57 @@ def _request_user_id(request: Request) -> str:
     if not user_id:
         raise HTTPException(status_code=401, detail="Missing user identity")
     return user_id
+
+
+def _claim_email(claims: dict[str, Any]) -> str:
+    value = (
+        claims.get("email")
+        or claims.get("upn")
+        or claims.get("preferred_username")
+        or ""
+    )
+    return str(value).strip().lower()
+
+
+def _claim_groups(claims: dict[str, Any]) -> set[str]:
+    raw = claims.get("groups")
+    if isinstance(raw, list):
+        return {str(item).strip().lower() for item in raw if str(item).strip()}
+    if isinstance(raw, str) and raw.strip():
+        return {item.strip().lower() for item in raw.split(",") if item.strip()}
+    return set()
+
+
+def _require_ops_admin(request: Request) -> None:
+    user_id = _request_user_id(request)
+    if not auth_config.enabled:
+        return
+    if OPS_ADMIN_ALLOW_ALL_AUTHENTICATED:
+        return
+
+    claims = getattr(request.state, "auth_claims", {})
+    claims_dict = claims if isinstance(claims, dict) else {}
+    email = _claim_email(claims_dict)
+    groups = _claim_groups(claims_dict)
+
+    by_user_id = bool(OPS_ADMIN_USER_ID_ALLOWLIST) and (
+        user_id.strip().lower() in OPS_ADMIN_USER_ID_ALLOWLIST
+    )
+    by_email = bool(OPS_ADMIN_EMAIL_ALLOWLIST) and (email in OPS_ADMIN_EMAIL_ALLOWLIST)
+    by_group = bool(OPS_ADMIN_GROUP_ALLOWLIST) and bool(
+        OPS_ADMIN_GROUP_ALLOWLIST.intersection(groups)
+    )
+
+    if by_user_id or by_email or by_group:
+        return
+
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            "Token is valid but not authorized for admin ops endpoints. "
+            "Configure OPS_ADMIN_* allowlists."
+        ),
+    )
 
 
 def _extract_transport_session_id(payload: AssistantTransportRequest) -> str | None:
@@ -346,6 +433,7 @@ def update_config(payload: ConfigUpdateRequest, request: Request) -> dict:
             model=payload.model,
             max_tool_calls_per_turn=payload.max_tool_calls_per_turn,
             sandbox_mode=payload.sandbox_mode,
+            sandbox_profile=payload.sandbox_profile,
             sandbox_api_url=payload.sandbox_api_url,
             sandbox_template_name=payload.sandbox_template_name,
             sandbox_namespace=payload.sandbox_namespace,
@@ -424,6 +512,81 @@ def get_session_sandbox(session_id: str, request: Request) -> dict[str, Any]:
     }
 
 
+@app.get("/api/sessions/{session_id}/sandbox/status")
+def get_session_sandbox_status(session_id: str, request: Request) -> dict[str, Any]:
+    user_id = _request_user_id(request)
+    session = agent.get_session(session_id, user_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        return agent.get_session_sandbox_status(session_id, user_id)
+    except PermissionError:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+
+@app.get("/api/sessions/{session_id}/sandbox/policy")
+def get_session_sandbox_policy(session_id: str, request: Request) -> dict[str, Any]:
+    user_id = _request_user_id(request)
+    session = agent.get_session(session_id, user_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        return {
+            "session_id": session_id,
+            "sandbox_policy": agent.get_session_sandbox_policy(session_id, user_id),
+        }
+    except PermissionError:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+
+@app.patch("/api/sessions/{session_id}/sandbox/policy")
+def patch_session_sandbox_policy(
+    session_id: str,
+    payload: SessionSandboxPolicyPatchRequest,
+    request: Request,
+) -> dict[str, Any]:
+    user_id = _request_user_id(request)
+    session = agent.get_session(session_id, user_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        result = agent.update_session_sandbox_policy(
+            session_id,
+            user_id,
+            payload.model_dump(exclude={"clear"}, exclude_none=True),
+            clear=payload.clear,
+        )
+        result["status"] = agent.get_session_sandbox_status(session_id, user_id)
+        return result
+    except PermissionError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/sessions/{session_id}/sandbox/actions")
+def session_sandbox_action(
+    session_id: str,
+    payload: SessionSandboxActionRequest,
+    request: Request,
+) -> dict[str, Any]:
+    user_id = _request_user_id(request)
+    session = agent.get_session(session_id, user_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        return agent.perform_session_sandbox_action(
+            session_id,
+            user_id,
+            action=payload.action,
+            wait=payload.wait,
+        )
+    except PermissionError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.post("/api/sessions/{session_id}/share")
 def share_session(session_id: str, request: Request) -> dict[str, str]:
     user_id = _request_user_id(request)
@@ -475,6 +638,38 @@ def download_asset(asset_id: str, request: Request):
         asset["storage_path"],
         media_type=asset["mime_type"],
         filename=asset["filename"],
+    )
+
+
+@app.get("/api/admin/ops/sandbox-index")
+def get_admin_sandbox_index(
+    request: Request,
+    limit: int = Query(default=500, ge=1, le=5000),
+) -> dict[str, Any]:
+    _require_ops_admin(request)
+    return agent.get_admin_sandbox_index(limit=limit)
+
+
+@app.get("/api/admin/ops/lease-analytics")
+def get_admin_lease_analytics(
+    request: Request,
+    days: int = Query(default=14, ge=1, le=90),
+    limit: int = Query(default=200, ge=1, le=2000),
+) -> dict[str, Any]:
+    _require_ops_admin(request)
+    return agent.get_admin_lease_analytics(days=days, limit=limit)
+
+
+@app.get("/api/admin/ops/workspace-jobs")
+def get_admin_workspace_jobs(
+    request: Request,
+    limit: int = Query(default=200, ge=1, le=2000),
+    include_terminal: bool = Query(default=True),
+) -> dict[str, Any]:
+    _require_ops_admin(request)
+    return agent.get_admin_workspace_jobs(
+        limit=limit,
+        include_terminal=include_terminal,
     )
 
 

@@ -15,6 +15,7 @@ class SessionState:
     tool_calls: int = 0
     last_error: str | None = None
     share_id: str | None = None
+    sandbox_policy: dict[str, Any] = field(default_factory=dict)
 
 
 def now_iso() -> str:

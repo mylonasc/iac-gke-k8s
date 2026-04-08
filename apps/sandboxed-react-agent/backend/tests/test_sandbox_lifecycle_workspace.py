@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import sys
 import threading
+from types import SimpleNamespace
 
 from app.sandbox_lifecycle import SandboxLease, SandboxLifecycleService
 from app.sandbox_manager import SandboxExecutionResult
@@ -215,7 +217,7 @@ def test_exec_python_returns_workspace_error(monkeypatch) -> None:
     result = service.exec_python("session-1", "print('hello')")
 
     assert result.ok is False
-    assert result.error == "Workspace provisioning failed: iam failed"
+    assert result.error == "Workspace provisioning failed (unknown_error): iam failed"
 
 
 def test_exec_python_uses_ready_workspace_template(monkeypatch) -> None:
@@ -234,6 +236,7 @@ def test_exec_python_uses_ready_workspace_template(monkeypatch) -> None:
         ensure_workspace_async_for_user=None,
     )
     monkeypatch.setattr(service, "reap_expired_leases", lambda: 0)
+    monkeypatch.setattr(service, "_sandbox_template_exists", lambda **kwargs: True)
     monkeypatch.setattr(
         service, "_touch_lease", lambda lease, session_idle_ttl_seconds=None: lease
     )
@@ -250,6 +253,156 @@ def test_exec_python_uses_ready_workspace_template(monkeypatch) -> None:
     runtime_config = manager.exec_python_with_sandbox_calls[0]["runtime_config"]
     assert runtime_config["template_name"] == "python-runtime-template-user-a"
     assert runtime_config["namespace"] == "alt-default"
+
+
+def test_exec_python_transient_profile_skips_workspace_resolution(monkeypatch) -> None:
+    manager = FakeSandboxManager()
+    service = SandboxLifecycleService(
+        sandbox_manager=manager,
+        sandbox_lease_repository=FakeSandboxLeaseRepository(),
+        get_user_id_for_session=lambda session_id: "user-1",
+        get_workspace_for_user=lambda user_id: (_ for _ in ()).throw(
+            AssertionError("workspace lookup should be skipped for transient profile")
+        ),
+        ensure_workspace_async_for_user=lambda user_id, reconcile_ready=False: (
+            _ for _ in ()
+        ).throw(
+            AssertionError("workspace ensure should be skipped for transient profile")
+        ),
+    )
+    monkeypatch.setattr(service, "reap_expired_leases", lambda: 0)
+    monkeypatch.setattr(
+        service, "_touch_lease", lambda lease, session_idle_ttl_seconds=None: lease
+    )
+
+    acquire_runtime_config: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        service,
+        "acquire_scope_lease",
+        lambda scope_type, scope_key, runtime_config=None: (
+            acquire_runtime_config.append(dict(runtime_config or {})) or _runtime()
+        ),
+    )
+
+    result = service.exec_python(
+        "session-1",
+        "print('hello')",
+        runtime_config={
+            "profile": "transient",
+            "template_name": "python-runtime-template-small",
+            "namespace": "alt-default",
+        },
+    )
+
+    assert result.ok is True
+    assert acquire_runtime_config
+    assert acquire_runtime_config[0]["profile"] == "transient"
+    runtime_config = manager.exec_python_with_sandbox_calls[0]["runtime_config"]
+    assert runtime_config["profile"] == "transient"
+    assert runtime_config["template_name"] == "python-runtime-template-small"
+
+
+def test_exec_python_reconciles_when_ready_workspace_template_missing(
+    monkeypatch,
+) -> None:
+    manager = FakeSandboxManager()
+    ensure_calls: list[tuple[str, bool]] = []
+    service = SandboxLifecycleService(
+        sandbox_manager=manager,
+        sandbox_lease_repository=FakeSandboxLeaseRepository(),
+        get_user_id_for_session=lambda session_id: "user-1",
+        get_workspace_for_user=lambda user_id: {
+            "workspace_id": "ws-1",
+            "user_id": user_id,
+            "status": "ready",
+            "derived_template_name": "python-runtime-template-user-missing",
+            "claim_namespace": "alt-default",
+        },
+        ensure_workspace_async_for_user=lambda user_id, reconcile_ready=False: (
+            ensure_calls.append((user_id, reconcile_ready))
+            or ({"workspace_id": "ws-1", "user_id": user_id, "status": "ready"}, True)
+        ),
+    )
+    monkeypatch.setattr(service, "_sandbox_template_exists", lambda **kwargs: False)
+
+    result = service.exec_python("session-1", "print('hello')")
+
+    assert result.ok is False
+    assert (
+        result.error
+        == "Workspace template missing. Reconciliation started; retry in a few seconds."
+    )
+    assert ensure_calls == [("user-1", True)]
+
+
+def test_sandbox_template_exists_returns_false_for_404(monkeypatch) -> None:
+    manager = FakeSandboxManager()
+    service = SandboxLifecycleService(
+        sandbox_manager=manager,
+        sandbox_lease_repository=FakeSandboxLeaseRepository(),
+    )
+
+    class _ApiException(Exception):
+        def __init__(self, status: int, reason: str = "") -> None:
+            super().__init__(reason)
+            self.status = status
+
+    class _CustomObjectsApi:
+        def get_namespaced_custom_object(self, **kwargs):
+            raise _ApiException(status=404, reason="not found")
+
+    fake_kubernetes = SimpleNamespace(
+        client=SimpleNamespace(
+            CustomObjectsApi=lambda: _CustomObjectsApi(),
+            exceptions=SimpleNamespace(ApiException=_ApiException),
+        ),
+        config=SimpleNamespace(
+            load_incluster_config=lambda: None,
+            load_kube_config=lambda: None,
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "kubernetes", fake_kubernetes)
+
+    exists = service._sandbox_template_exists(
+        namespace="alt-default", template_name="python-runtime-template-user-a"
+    )
+
+    assert exists is False
+
+
+def test_sandbox_template_exists_fails_open_for_lookup_errors(monkeypatch) -> None:
+    manager = FakeSandboxManager()
+    service = SandboxLifecycleService(
+        sandbox_manager=manager,
+        sandbox_lease_repository=FakeSandboxLeaseRepository(),
+    )
+
+    class _ApiException(Exception):
+        def __init__(self, status: int, reason: str = "") -> None:
+            super().__init__(reason)
+            self.status = status
+
+    class _CustomObjectsApi:
+        def get_namespaced_custom_object(self, **kwargs):
+            raise _ApiException(status=500, reason="api unavailable")
+
+    fake_kubernetes = SimpleNamespace(
+        client=SimpleNamespace(
+            CustomObjectsApi=lambda: _CustomObjectsApi(),
+            exceptions=SimpleNamespace(ApiException=_ApiException),
+        ),
+        config=SimpleNamespace(
+            load_incluster_config=lambda: None,
+            load_kube_config=lambda: None,
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "kubernetes", fake_kubernetes)
+
+    exists = service._sandbox_template_exists(
+        namespace="alt-default", template_name="python-runtime-template-user-a"
+    )
+
+    assert exists is True
 
 
 def test_acquire_scope_lease_reattaches_existing_claim(monkeypatch) -> None:

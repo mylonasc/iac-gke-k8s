@@ -20,6 +20,7 @@ class SessionRepository:
             "tool_calls": session.tool_calls,
             "last_error": session.last_error,
             "share_id": session.share_id,
+            "sandbox_policy": session.sandbox_policy,
         }
 
     def list_sessions(self) -> list[dict[str, Any]]:

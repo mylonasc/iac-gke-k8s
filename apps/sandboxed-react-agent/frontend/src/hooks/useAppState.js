@@ -6,7 +6,8 @@ const THEME_STORAGE_KEY = "sandboxed-react-agent-theme-v2";
 const defaultConfig = {
   model: "gpt-4o-mini",
   max_tool_calls_per_turn: 4,
-  sandbox_mode: "local",
+  sandbox_mode: "cluster",
+  sandbox_profile: "persistent_workspace",
   sandbox_api_url: "",
   sandbox_template_name: "python-runtime-template-small",
   sandbox_namespace: "alt-default",
@@ -27,6 +28,11 @@ export function useAppState() {
   const [templateSaving, setTemplateSaving] = useState(false);
   const [configError, setConfigError] = useState("");
   const [configMessage, setConfigMessage] = useState("");
+  const [adminOpsLoading, setAdminOpsLoading] = useState(false);
+  const [adminOpsError, setAdminOpsError] = useState("");
+  const [adminOpsData, setAdminOpsData] = useState(null);
+  const [sandboxStatusLoading, setSandboxStatusLoading] = useState(false);
+  const [sandboxStatusError, setSandboxStatusError] = useState("");
   const [config, setConfig] = useState(defaultConfig);
   const [userId, setUserId] = useState("");
   const [userTier, setUserTier] = useState("default");
@@ -45,8 +51,111 @@ export function useAppState() {
       const response = await apiFetch(`${apiBase}/sessions/${sessionId}`);
       if (!response.ok) throw new Error(`Failed to load session ${sessionId}`);
       const data = await response.json();
-      setActiveSession(data);
+      setActiveSession({
+        ...data,
+        sandbox_policy: data?.sandbox_policy || {},
+      });
       setRuntimeKey((prev) => prev + 1);
+    },
+    [apiBase]
+  );
+
+  const loadSessionSandboxStatus = useCallback(
+    async (sessionId, { silent = false } = {}) => {
+      if (!sessionId) return null;
+      if (!silent) {
+        setSandboxStatusLoading(true);
+        setSandboxStatusError("");
+      }
+      try {
+        const response = await apiFetch(`${apiBase}/sessions/${sessionId}/sandbox/status`);
+        const data = await response.json();
+        if (!response.ok) throw new Error(data?.detail || "Failed to load sandbox status");
+        setActiveSession((prev) => {
+          if (!prev || prev.session_id !== sessionId) return prev;
+          return {
+            ...prev,
+            sandbox: data?.sandbox || prev?.sandbox,
+            sandbox_status: data,
+            sandbox_policy: data?.sandbox_policy || prev?.sandbox_policy || {},
+          };
+        });
+        return data;
+      } catch (error) {
+        if (!silent) setSandboxStatusError(String(error));
+        return null;
+      } finally {
+        if (!silent) setSandboxStatusLoading(false);
+      }
+    },
+    [apiBase]
+  );
+
+  const updateSessionSandboxPolicy = useCallback(
+    async (sessionId, patch) => {
+      if (!sessionId) return null;
+      setSandboxStatusLoading(true);
+      setSandboxStatusError("");
+      try {
+        const response = await apiFetch(`${apiBase}/sessions/${sessionId}/sandbox/policy`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(patch || {}),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data?.detail || "Failed to update sandbox policy");
+        setActiveSession((prev) => {
+          if (!prev || prev.session_id !== sessionId) return prev;
+          return {
+            ...prev,
+            sandbox_policy: data?.sandbox_policy || {},
+            sandbox_status: data?.status || prev?.sandbox_status,
+            sandbox: data?.status?.sandbox || prev?.sandbox,
+          };
+        });
+        return data;
+      } catch (error) {
+        setSandboxStatusError(String(error));
+        throw error;
+      } finally {
+        setSandboxStatusLoading(false);
+      }
+    },
+    [apiBase]
+  );
+
+  const runSessionSandboxAction = useCallback(
+    async (sessionId, action, { wait = false } = {}) => {
+      if (!sessionId) return null;
+      setSandboxStatusLoading(true);
+      setSandboxStatusError("");
+      try {
+        const response = await apiFetch(`${apiBase}/sessions/${sessionId}/sandbox/actions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action, wait }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data?.detail || "Failed sandbox action");
+        const status = data?.status;
+        if (status) {
+          setActiveSession((prev) => {
+            if (!prev || prev.session_id !== sessionId) return prev;
+            return {
+              ...prev,
+              sandbox_status: status,
+              sandbox: status?.sandbox || prev?.sandbox,
+              sandbox_policy: status?.sandbox_policy || prev?.sandbox_policy || {},
+            };
+          });
+        }
+        return data;
+      } catch (error) {
+        setSandboxStatusError(String(error));
+        throw error;
+      } finally {
+        setSandboxStatusLoading(false);
+      }
     },
     [apiBase]
   );
@@ -68,16 +177,26 @@ export function useAppState() {
       const response = await apiFetch(`${apiBase}/config`);
       if (!response.ok) throw new Error(`Failed to load config: ${response.status}`);
       const data = await response.json();
+      const runtime = data?.toolkits?.sandbox?.runtime || data?.sandbox || {};
+      const agentConfig = data?.agent || {};
       setConfig({
-        model: data.model || "gpt-4o-mini",
-        max_tool_calls_per_turn: Number(data.max_tool_calls_per_turn ?? 4),
-        sandbox_mode: data?.sandbox?.mode || "local",
-        sandbox_api_url: data?.sandbox?.api_url || "",
-        sandbox_template_name: data?.sandbox?.template_name || "python-runtime-template-small",
-        sandbox_namespace: data?.sandbox?.namespace || "alt-default",
-        sandbox_server_port: Number(data?.sandbox?.server_port ?? 8888),
-        sandbox_max_output_chars: Number(data?.sandbox?.max_output_chars ?? 6000),
-        sandbox_local_timeout_seconds: Number(data?.sandbox?.local_timeout_seconds ?? 20),
+        model: agentConfig.model || data.model || "gpt-4o-mini",
+        max_tool_calls_per_turn: Number(
+          agentConfig.max_tool_calls_per_turn ?? data.max_tool_calls_per_turn ?? 4
+        ),
+        sandbox_mode: runtime.mode || data.sandbox_mode || "cluster",
+        sandbox_profile: runtime.profile || data.sandbox_profile || "persistent_workspace",
+        sandbox_api_url: runtime.api_url || data.sandbox_api_url || "",
+        sandbox_template_name:
+          runtime.template_name || data.sandbox_template_name || "python-runtime-template-small",
+        sandbox_namespace: runtime.namespace || data.sandbox_namespace || "alt-default",
+        sandbox_server_port: Number(runtime.server_port ?? data.sandbox_server_port ?? 8888),
+        sandbox_max_output_chars: Number(
+          runtime.max_output_chars ?? data.sandbox_max_output_chars ?? 6000
+        ),
+        sandbox_local_timeout_seconds: Number(
+          runtime.local_timeout_seconds ?? data.sandbox_local_timeout_seconds ?? 20
+        ),
       });
     } catch (error) {
       setConfigError(String(error));
@@ -157,19 +276,10 @@ export function useAppState() {
     if (isSharedView || tab !== "chat" || !activeSession?.session_id) return undefined;
     const sessionId = activeSession.session_id;
     const timer = window.setInterval(() => {
-      apiFetch(`${apiBase}/sessions/${sessionId}/sandbox`)
-        .then((response) => (response.ok ? response.json() : null))
-        .then((data) => {
-          if (!data?.sandbox) return;
-          setActiveSession((prev) => {
-            if (!prev || prev.session_id !== sessionId) return prev;
-            return { ...prev, sandbox: data.sandbox };
-          });
-        })
-        .catch(() => undefined);
-    }, 3000);
+      loadSessionSandboxStatus(sessionId, { silent: true }).catch(() => undefined);
+    }, 2500);
     return () => window.clearInterval(timer);
-  }, [activeSession?.session_id, apiBase, isSharedView, tab]);
+  }, [activeSession?.session_id, loadSessionSandboxStatus, isSharedView, tab]);
 
   useEffect(() => {
     if (isSharedView) {
@@ -192,15 +302,24 @@ export function useAppState() {
   const saveConfig = useCallback(
     async (nextConfig) => {
       const payload = {
-        model: nextConfig.model,
-        max_tool_calls_per_turn: Number(nextConfig.max_tool_calls_per_turn),
-        sandbox_mode: nextConfig.sandbox_mode,
-        sandbox_api_url: nextConfig.sandbox_api_url,
-        sandbox_template_name: nextConfig.sandbox_template_name,
-        sandbox_namespace: nextConfig.sandbox_namespace,
-        sandbox_server_port: Number(nextConfig.sandbox_server_port),
-        sandbox_max_output_chars: Number(nextConfig.sandbox_max_output_chars),
-        sandbox_local_timeout_seconds: Number(nextConfig.sandbox_local_timeout_seconds),
+        agent: {
+          model: nextConfig.model,
+          max_tool_calls_per_turn: Number(nextConfig.max_tool_calls_per_turn),
+        },
+        toolkits: {
+          sandbox: {
+            runtime: {
+              mode: nextConfig.sandbox_mode,
+              profile: nextConfig.sandbox_profile,
+              api_url: nextConfig.sandbox_api_url,
+              template_name: nextConfig.sandbox_template_name,
+              namespace: nextConfig.sandbox_namespace,
+              server_port: Number(nextConfig.sandbox_server_port),
+              max_output_chars: Number(nextConfig.sandbox_max_output_chars),
+              local_timeout_seconds: Number(nextConfig.sandbox_local_timeout_seconds),
+            },
+          },
+        },
       };
       const response = await apiFetch(`${apiBase}/config`, {
         method: "POST",
@@ -235,6 +354,12 @@ export function useAppState() {
   const handleTemplateQuickSelect = useCallback(
     async (templateName) => {
       if (!templateName || templateName === config.sandbox_template_name) return;
+      if (config.sandbox_profile !== "transient") {
+        setConfigMessage(
+          "Quick template switch is available only in transient sandbox profile."
+        );
+        return;
+      }
       const previousTemplate = config.sandbox_template_name;
       const nextConfig = { ...config, sandbox_template_name: templateName };
       setConfig(nextConfig);
@@ -253,6 +378,36 @@ export function useAppState() {
     },
     [config, saveConfig]
   );
+
+  const loadAdminOps = useCallback(async () => {
+    setAdminOpsLoading(true);
+    setAdminOpsError("");
+    try {
+      const [workspaceJobsResponse, sandboxIndexResponse] = await Promise.all([
+        apiFetch(`${apiBase}/admin/ops/workspace-jobs?limit=200&include_terminal=true`),
+        apiFetch(`${apiBase}/admin/ops/sandbox-index?limit=300`),
+      ]);
+
+      const jobsPayload = await workspaceJobsResponse.json();
+      const indexPayload = await sandboxIndexResponse.json();
+
+      if (!workspaceJobsResponse.ok) {
+        throw new Error(jobsPayload?.detail || "Failed to load workspace jobs");
+      }
+      if (!sandboxIndexResponse.ok) {
+        throw new Error(indexPayload?.detail || "Failed to load sandbox index");
+      }
+
+      setAdminOpsData({
+        workspaceJobs: jobsPayload,
+        sandboxIndex: indexPayload,
+      });
+    } catch (error) {
+      setAdminOpsError(String(error));
+    } finally {
+      setAdminOpsLoading(false);
+    }
+  }, [apiBase]);
 
   const handleShare = useCallback(
     async (sessionId) => {
@@ -301,13 +456,22 @@ export function useAppState() {
     configLoading,
     configMessage,
     configSaving,
+    adminOpsData,
+    adminOpsError,
+    adminOpsLoading,
+    sandboxStatusLoading,
+    sandboxStatusError,
     createSession,
+    updateSessionSandboxPolicy,
+    runSessionSandboxAction,
+    loadSessionSandboxStatus,
     handleResetSession,
     handleSaveConfig,
     handleShare,
     handleTemplateQuickSelect,
     isSharedView,
     loadConfig,
+    loadAdminOps,
     loadSession,
     runtimeKey,
     sessions,

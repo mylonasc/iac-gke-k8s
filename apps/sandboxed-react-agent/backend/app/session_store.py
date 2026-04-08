@@ -9,6 +9,7 @@ from .persistence.schema import init_schema
 from .persistence.sessions import SQLiteSessionStore
 from .persistence.user_configs import SQLiteUserConfigStore
 from .persistence.users import SQLiteUserStore
+from .persistence.workspace_jobs import SQLiteWorkspaceJobStore
 from .persistence.user_workspaces import SQLiteUserWorkspaceStore
 
 
@@ -27,6 +28,7 @@ class SessionStore:
         self.assets = SQLiteAssetStore(self._connect)
         self.sandbox_leases = SQLiteSandboxLeaseStore(self._connect)
         self.user_workspaces = SQLiteUserWorkspaceStore(self._connect)
+        self.workspace_jobs = SQLiteWorkspaceJobStore(self._connect)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
@@ -107,6 +109,9 @@ class SessionStore:
     def list_active_sandbox_leases(self) -> list[dict[str, Any]]:
         return self.sandbox_leases.list_active_sandbox_leases()
 
+    def list_sandbox_leases(self, limit: int | None = None) -> list[dict[str, Any]]:
+        return self.sandbox_leases.list_sandbox_leases(limit=limit)
+
     def list_expired_sandbox_leases(self, now_iso: str) -> list[dict[str, Any]]:
         return self.sandbox_leases.list_expired_sandbox_leases(now_iso)
 
@@ -136,3 +141,91 @@ class SessionStore:
 
     def list_user_workspaces(self) -> list[dict[str, Any]]:
         return self.user_workspaces.list_user_workspaces()
+
+    def insert_workspace_job(self, job: dict[str, Any]) -> None:
+        self.workspace_jobs.insert_job(job)
+
+    def enqueue_workspace_job_if_no_active(self, job: dict[str, Any]) -> bool:
+        return self.workspace_jobs.enqueue_job_if_no_active(job)
+
+    def get_workspace_job(self, job_id: str) -> dict[str, Any] | None:
+        return self.workspace_jobs.get_job(job_id)
+
+    def get_active_workspace_job_for_user(self, user_id: str) -> dict[str, Any] | None:
+        return self.workspace_jobs.get_active_job_for_user(user_id)
+
+    def claim_next_workspace_job(
+        self,
+        *,
+        now_iso: str,
+        lease_expires_at: str,
+        worker_id: str,
+    ) -> dict[str, Any] | None:
+        return self.workspace_jobs.claim_next_job(
+            now_iso=now_iso,
+            lease_expires_at=lease_expires_at,
+            worker_id=worker_id,
+        )
+
+    def heartbeat_workspace_job(
+        self,
+        *,
+        job_id: str,
+        worker_id: str,
+        lease_expires_at: str,
+        now_iso: str,
+    ) -> bool:
+        return self.workspace_jobs.heartbeat_job(
+            job_id=job_id,
+            worker_id=worker_id,
+            lease_expires_at=lease_expires_at,
+            now_iso=now_iso,
+        )
+
+    def retry_workspace_job(
+        self,
+        *,
+        job_id: str,
+        worker_id: str,
+        now_iso: str,
+        not_before_at: str | None,
+        last_error: str | None = None,
+    ) -> bool:
+        return self.workspace_jobs.retry_job(
+            job_id=job_id,
+            worker_id=worker_id,
+            now_iso=now_iso,
+            not_before_at=not_before_at,
+            last_error=last_error,
+        )
+
+    def complete_workspace_job(
+        self,
+        *,
+        job_id: str,
+        worker_id: str,
+        status: str,
+        now_iso: str,
+        last_error: str | None = None,
+    ) -> bool:
+        return self.workspace_jobs.complete_job(
+            job_id=job_id,
+            worker_id=worker_id,
+            status=status,
+            now_iso=now_iso,
+            last_error=last_error,
+        )
+
+    def list_active_workspace_jobs_for_user(self, user_id: str) -> list[dict[str, Any]]:
+        return self.workspace_jobs.list_active_jobs_for_user(user_id)
+
+    def list_workspace_jobs(
+        self,
+        *,
+        limit: int | None = None,
+        include_terminal: bool = True,
+    ) -> list[dict[str, Any]]:
+        return self.workspace_jobs.list_jobs(
+            limit=limit,
+            include_terminal=include_terminal,
+        )

@@ -28,7 +28,8 @@ def init_schema(connect: Callable[[], object]) -> None:
                 ui_messages_json TEXT NOT NULL,
                 tool_calls INTEGER NOT NULL,
                 last_error TEXT,
-                share_id TEXT
+                share_id TEXT,
+                sandbox_policy_json TEXT
             )
             """
         )
@@ -38,6 +39,10 @@ def init_schema(connect: Callable[[], object]) -> None:
         }
         if "user_id" not in columns:
             connection.execute("ALTER TABLE sessions ADD COLUMN user_id TEXT")
+        if "sandbox_policy_json" not in columns:
+            connection.execute(
+                "ALTER TABLE sessions ADD COLUMN sandbox_policy_json TEXT"
+            )
         connection.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_share_id ON sessions (share_id)"
         )
@@ -125,6 +130,7 @@ def init_schema(connect: Callable[[], object]) -> None:
                 workspace_id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL UNIQUE,
                 status TEXT NOT NULL,
+                status_reason TEXT,
                 bucket_name TEXT NOT NULL,
                 managed_folder_path TEXT NOT NULL,
                 gsa_email TEXT NOT NULL,
@@ -144,8 +150,68 @@ def init_schema(connect: Callable[[], object]) -> None:
         )
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS workspace_jobs (
+                job_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                workspace_id TEXT,
+                status TEXT NOT NULL,
+                reconcile_ready INTEGER NOT NULL DEFAULT 0,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                not_before_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                started_at TEXT,
+                completed_at TEXT,
+                lease_expires_at TEXT,
+                worker_id TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                FOREIGN KEY (workspace_id) REFERENCES user_workspaces(workspace_id) ON DELETE SET NULL
+            )
+            """
+        )
+        workspace_columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(user_workspaces)"
+            ).fetchall()
+        }
+        if "status_reason" not in workspace_columns:
+            connection.execute(
+                "ALTER TABLE user_workspaces ADD COLUMN status_reason TEXT"
+            )
+        workspace_job_columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(workspace_jobs)"
+            ).fetchall()
+        }
+        if "not_before_at" not in workspace_job_columns:
+            connection.execute(
+                "ALTER TABLE workspace_jobs ADD COLUMN not_before_at TEXT"
+            )
+        connection.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_user_workspaces_status
             ON user_workspaces (status, updated_at DESC)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_workspace_jobs_status_created
+            ON workspace_jobs (status, created_at ASC)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_workspace_jobs_not_before
+            ON workspace_jobs (status, not_before_at)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_workspace_jobs_user_status
+            ON workspace_jobs (user_id, status, created_at ASC)
             """
         )
         connection.execute(
