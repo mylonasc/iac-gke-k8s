@@ -389,6 +389,22 @@
   min-width: 0;
 }
 
+.sandbox-fallback-banner {
+  border: 1px solid #d97706;
+  background: #ffedd5;
+  color: #9a3412;
+  border-radius: 10px;
+  padding: 0.45rem 0.55rem;
+  font-size: 0.84rem;
+}
+
+.sandbox-active-row {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
 .sandbox-controls-panel {
   border-top: 1px solid var(--line);
   padding-top: 0.55rem;
@@ -417,6 +433,13 @@
   gap: 0.2rem;
   color: var(--text-subtle);
   font-size: 0.84rem;
+}
+
+.sandbox-policy-hint {
+  width: 100%;
+  margin: 0;
+  color: var(--text-subtle);
+  font-size: 0.8rem;
 }
 
 .sandbox-policy-row input,

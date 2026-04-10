@@ -39,6 +39,12 @@ def _now_utc() -> datetime:
     return datetime.now(UTC)
 
 
+def _as_bool(value: str | None, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _to_iso(value: datetime) -> str:
     """Serialize an aware datetime into an ISO-8601 string."""
     return value.isoformat()
@@ -126,6 +132,8 @@ class SandboxLifecycleService:
         sandbox_lease_repository: SandboxLeaseRepository,
         get_user_id_for_session: Callable[[str], str | None] | None = None,
         get_workspace_for_user: Callable[[str], dict[str, Any] | None] | None = None,
+        resolve_workspace_template_for_user: Callable[[str, str | None], str]
+        | None = None,
         ensure_workspace_async_for_user: Callable[..., tuple[dict[str, Any], bool]]
         | None = None,
         bind_workspace_claim_for_session: Callable[[str, str | None, str | None], None]
@@ -138,6 +146,8 @@ class SandboxLifecycleService:
             sandbox_lease_repository: Persistence adapter for lease records.
             get_user_id_for_session: Optional resolver from session id to user id.
             get_workspace_for_user: Optional resolver for workspace snapshot lookup.
+            resolve_workspace_template_for_user: Optional resolver from requested
+                base template to user-derived template.
             ensure_workspace_async_for_user: Optional async workspace ensure callback.
             bind_workspace_claim_for_session: Optional callback to sync claim binding.
         """
@@ -145,6 +155,7 @@ class SandboxLifecycleService:
         self.sandbox_lease_repository = sandbox_lease_repository
         self.get_user_id_for_session = get_user_id_for_session
         self.get_workspace_for_user = get_workspace_for_user
+        self.resolve_workspace_template_for_user = resolve_workspace_template_for_user
         self.ensure_workspace_async_for_user = ensure_workspace_async_for_user
         self.bind_workspace_claim_for_session = bind_workspace_claim_for_session
 
@@ -160,11 +171,16 @@ class SandboxLifecycleService:
         self.max_lease_ttl_seconds = int(
             os.getenv("SANDBOX_MAX_LEASE_TTL_SECONDS", "21600")
         )
+        self.persistent_auto_fallback_enabled = _as_bool(
+            os.getenv("SANDBOX_PERSISTENT_AUTO_FALLBACK_ENABLED"),
+            default=True,
+        )
 
         self._state_lock = threading.RLock()
         self._scope_lock_by_scope: dict[tuple[str, str], threading.Lock] = {}
         self._runtime_by_lease_id: dict[str, _LeaseRuntime] = {}
         self._lease_id_by_scope: dict[tuple[str, str], str] = {}
+        self._runtime_resolution_by_session: dict[str, dict[str, Any]] = {}
         self._load_active_scope_index()
 
         logger.info(
@@ -174,10 +190,11 @@ class SandboxLifecycleService:
                 "sandbox_execution_model": self.execution_model,
                 "session_idle_ttl_seconds": self.session_idle_ttl_seconds,
                 "max_lease_ttl_seconds": self.max_lease_ttl_seconds,
+                "persistent_auto_fallback_enabled": self.persistent_auto_fallback_enabled,
             },
         )
 
-    def get_config(self) -> dict[str, int | str]:
+    def get_config(self) -> dict[str, int | str | bool]:
         """Return lifecycle-related runtime configuration.
 
         Returns:
@@ -187,6 +204,7 @@ class SandboxLifecycleService:
             "execution_model": self.execution_model,
             "session_idle_ttl_seconds": self.session_idle_ttl_seconds,
             "max_lease_ttl_seconds": self.max_lease_ttl_seconds,
+            "persistent_auto_fallback_enabled": self.persistent_auto_fallback_enabled,
         }
 
     def update_config(
@@ -296,6 +314,151 @@ class SandboxLifecycleService:
                 merged[key] = runtime_config[key]
         return merged
 
+    def _runtime_summary(self, runtime: dict[str, object]) -> dict[str, object]:
+        return {
+            "mode": str(runtime.get("mode") or "cluster"),
+            "profile": str(runtime.get("profile") or "persistent_workspace"),
+            "template_name": str(runtime.get("template_name") or ""),
+            "namespace": str(runtime.get("namespace") or ""),
+            "execution_model": str(runtime.get("execution_model") or "session"),
+            "session_idle_ttl_seconds": int(
+                runtime.get("session_idle_ttl_seconds") or self.session_idle_ttl_seconds
+            ),
+        }
+
+    def _should_auto_fallback(self, effective: dict[str, object]) -> bool:
+        if not self.persistent_auto_fallback_enabled:
+            return False
+        mode = str(effective.get("mode") or "cluster").strip().lower()
+        if mode != "cluster":
+            return False
+        profile = (
+            str(effective.get("profile") or "persistent_workspace").strip().lower()
+        )
+        return profile != "transient"
+
+    def _fallback_reason_code(self, error: Exception) -> str:
+        text = str(error).lower()
+        if "template" in text and "missing" in text:
+            return "template_missing"
+        if "unauthenticated" in text or "permission" in text:
+            return "fuse_auth_failed"
+        if "provision" in text or "workspace" in text:
+            return "workspace_not_ready"
+        return "runtime_resolution_error"
+
+    def _record_runtime_resolution(
+        self,
+        session_id: str,
+        resolution: dict[str, Any],
+    ) -> None:
+        now_iso = _to_iso(_now_utc())
+        fallback_active = bool(resolution.get("fallback_active"))
+
+        with self._state_lock:
+            previous = self._runtime_resolution_by_session.get(session_id)
+            previous_fallback = bool((previous or {}).get("fallback_active"))
+            previous_started = str((previous or {}).get("fallback_started_at") or "")
+
+            recorded = dict(resolution)
+            recorded["updated_at"] = now_iso
+
+            if fallback_active and not previous_fallback:
+                recorded["transition"] = "fallback_started"
+                recorded["fallback_started_at"] = now_iso
+                recorded["notice"] = (
+                    "Persistent sandbox is unavailable; starting transient fallback now."
+                )
+            elif fallback_active:
+                recorded["transition"] = None
+                recorded["fallback_started_at"] = previous_started or now_iso
+                recorded["notice"] = (
+                    "Using transient fallback while persistent sandbox is unavailable."
+                )
+            elif previous_fallback:
+                recorded["transition"] = "fallback_cleared"
+                recorded["fallback_cleared_at"] = now_iso
+                if previous_started:
+                    recorded["fallback_started_at"] = previous_started
+                recorded["notice"] = "Persistent sandbox is ready again."
+            else:
+                recorded["transition"] = None
+
+            self._runtime_resolution_by_session[session_id] = recorded
+
+    def get_session_runtime_resolution(self, session_id: str) -> dict[str, Any] | None:
+        with self._state_lock:
+            record = self._runtime_resolution_by_session.get(session_id)
+        if not record:
+            return None
+        return {
+            **record,
+            "requested_runtime": dict(record.get("requested_runtime") or {}),
+            "resolved_runtime": dict(record.get("resolved_runtime") or {}),
+        }
+
+    def _resolve_runtime_for_session(
+        self,
+        session_id: str,
+        *,
+        runtime_config: dict[str, object] | None = None,
+    ) -> tuple[dict[str, object] | None, str | None]:
+        requested = self._effective_runtime(runtime_config)
+        requested_summary = self._runtime_summary(requested)
+
+        try:
+            resolved = self._workspace_runtime_overrides(session_id, requested)
+            self._record_runtime_resolution(
+                session_id,
+                {
+                    "requested_runtime": requested_summary,
+                    "resolved_runtime": self._runtime_summary(resolved),
+                    "fallback_active": False,
+                    "fallback_reason_code": None,
+                    "fallback_error": None,
+                },
+            )
+            return resolved, None
+        except (WorkspaceNotReadyError, WorkspaceProvisioningError) as exc:
+            if not self._should_auto_fallback(requested):
+                self._record_runtime_resolution(
+                    session_id,
+                    {
+                        "requested_runtime": requested_summary,
+                        "resolved_runtime": requested_summary,
+                        "fallback_active": False,
+                        "fallback_reason_code": self._fallback_reason_code(exc),
+                        "fallback_error": str(exc),
+                    },
+                )
+                return None, str(exc)
+
+            fallback = dict(requested)
+            fallback["profile"] = "transient"
+            reason_code = self._fallback_reason_code(exc)
+            self._record_runtime_resolution(
+                session_id,
+                {
+                    "requested_runtime": requested_summary,
+                    "resolved_runtime": self._runtime_summary(fallback),
+                    "fallback_active": True,
+                    "fallback_reason_code": reason_code,
+                    "fallback_error": str(exc),
+                },
+            )
+            logger.warning(
+                "sandbox.runtime.fallback",
+                extra={
+                    "event": "sandbox.runtime.fallback",
+                    "session_id": session_id,
+                    "requested_profile": requested_summary.get("profile"),
+                    "resolved_profile": "transient",
+                    "reason_code": reason_code,
+                    "reason": str(exc),
+                },
+            )
+            return fallback, None
+
     def _workspace_runtime_overrides(
         self, session_id: str, effective: dict[str, object]
     ) -> dict[str, object]:
@@ -351,7 +514,31 @@ class SandboxLifecycleService:
         status = str(workspace.get("status") or "")
         if status == "ready":
             updated = dict(effective)
-            template_name = str(workspace.get("derived_template_name") or "").strip()
+            requested_template = str(updated.get("template_name") or "").strip() or None
+            template_name = ""
+            if self.resolve_workspace_template_for_user is not None:
+                try:
+                    template_name = str(
+                        self.resolve_workspace_template_for_user(
+                            user_id,
+                            requested_template,
+                        )
+                        or ""
+                    ).strip()
+                except Exception:
+                    logger.exception(
+                        "workspace.template_resolve_failed",
+                        extra={
+                            "event": "workspace.template_resolve_failed",
+                            "user_id": user_id,
+                            "workspace_id": workspace.get("workspace_id"),
+                            "requested_template_name": requested_template,
+                        },
+                    )
+            if not template_name:
+                template_name = str(
+                    workspace.get("derived_template_name") or ""
+                ).strip()
             namespace = str(workspace.get("claim_namespace") or "").strip()
             if template_name:
                 updated["template_name"] = template_name
@@ -1255,18 +1442,20 @@ class SandboxLifecycleService:
         Returns:
             Normalized sandbox execution result.
         """
-        effective = self._effective_runtime(runtime_config)
-        try:
-            effective = self._workspace_runtime_overrides(session_id, effective)
-        except (WorkspaceNotReadyError, WorkspaceProvisioningError) as exc:
+        effective, runtime_error = self._resolve_runtime_for_session(
+            session_id,
+            runtime_config=runtime_config,
+        )
+        if runtime_error:
             return SandboxExecutionResult(
                 tool_name="sandbox_exec_python",
                 ok=False,
                 stdout="",
                 stderr="",
                 exit_code=None,
-                error=str(exc),
+                error=runtime_error,
             )
+        assert effective is not None
         mode = str(effective["mode"])
         execution_model = str(effective["execution_model"])
         self.reap_expired_leases()
@@ -1308,18 +1497,20 @@ class SandboxLifecycleService:
         Returns:
             Normalized sandbox execution result.
         """
-        effective = self._effective_runtime(runtime_config)
-        try:
-            effective = self._workspace_runtime_overrides(session_id, effective)
-        except (WorkspaceNotReadyError, WorkspaceProvisioningError) as exc:
+        effective, runtime_error = self._resolve_runtime_for_session(
+            session_id,
+            runtime_config=runtime_config,
+        )
+        if runtime_error:
             return SandboxExecutionResult(
                 tool_name="sandbox_exec_shell",
                 ok=False,
                 stdout="",
                 stderr="",
                 exit_code=None,
-                error=str(exc),
+                error=runtime_error,
             )
+        assert effective is not None
         mode = str(effective["mode"])
         execution_model = str(effective["execution_model"])
         self.reap_expired_leases()

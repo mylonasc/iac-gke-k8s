@@ -1,0 +1,1 @@
+run_id,scenario_id,task_id,profile,execution_model,template_name,router_replicas,warm_pool_replicas,gvisor_min_nodes,background_load,t_first_tool_ms,t_steady_tool_ms,t_workspace_prepare_ms,t_workspace_ready_ms,t_claim_ready_ms,t_router_exec_ms,tool_failures,failed_mount_count,lease_stale_count,result,notes

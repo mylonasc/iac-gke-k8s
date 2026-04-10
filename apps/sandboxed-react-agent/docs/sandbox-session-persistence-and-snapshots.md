@@ -1,10 +1,10 @@
 # Sandboxed Session Persistence And Snapshots
 
-This document records the current live cluster state for sandboxing, the IaC changes required to support native GKE Pod Snapshots, the latest snapshot API surface, and the recommended design for persistent user sandbox sessions in `apps/sandboxed-react-agent`.
+This document records the current live cluster state for sandboxing, the IaC changes required to support native GKE Pod Snapshots, the latest snapshot API surface, and the recommended design for process-level persistent sandbox sessions in `apps/sandboxed-react-agent`.
 
 ## Current live state
 
-The following was verified against the current kube context:
+The following was verified against the current kube context (2026-04-10):
 
 - Context: `gke_gke-gpu-project-473410_europe-west4-a_gpu-spot-cluster`
 - Kubernetes server version: `v1.34.4-gke.1193000`
@@ -20,9 +20,11 @@ The following was verified against the current kube context:
   - `python-runtime-template-small`
   - `python-runtime-template-large`
   - `python-runtime-template-pydata`
+  - plus user-derived workspace templates (`python-runtime-template-user-*`)
 - Live runtime templates use:
   - `runtimeClassName: gvisor`
-  - `serviceAccountName: sandbox-runtime-ksa`
+  - base templates use `serviceAccountName: sandbox-runtime-ksa`
+  - user-derived templates use per-user KSAs created by workspace provisioning
   - `nodeSelector.workload-isolation: gvisor`
 
 Important negative finding:
@@ -62,6 +64,16 @@ The app backend is already aligned with the newer Python client release:
 
 That means the app dependency graph already knows about the `PodSnapshotSandboxClient`, but the cluster and IaC do not yet provide the required GKE Pod Snapshot APIs.
 
+### Current app behavior relevant to this doc
+
+The app now supports persistent workspace routing and reliability UX improvements:
+
+- per-user workspace persistence through GCS FUSE-backed derived templates
+- per-template-flavor derived template mapping for persistent sessions
+- optional persistent-to-transient fallback with explicit runtime status in session APIs
+
+This is file/workspace persistence, not full process/memory snapshot persistence.
+
 ## Why snapshots matter for this app
 
 The current app persists:
@@ -82,7 +94,7 @@ For this app, GKE Pod Snapshots are a strong fit because they are designed to pr
 - root filesystem changes
 - `emptyDir` / `tmpfs` changes
 
-That is much closer to the desired user experience of “resume my sandboxed workspace later” than the current lease-only model.
+That is much closer to the desired user experience of “resume my sandboxed process later” than the current workspace + lease model.
 
 ## IaC changes required for native snapshot support
 
@@ -616,7 +628,7 @@ Add durable session-linked snapshot metadata, for example:
 
 ## Summary
 
-Today the app supports reusable session leases, but not true persistent sandbox sessions.
+Today the app supports reusable session leases and persistent `/workspace` file state, but not full process-level persistent sandbox sessions.
 
 The main blockers are:
 

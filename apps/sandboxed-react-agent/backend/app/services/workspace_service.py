@@ -116,3 +116,24 @@ class WorkspaceService:
         if self.workspace_async_service is None:
             return False
         return self.workspace_async_service.is_pending(user_id)
+
+    def resolve_derived_template_name(
+        self, user_id: str, *, requested_template_name: str | None
+    ) -> str:
+        """Resolve the user-scoped derived template for requested base template.
+
+        Args:
+            user_id: User identifier.
+            requested_template_name: Requested base template.
+
+        Returns:
+            Derived template name.
+        """
+        return self.workspace_provisioning_service.resolve_derived_template_name(
+            user_id=user_id,
+            requested_template_name=requested_template_name,
+        )
+
+    def workspace_base_template_names(self) -> list[str]:
+        """Return configured base templates for persistent workspace mode."""
+        return self.workspace_provisioning_service.workspace_base_template_names()

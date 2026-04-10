@@ -38,7 +38,7 @@ spec:
         - name: dockerhub-regcred
       containers:
         - name: backend
-          image: docker.io/mylonasc/magarathea:sandboxed-react-agent-backend-0.6.16
+          image: docker.io/mylonasc/magarathea:sandboxed-react-agent-backend-0.6.18
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
@@ -76,6 +76,8 @@ spec:
               value: "0"
             - name: SANDBOX_WORKSPACE_BASE_TEMPLATE_NAME
               value: python-runtime-template-small
+            - name: SANDBOX_WORKSPACE_BASE_TEMPLATE_NAMES
+              value: python-runtime-template-small,python-runtime-template,python-runtime-template-large,python-runtime-template-pydata
             - name: WORKSPACE_PROVISIONER_MAX_WORKERS
               value: "4"
             - name: SANDBOX_SESSION_IDLE_TTL_SECONDS

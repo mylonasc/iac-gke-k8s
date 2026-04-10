@@ -148,6 +148,7 @@ def _runtime(lease_id: str = "lease-1"):
 
 
 def test_exec_python_starts_workspace_provisioning_when_missing(monkeypatch) -> None:
+    monkeypatch.setenv("SANDBOX_PERSISTENT_AUTO_FALLBACK_ENABLED", "0")
     manager = FakeSandboxManager()
     service = SandboxLifecycleService(
         sandbox_manager=manager,
@@ -177,6 +178,7 @@ def test_exec_python_starts_workspace_provisioning_when_missing(monkeypatch) -> 
 
 
 def test_exec_python_returns_pending_workspace_error(monkeypatch) -> None:
+    monkeypatch.setenv("SANDBOX_PERSISTENT_AUTO_FALLBACK_ENABLED", "0")
     manager = FakeSandboxManager()
     service = SandboxLifecycleService(
         sandbox_manager=manager,
@@ -200,6 +202,7 @@ def test_exec_python_returns_pending_workspace_error(monkeypatch) -> None:
 
 
 def test_exec_python_returns_workspace_error(monkeypatch) -> None:
+    monkeypatch.setenv("SANDBOX_PERSISTENT_AUTO_FALLBACK_ENABLED", "0")
     manager = FakeSandboxManager()
     service = SandboxLifecycleService(
         sandbox_manager=manager,
@@ -255,6 +258,54 @@ def test_exec_python_uses_ready_workspace_template(monkeypatch) -> None:
     assert runtime_config["namespace"] == "alt-default"
 
 
+def test_exec_python_maps_requested_base_template_to_user_derived_template(
+    monkeypatch,
+) -> None:
+    manager = FakeSandboxManager()
+    service = SandboxLifecycleService(
+        sandbox_manager=manager,
+        sandbox_lease_repository=FakeSandboxLeaseRepository(),
+        get_user_id_for_session=lambda session_id: "user-1",
+        get_workspace_for_user=lambda user_id: {
+            "workspace_id": "ws-1",
+            "user_id": user_id,
+            "status": "ready",
+            "derived_template_name": "python-runtime-template-user-primary",
+            "claim_namespace": "alt-default",
+        },
+        resolve_workspace_template_for_user=lambda user_id, requested_template_name: (
+            "python-runtime-template-user-large"
+            if requested_template_name == "python-runtime-template-large"
+            else "python-runtime-template-user-primary"
+        ),
+        ensure_workspace_async_for_user=None,
+    )
+    monkeypatch.setattr(service, "reap_expired_leases", lambda: 0)
+    monkeypatch.setattr(service, "_sandbox_template_exists", lambda **kwargs: True)
+    monkeypatch.setattr(
+        service, "_touch_lease", lambda lease, session_idle_ttl_seconds=None: lease
+    )
+    monkeypatch.setattr(
+        service,
+        "acquire_scope_lease",
+        lambda scope_type, scope_key, runtime_config=None: _runtime(),
+    )
+
+    result = service.exec_python(
+        "session-1",
+        "print('hello')",
+        runtime_config={
+            "profile": "persistent_workspace",
+            "template_name": "python-runtime-template-large",
+            "namespace": "alt-default",
+        },
+    )
+
+    assert result.ok is True
+    runtime_config = manager.exec_python_with_sandbox_calls[0]["runtime_config"]
+    assert runtime_config["template_name"] == "python-runtime-template-user-large"
+
+
 def test_exec_python_transient_profile_skips_workspace_resolution(monkeypatch) -> None:
     manager = FakeSandboxManager()
     service = SandboxLifecycleService(
@@ -302,9 +353,48 @@ def test_exec_python_transient_profile_skips_workspace_resolution(monkeypatch) -
     assert runtime_config["template_name"] == "python-runtime-template-small"
 
 
+def test_exec_python_auto_fallbacks_to_transient_when_workspace_not_ready(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SANDBOX_PERSISTENT_AUTO_FALLBACK_ENABLED", "1")
+    manager = FakeSandboxManager()
+    service = SandboxLifecycleService(
+        sandbox_manager=manager,
+        sandbox_lease_repository=FakeSandboxLeaseRepository(),
+        get_user_id_for_session=lambda session_id: "user-1",
+        get_workspace_for_user=lambda user_id: None,
+        ensure_workspace_async_for_user=lambda user_id, reconcile_ready=False: (
+            {"workspace_id": "ws-1", "user_id": user_id, "status": "pending"},
+            True,
+        ),
+    )
+    monkeypatch.setattr(service, "reap_expired_leases", lambda: 0)
+    monkeypatch.setattr(
+        service, "_touch_lease", lambda lease, session_idle_ttl_seconds=None: lease
+    )
+    monkeypatch.setattr(
+        service,
+        "acquire_scope_lease",
+        lambda scope_type, scope_key, runtime_config=None: _runtime(),
+    )
+
+    result = service.exec_python("session-1", "print('hello')")
+
+    assert result.ok is True
+    assert manager.exec_python_with_sandbox_calls
+    runtime_config = manager.exec_python_with_sandbox_calls[0]["runtime_config"]
+    assert runtime_config["profile"] == "transient"
+
+    resolution = service.get_session_runtime_resolution("session-1")
+    assert resolution is not None
+    assert resolution["fallback_active"] is True
+    assert resolution["transition"] == "fallback_started"
+
+
 def test_exec_python_reconciles_when_ready_workspace_template_missing(
     monkeypatch,
 ) -> None:
+    monkeypatch.setenv("SANDBOX_PERSISTENT_AUTO_FALLBACK_ENABLED", "0")
     manager = FakeSandboxManager()
     ensure_calls: list[tuple[str, bool]] = []
     service = SandboxLifecycleService(

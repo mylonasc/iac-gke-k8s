@@ -40,7 +40,8 @@ and lifecycle can be managed per chat session (not only per user/global config).
 
 - `GET /api/sessions/{session_id}/sandbox/status`
   - Returns effective runtime context, current session sandbox policy, lease
-    metadata, workspace status, and available sandbox options.
+    metadata, workspace status, available sandbox options, and runtime
+    resolution details (`active_runtime`, `runtime_resolution`).
 - `GET /api/sessions/{session_id}/sandbox/policy`
   - Returns current persisted session sandbox policy overlay.
 - `PATCH /api/sessions/{session_id}/sandbox/policy`
@@ -52,6 +53,12 @@ and lifecycle can be managed per chat session (not only per user/global config).
 
 The chat UI polls the status endpoint and provides inline session controls for
 refresh, lease release, workspace reconcile, and policy updates.
+
+When persistent workspace routing is selected but not ready, runtime can
+auto-fallback to transient execution (configurable via
+`SANDBOX_PERSISTENT_AUTO_FALLBACK_ENABLED`). The status payload and UI surface
+this explicitly so users can see when fallback starts and which sandbox profile
+and template are currently active.
 
 ## Sandbox Toolkit Surface
 
@@ -523,6 +530,13 @@ Configurable settings include:
 When profile is `transient`, tool calls explicitly bypass user workspace provisioning
 and run against the configured runtime template without per-user FUSE workspace routing.
 
+When profile is `persistent_workspace`, the selected runtime template is treated as
+the base flavor (`small`/`default`/`large`/`pydata`) and resolved to a user-scoped
+derived template for that flavor. Configure supported base flavors with
+`SANDBOX_WORKSPACE_BASE_TEMPLATE_NAMES` (CSV; first entry is the primary base).
+If an optional base flavor is not installed in-cluster, workspace provisioning skips
+that flavor and keeps the workspace ready on the primary base template.
+
 The panel calls backend API endpoints:
 
 - `GET /api/config`
@@ -597,5 +611,8 @@ Optional cleanup of Docker pull secret too:
 - This is an example implementation for rapid iteration.
 - Session state is cached in memory and persisted in local SQLite; scaling backend replicas still requires shared storage.
 - In `session` sandbox execution mode, tool calls in the same session reuse one sandbox lease until TTL expiry or explicit release.
+- Expired lease cleanup runs periodically in-process; tune with
+  `SANDBOX_LEASE_JANITOR_ENABLED` and
+  `SANDBOX_LEASE_JANITOR_INTERVAL_SECONDS`.
 - In `local` mode, tool commands run in the backend container and are not isolated like Agent Sandbox.
 - Add rate limiting, authz, and prompt/tool guardrails before production usage.

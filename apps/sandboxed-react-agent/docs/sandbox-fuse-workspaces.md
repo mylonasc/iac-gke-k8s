@@ -2,6 +2,21 @@
 
 This document captures the implementation plan for user-bound sandbox workspaces backed by Cloud Storage FUSE, with strong isolation enforced at the Google Cloud IAM layer.
 
+## Current implementation status (2026-04)
+
+The app now implements the core persistent workspace path and several UX/reliability improvements:
+
+- per-user workspace provisioning for bucket, GSA, KSA, WI, and user-derived templates
+- persistent execution resolves selected base template flavors to user-derived templates
+- optional persistent-to-transient fallback with explicit session status metadata
+- periodic lease janitor loop in app lifecycle, with request-path reaping retained as backstop
+
+What remains mostly roadmap-oriented in this document:
+
+- deeper preflight diagnostics for FUSE/WI prerequisites
+- warm pool and template alignment tuning by benchmark results
+- default-policy decisions (for example transient-by-default for general chat)
+
 One-time platform bootstrap steps are documented separately in:
 
 - `iac/sandbox_workspace_provisioning_setup/README.md`
@@ -11,8 +26,8 @@ One-time platform bootstrap steps are documented separately in:
 Add reusable sandbox workspaces such that:
 
 - each user gets a durable workspace stored in a dedicated bucket
-- sandboxs for the same user can mount that user's workspace concurrently
-- sandboxs for different users cannot access each other's workspace data at the Cloud Storage API layer
+- sandboxes for the same user can mount that user's workspace concurrently
+- sandboxes for different users cannot access each other's workspace data at the Cloud Storage API layer
 - active sandbox sessions reconnect to an existing `SandboxClaim` when possible
 
 ## What This Plan Assumes
@@ -127,7 +142,7 @@ The current cluster only wires `default-ksa` to a GSA and the sandbox runtime te
 Changes needed:
 
 - keep backend identity on `default-ksa` or move to a more explicit backend KSA/GSA pair
-- stop assuming one shared `sandbox-runtime-ksa` for all user-mounted sandboxs
+- stop assuming one shared `sandbox-runtime-ksa` for all user-mounted sandboxes
 - allow per-user KSAs to be referenced by user-derived sandbox templates
 
 Because sandbox identities are user-specific, Terraform should provision the cluster-wide primitives, but the per-user KSA objects should be created dynamically by the app or an internal provisioning service.
@@ -190,7 +205,7 @@ Extend `backend/app/persistence/schema.py` with workspace records such as:
   - `managed_folder_path`
   - `gsa_email`
   - `ksa_name`
-  - `derived_template_name`
+  - `derived_template_name` (primary derived template for compatibility)
   - `created_at`
   - `updated_at`
   - `last_error`
@@ -259,6 +274,12 @@ The app should create deterministic per-user template names, for example:
 
 - `python-runtime-template-user-<stable-id>`
 
+For additional base template flavors, create deterministic user-derived template names
+per base template (for example by suffixing a stable hash of the base template name).
+
+Configured base template flavors can be supplied via
+`SANDBOX_WORKSPACE_BASE_TEMPLATE_NAMES` (CSV, first entry is primary).
+
 The derived template should:
 
 - reference the per-user KSA
@@ -300,7 +321,7 @@ This flow should be idempotent and safe to retry after partial failure.
 
 1. request arrives with authenticated `user_id`
 2. app ensures workspace resources exist for that user
-3. app resolves the per-user derived template
+3. app resolves the per-user derived template for the requested base template flavor
 4. app creates a `SandboxClaim` against that template
 5. sandbox mounts `gs://<user-workspace-bucket>/` at `/workspace`
 
@@ -308,7 +329,7 @@ This flow should be idempotent and safe to retry after partial failure.
 
 1. app reuses the same workspace metadata
 2. app either reconnects to an existing active claim or creates another claim against the same user-derived template
-3. multiple sandboxs for that user can mount the same bucket concurrently
+3. multiple sandboxes for that user can mount the same bucket concurrently
 
 ### Future call in the same session
 
@@ -335,7 +356,7 @@ This flow should be idempotent and safe to retry after partial failure.
 
 ## Recommended Product Constraints
 
-Even though multiple sandboxs can mount the same user workspace, add guardrails:
+Even though multiple sandboxes can mount the same user workspace, add guardrails:
 
 - document `/workspace` as the only durable path
 - recommend caches and temporary scratch writes under `/tmp`

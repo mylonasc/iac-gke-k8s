@@ -170,9 +170,32 @@ class WorkspaceInfraConfig:
     bucket_prefix: str
     namespace: str
     base_template_name: str
+    base_template_names: tuple[str, ...] = ()
     gsa_account_prefix: str = "sandbox-user"
     ksa_prefix: str = "sandbox-user"
     template_prefix: str = "python-runtime-template-user"
+
+    def workspace_base_template_names(self) -> tuple[str, ...]:
+        """Return ordered unique base template names for workspace provisioning.
+
+        Returns:
+            Tuple of base template names. First element is the primary template.
+        """
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for raw in (self.base_template_name, *self.base_template_names):
+            name = str(raw or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            ordered.append(name)
+        if ordered:
+            return tuple(ordered)
+        return ("python-runtime-template-small",)
+
+    def primary_workspace_base_template_name(self) -> str:
+        """Return primary base template used for legacy compatibility."""
+        return self.workspace_base_template_names()[0]
 
     def bucket_name(self, user_id: str) -> str:
         """Return per-user bucket name.
@@ -231,16 +254,25 @@ class WorkspaceInfraConfig:
         """
         return normalize_dns_label(self.ksa_prefix, user_id)
 
-    def template_name(self, user_id: str) -> str:
+    def template_name(
+        self, user_id: str, *, base_template_name: str | None = None
+    ) -> str:
         """Return per-user derived SandboxTemplate name.
 
         Args:
             user_id: User identifier.
+            base_template_name: Optional base template this derived template mirrors.
 
         Returns:
             Template name.
         """
-        return normalize_dns_label(self.template_prefix, user_id)
+        selected_base = str(base_template_name or self.base_template_name).strip()
+        if not selected_base:
+            selected_base = self.primary_workspace_base_template_name()
+        if selected_base == self.primary_workspace_base_template_name():
+            return normalize_dns_label(self.template_prefix, user_id)
+        base_suffix = stable_suffix(selected_base, length=8)
+        return normalize_dns_label(f"{self.template_prefix}-{base_suffix}", user_id)
 
 
 def build_pending_workspace(

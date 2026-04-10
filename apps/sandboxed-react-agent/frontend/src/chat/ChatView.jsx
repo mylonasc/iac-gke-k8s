@@ -61,7 +61,7 @@ export function ChatView({
     setSessionProfile(session?.sandbox_policy?.profile || "");
     setSessionTemplate(session?.sandbox_policy?.template_name || "");
     setSessionExecutionModel(session?.sandbox_policy?.execution_model || "");
-  }, [session?.sandbox_policy, session?.session_id]);
+  }, [session?.session_id]);
 
   useEffect(() => {
     if (sandboxStatusError) {
@@ -90,6 +90,8 @@ export function ChatView({
   };
 
   const sessionStatus = session?.sandbox_status || null;
+  const runtimeResolution = sessionStatus?.runtime_resolution || null;
+  const activeRuntime = sessionStatus?.active_runtime || null;
   const availableSandboxes = sessionStatus?.available_sandboxes || {};
   const availableProfiles =
     Array.isArray(availableSandboxes.profiles) && availableSandboxes.profiles.length > 0
@@ -126,8 +128,50 @@ export function ChatView({
     session?.sandbox_policy?.template_name,
     sessionStatus?.effective?.runtime?.template_name,
   ]);
+  const persistentBaseTemplates = useMemo(() => {
+    const values = Array.isArray(availableSandboxes?.persistent_workspace?.base_templates)
+      ? availableSandboxes.persistent_workspace.base_templates
+      : [];
+    const unique = new Set();
+    values.forEach((entry) => {
+      if (typeof entry !== "string") return;
+      const value = entry.trim();
+      if (!value) return;
+      unique.add(value);
+    });
+    return Array.from(unique);
+  }, [availableSandboxes?.persistent_workspace?.base_templates]);
+  const persistentPrimaryBaseTemplate =
+    typeof availableSandboxes?.persistent_workspace?.primary_base_template === "string"
+      ? availableSandboxes.persistent_workspace.primary_base_template.trim()
+      : "";
+  const persistentTemplateHint =
+    persistentBaseTemplates.length > 0
+      ? persistentBaseTemplates.join(", ")
+      : "not reported by backend";
   const workspace = sessionStatus?.workspace_status?.workspace || null;
   const provisioningPending = sessionStatus?.workspace_status?.provisioning_pending;
+  const currentSandboxProfile =
+    activeRuntime?.profile ||
+    sessionStatus?.effective?.runtime?.profile ||
+    config?.sandbox_profile ||
+    "persistent_workspace";
+  const currentSandboxTemplate =
+    activeRuntime?.template_name ||
+    sessionStatus?.effective?.runtime?.template_name ||
+    config?.sandbox_template_name ||
+    "python-runtime-template-small";
+  const currentExecutionModel =
+    activeRuntime?.execution_model ||
+    sessionStatus?.effective?.lifecycle?.execution_model ||
+    "session";
+  const fallbackActive = Boolean(
+    activeRuntime?.fallback_active || runtimeResolution?.fallback_active
+  );
+  const fallbackNotice =
+    typeof runtimeResolution?.notice === "string" && runtimeResolution.notice
+      ? runtimeResolution.notice
+      : "Persistent sandbox is unavailable; transient fallback is active.";
 
   const applySessionPolicy = async () => {
     if (!session?.session_id || !onUpdateSessionSandboxPolicy) return;
@@ -153,6 +197,11 @@ export function ChatView({
                   Default profile: {config?.sandbox_profile || "persistent_workspace"}
                 </span>
                 <span className="pill">Default template: {config?.sandbox_template_name || "default"}</span>
+                <span className={`pill ${fallbackActive ? "pill-warning" : "pill-success"}`}>
+                  Sandbox now: {currentSandboxProfile}
+                </span>
+                <span className="pill">Template now: {currentSandboxTemplate}</span>
+                <span className="pill">Execution: {currentExecutionModel}</span>
               </div>
             ) : null}
           </div>
@@ -164,7 +213,9 @@ export function ChatView({
                 className="btn btn-subtle"
                 onClick={() => setShowSandboxControls((prev) => !prev)}
               >
-                {showSandboxControls ? "Hide sandbox controls" : "Sandbox controls"}
+                {showSandboxControls
+                  ? "Hide advanced sandbox controls"
+                  : "Advanced sandbox controls"}
               </button>
             ) : null}
             {!readOnly ? (
@@ -213,6 +264,20 @@ export function ChatView({
             ) : null}
           </div>
         </div>
+        {!readOnly && fallbackActive ? (
+          <div className="sandbox-fallback-banner" role="status" aria-live="polite">
+            <strong>Persistent fallback active.</strong> {fallbackNotice}
+          </div>
+        ) : null}
+        {!readOnly ? (
+          <div className="sandbox-active-row">
+            <span className={`pill ${fallbackActive ? "pill-warning" : "pill-success"}`}>
+              Current profile: {currentSandboxProfile}
+            </span>
+            <span className="pill">Current template: {currentSandboxTemplate}</span>
+            <span className="pill">Execution: {currentExecutionModel}</span>
+          </div>
+        ) : null}
         {!readOnly && showSandboxControls ? (
           <div className="sandbox-controls-panel">
             <div className="sandbox-status-row">
@@ -223,9 +288,14 @@ export function ChatView({
               <span className="pill">
                 Effective profile: {sessionStatus?.effective?.runtime?.profile || config?.sandbox_profile}
               </span>
+              <span className={`pill ${fallbackActive ? "pill-warning" : "pill-success"}`}>
+                Active profile: {currentSandboxProfile}
+              </span>
               <span className="pill">
                 Effective template: {sessionStatus?.effective?.runtime?.template_name || config?.sandbox_template_name}
               </span>
+              <span className="pill">Active template: {currentSandboxTemplate}</span>
+              <span className="pill">Execution: {currentExecutionModel}</span>
               <button
                 type="button"
                 className="btn btn-subtle tiny"
@@ -260,6 +330,10 @@ export function ChatView({
               </button>
             </div>
             <div className="sandbox-policy-row">
+              <p className="sandbox-policy-hint">
+                <strong>Persistent base templates:</strong> {persistentTemplateHint}
+                {persistentPrimaryBaseTemplate ? ` (primary: ${persistentPrimaryBaseTemplate})` : ""}
+              </p>
               <label>
                 Session profile
                 <select value={sessionProfile} onChange={(event) => setSessionProfile(event.target.value)}>

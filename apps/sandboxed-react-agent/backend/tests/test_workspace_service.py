@@ -96,6 +96,7 @@ class FakeKubernetesAdminClient:
     )
     deleted_service_accounts: list[tuple[str, str]] = field(default_factory=list)
     deleted_templates: list[tuple[str, str]] = field(default_factory=list)
+    fail_base_templates: set[str] = field(default_factory=set)
 
     def ensure_service_account(
         self, *, namespace: str, name: str, annotations: dict[str, str]
@@ -116,6 +117,8 @@ class FakeKubernetesAdminClient:
         mount_path: str,
         labels: dict[str, str],
     ) -> None:
+        if base_template_name in self.fail_base_templates:
+            raise RuntimeError(f"SandboxTemplate '{base_template_name}' not found")
         record = (
             namespace,
             name,
@@ -135,13 +138,21 @@ class FakeKubernetesAdminClient:
         self.deleted_service_accounts.append((namespace, name))
 
 
-def _build_service(tmp_path, *, fail_on_service_account: bool = False):
+def _build_service(
+    tmp_path,
+    *,
+    fail_on_service_account: bool = False,
+    base_template_names: tuple[str, ...] = (),
+    fail_base_templates: set[str] | None = None,
+):
     store = SessionStore(db_path=str(tmp_path / "workspace.db"))
     workspace_job_repository = WorkspaceJobRepository(store)
     google_client = FakeGoogleAdminClient(
         fail_on_service_account=fail_on_service_account
     )
-    kubernetes_client = FakeKubernetesAdminClient()
+    kubernetes_client = FakeKubernetesAdminClient(
+        fail_base_templates=set(fail_base_templates or set())
+    )
     provisioning = WorkspaceProvisioningService(
         user_repository=UserRepository(store),
         user_workspace_repository=UserWorkspaceRepository(store),
@@ -152,6 +163,7 @@ def _build_service(tmp_path, *, fail_on_service_account: bool = False):
             bucket_prefix="workspace-bucket",
             namespace="alt-default",
             base_template_name="python-runtime-template-small",
+            base_template_names=base_template_names,
         ),
     )
     service = WorkspaceService(workspace_provisioning_service=provisioning)
@@ -209,6 +221,49 @@ def test_workspace_provisioning_marks_error_on_failure(tmp_path) -> None:
     assert stored["status"] == "error"
     assert stored["status_reason"] == "service_account_failed"
     assert stored["last_error"] == "service account creation failed"
+
+
+def test_workspace_provisioning_creates_templates_for_all_configured_bases(
+    tmp_path,
+) -> None:
+    _, _, service, _, kubernetes_client, _ = _build_service(
+        tmp_path,
+        base_template_names=(
+            "python-runtime-template",
+            "python-runtime-template-large",
+            "python-runtime-template-pydata",
+        ),
+    )
+
+    workspace = service.get_or_create_user_workspace("user-1")
+
+    created_base_templates = [
+        record[2] for record in kubernetes_client.created_templates
+    ]
+    assert created_base_templates == [
+        "python-runtime-template-small",
+        "python-runtime-template",
+        "python-runtime-template-large",
+        "python-runtime-template-pydata",
+    ]
+    derived_names = [record[1] for record in kubernetes_client.created_templates]
+    assert workspace.derived_template_name == derived_names[0]
+    assert len(set(derived_names)) == len(derived_names)
+
+
+def test_workspace_provisioning_skips_missing_optional_base_template(tmp_path) -> None:
+    _, _, service, _, kubernetes_client, _ = _build_service(
+        tmp_path,
+        base_template_names=("python-runtime-template-large",),
+        fail_base_templates={"python-runtime-template-large"},
+    )
+
+    workspace = service.get_or_create_user_workspace("user-1")
+
+    assert workspace.status == "ready"
+    assert [record[2] for record in kubernetes_client.created_templates] == [
+        "python-runtime-template-small"
+    ]
 
 
 def test_workspace_deprovisioning_tombstones_workspace(tmp_path) -> None:

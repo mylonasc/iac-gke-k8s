@@ -143,6 +143,60 @@ class WorkspaceProvisioningService:
             f"invalid workspace status transition: {current_status} -> {next_status}"
         )
 
+    def _workspace_template_names(self, user_id: str) -> list[tuple[str, str]]:
+        """Resolve (base, derived) template pairs for one user.
+
+        Args:
+            user_id: User identifier.
+
+        Returns:
+            Ordered list of ``(base_template_name, derived_template_name)`` pairs.
+        """
+        return [
+            (
+                base_name,
+                self.infra_config.template_name(
+                    user_id,
+                    base_template_name=base_name,
+                ),
+            )
+            for base_name in self.infra_config.workspace_base_template_names()
+        ]
+
+    def _is_missing_base_template_error(self, error: Exception) -> bool:
+        status = int(getattr(error, "status", 0) or 0)
+        if status == 404:
+            return True
+        text = str(error).lower()
+        return "sandboxtemplate" in text and "not found" in text
+
+    def resolve_derived_template_name(
+        self,
+        *,
+        user_id: str,
+        requested_template_name: str | None,
+    ) -> str:
+        """Return derived template name for requested base template flavor.
+
+        Args:
+            user_id: User identifier.
+            requested_template_name: Requested base template name.
+
+        Returns:
+            Derived template name scoped to the user.
+        """
+        requested = str(requested_template_name or "").strip()
+        if not requested:
+            requested = self.infra_config.primary_workspace_base_template_name()
+        return self.infra_config.template_name(
+            user_id,
+            base_template_name=requested,
+        )
+
+    def workspace_base_template_names(self) -> list[str]:
+        """Return configured persistent-workspace base template names."""
+        return list(self.infra_config.workspace_base_template_names())
+
     def get_workspace_for_user(self, user_id: str) -> WorkspaceRecord | None:
         """Fetch workspace state for a user.
 
@@ -194,7 +248,8 @@ class WorkspaceProvisioningService:
         workspace.gsa_email = self.infra_config.gsa_email(normalized_user_id)
         workspace.ksa_name = self.infra_config.ksa_name(normalized_user_id)
         workspace.derived_template_name = self.infra_config.template_name(
-            normalized_user_id
+            normalized_user_id,
+            base_template_name=self.infra_config.primary_workspace_base_template_name(),
         )
         workspace.claim_namespace = self.infra_config.namespace
 
@@ -243,20 +298,43 @@ class WorkspaceProvisioningService:
                 gsa_email=gsa_email,
                 role="roles/storage.objectUser",
             )
-            self.kubernetes_admin_client.ensure_sandbox_template(
-                namespace=self.infra_config.namespace,
-                name=workspace.derived_template_name,
-                base_template_name=self.infra_config.base_template_name,
-                ksa_name=workspace.ksa_name,
-                bucket_name=workspace.bucket_name,
-                managed_folder_path=workspace.managed_folder_path,
-                mount_path="/workspace",
-                labels={
-                    "managed-by": "sandbox-workspace-provisioner",
-                    "workspace-id": workspace.workspace_id,
-                    "user-id": normalized_user_id,
-                },
-            )
+            template_pairs = self._workspace_template_names(normalized_user_id)
+            primary_base = self.infra_config.primary_workspace_base_template_name()
+            for base_template_name, derived_template_name in template_pairs:
+                try:
+                    self.kubernetes_admin_client.ensure_sandbox_template(
+                        namespace=self.infra_config.namespace,
+                        name=derived_template_name,
+                        base_template_name=base_template_name,
+                        ksa_name=workspace.ksa_name,
+                        bucket_name=workspace.bucket_name,
+                        managed_folder_path=workspace.managed_folder_path,
+                        mount_path="/workspace",
+                        labels={
+                            "managed-by": "sandbox-workspace-provisioner",
+                            "workspace-id": workspace.workspace_id,
+                            "user-id": normalized_user_id,
+                            "workspace-base-template": base_template_name,
+                        },
+                    )
+                except Exception as exc:
+                    is_missing_optional = (
+                        base_template_name != primary_base
+                        and self._is_missing_base_template_error(exc)
+                    )
+                    if not is_missing_optional:
+                        raise
+                    logger.warning(
+                        "workspace.template_base_missing.skipped",
+                        extra={
+                            "event": "workspace.template_base_missing.skipped",
+                            "workspace_id": workspace.workspace_id,
+                            "user_id": normalized_user_id,
+                            "base_template_name": base_template_name,
+                            "derived_template_name": derived_template_name,
+                            "error": str(exc),
+                        },
+                    )
         except Exception as exc:
             phase = (
                 "reconcile"
@@ -350,10 +428,12 @@ class WorkspaceProvisioningService:
         self.user_workspace_repository.upsert(workspace.as_record())
 
         try:
-            self.kubernetes_admin_client.delete_sandbox_template(
-                namespace=self.infra_config.namespace,
-                name=workspace.derived_template_name,
-            )
+            template_pairs = self._workspace_template_names(workspace.user_id)
+            for _, template_name in template_pairs:
+                self.kubernetes_admin_client.delete_sandbox_template(
+                    namespace=self.infra_config.namespace,
+                    name=template_name,
+                )
             self.kubernetes_admin_client.delete_service_account(
                 namespace=self.infra_config.namespace,
                 name=workspace.ksa_name,

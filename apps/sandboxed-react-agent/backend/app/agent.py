@@ -72,6 +72,20 @@ def _seconds_between(earlier: datetime | None, later: datetime | None) -> int | 
     return int(diff)
 
 
+def _csv_values(raw: str | None) -> list[str]:
+    if raw is None:
+        return []
+    values: list[str] = []
+    seen: set[str] = set()
+    for part in raw.split(","):
+        value = part.strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        values.append(value)
+    return values
+
+
 class SandboxedReactAgent:
     """Application facade that composes runtime, services, and toolkit providers."""
 
@@ -103,6 +117,12 @@ class SandboxedReactAgent:
                 else None
             ),
             get_workspace_for_user=lambda user_id: self.get_workspace(user_id),
+            resolve_workspace_template_for_user=lambda user_id, requested_template_name: (
+                self.resolve_workspace_template_for_runtime(
+                    user_id,
+                    requested_template_name=requested_template_name,
+                )
+            ),
             ensure_workspace_async_for_user=lambda user_id, reconcile_ready=False: (
                 self.ensure_workspace_async(
                     user_id,
@@ -189,14 +209,27 @@ class SandboxedReactAgent:
             session_service=self._session_service,
             get_session=self.get_session,
         )
+        workspace_base_templates = _csv_values(
+            os.getenv("SANDBOX_WORKSPACE_BASE_TEMPLATE_NAMES")
+        )
+        if workspace_base_templates:
+            workspace_primary_template = workspace_base_templates[0]
+            workspace_additional_templates = tuple(workspace_base_templates[1:])
+        else:
+            workspace_primary_template = (
+                os.getenv(
+                    "SANDBOX_WORKSPACE_BASE_TEMPLATE_NAME",
+                    self.sandbox_manager.template_name,
+                ).strip()
+                or self.sandbox_manager.template_name
+            )
+            workspace_additional_templates = ()
         infra_config = WorkspaceInfraConfig(
             project_id=os.getenv("GCP_PROJECT_ID", ""),
             bucket_prefix=os.getenv("SANDBOX_WORKSPACE_BUCKET_PREFIX", ""),
             namespace=os.getenv("SANDBOX_NAMESPACE", self.sandbox_manager.namespace),
-            base_template_name=os.getenv(
-                "SANDBOX_WORKSPACE_BASE_TEMPLATE_NAME",
-                self.sandbox_manager.template_name,
-            ),
+            base_template_name=workspace_primary_template,
+            base_template_names=workspace_additional_templates,
         )
         provisioning_enabled = self._workspace_provisioning_enabled(infra_config)
         self._workspace_provisioning_service = WorkspaceProvisioningService(
@@ -329,6 +362,20 @@ class SandboxedReactAgent:
     def get_workspace(self, user_id: str) -> dict[str, Any] | None:
         workspace = self._workspace_service.get_workspace_for_user(user_id)
         return workspace.as_record() if workspace else None
+
+    def resolve_workspace_template_for_runtime(
+        self,
+        user_id: str,
+        *,
+        requested_template_name: str | None,
+    ) -> str:
+        return self._workspace_service.resolve_derived_template_name(
+            user_id,
+            requested_template_name=requested_template_name,
+        )
+
+    def workspace_base_template_names(self) -> list[str]:
+        return self._workspace_service.workspace_base_template_names()
 
     def get_workspace_status(self, user_id: str) -> dict[str, Any]:
         workspace = self.get_workspace(user_id)
@@ -516,6 +563,12 @@ class SandboxedReactAgent:
             )
             for item in list(payload.get("items") or []):
                 metadata = item.get("metadata") or {}
+                labels = metadata.get("labels") or {}
+                if (
+                    str(labels.get("managed-by") or "").strip().lower()
+                    == "sandbox-workspace-provisioner"
+                ):
+                    continue
                 name = str(metadata.get("name") or "").strip()
                 if not name:
                     continue
@@ -542,11 +595,20 @@ class SandboxedReactAgent:
         namespace = str(
             sandbox_runtime.get("namespace") or self.sandbox_manager.namespace
         )
+        workspace_base_templates = self.workspace_base_template_names()
         return {
             "profiles": ["persistent_workspace", "transient"],
             "execution_models": ["session", "ephemeral"],
             "modes": ["cluster"] + (["local"] if self.allow_local_sandbox_mode else []),
             "templates": self._available_cluster_templates(namespace),
+            "persistent_workspace": {
+                "base_templates": workspace_base_templates,
+                "primary_base_template": (
+                    workspace_base_templates[0]
+                    if workspace_base_templates
+                    else self.sandbox_manager.template_name
+                ),
+            },
         }
 
     def _default_runtime_context(self) -> dict[str, Any]:
@@ -1339,15 +1401,65 @@ class SandboxedReactAgent:
             "lifecycle"
         ) or {}
 
+        sandbox = self.get_session_sandbox(session_id)
+        runtime_resolution = self.sandbox_lifecycle.get_session_runtime_resolution(
+            session_id
+        )
+        resolved_runtime = dict(
+            (runtime_resolution or {}).get("resolved_runtime") or {}
+        )
+        runtime_source = (
+            "active_lease"
+            if bool(sandbox.get("has_active_lease"))
+            else ("resolved_runtime" if resolved_runtime else "configured_runtime")
+        )
+        active_runtime_template = str(
+            sandbox.get("template_name") or ""
+        ).strip() or str(
+            resolved_runtime.get("template_name")
+            or sandbox_runtime.get("template_name")
+            or ""
+        )
+        active_runtime_namespace = str(sandbox.get("namespace") or "").strip() or str(
+            resolved_runtime.get("namespace") or sandbox_runtime.get("namespace") or ""
+        )
+        active_runtime_profile = str(
+            resolved_runtime.get("profile") or sandbox_runtime.get("profile") or ""
+        )
+        active_runtime_mode = str(
+            resolved_runtime.get("mode") or sandbox_runtime.get("mode") or ""
+        )
+        active_runtime_execution_model = str(
+            resolved_runtime.get("execution_model")
+            or sandbox_lifecycle.get("execution_model")
+            or ""
+        )
+
         workspace_status = self.get_workspace_status(user_id)
         return {
             "session_id": session_id,
-            "sandbox": self.get_session_sandbox(session_id),
+            "sandbox": sandbox,
             "sandbox_policy": dict(session.sandbox_policy or {}),
             "effective": {
                 "runtime": sandbox_runtime,
                 "lifecycle": sandbox_lifecycle,
             },
+            "active_runtime": {
+                "source": runtime_source,
+                "mode": active_runtime_mode,
+                "profile": active_runtime_profile,
+                "template_name": active_runtime_template,
+                "namespace": active_runtime_namespace,
+                "execution_model": active_runtime_execution_model,
+                "has_active_lease": bool(sandbox.get("has_active_lease")),
+                "fallback_active": bool(
+                    (runtime_resolution or {}).get("fallback_active")
+                ),
+                "fallback_reason_code": (runtime_resolution or {}).get(
+                    "fallback_reason_code"
+                ),
+            },
+            "runtime_resolution": runtime_resolution,
             "workspace_status": workspace_status,
             "available_sandboxes": self.list_available_sandboxes(user_id),
         }

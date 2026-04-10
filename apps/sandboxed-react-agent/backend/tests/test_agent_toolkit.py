@@ -244,9 +244,11 @@ def test_sandbox_toolkit_supports_diagnostic_and_mutating_controls() -> None:
     ]
 
 
-def test_sandbox_toolkit_reports_missing_workspace_template_and_starts_reconcile() -> (
-    None
-):
+def test_sandbox_toolkit_reports_missing_workspace_template_and_starts_reconcile(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SANDBOX_PERSISTENT_AUTO_FALLBACK_ENABLED", "0")
+
     class _Repo:
         def list_active(self):
             return []
@@ -351,9 +353,11 @@ def test_sandbox_toolkit_reports_missing_workspace_template_and_starts_reconcile
     assert reconcile_calls == [("user-1", True)]
 
 
-def test_sandbox_toolkit_reports_missing_workspace_template_while_reconcile_in_progress() -> (
-    None
-):
+def test_sandbox_toolkit_reports_missing_workspace_template_while_reconcile_in_progress(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SANDBOX_PERSISTENT_AUTO_FALLBACK_ENABLED", "0")
+
     class _Repo:
         def list_active(self):
             return []
