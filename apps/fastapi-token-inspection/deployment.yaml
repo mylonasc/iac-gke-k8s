@@ -29,11 +29,13 @@ spec:
               cat > /app/main.py <<'PY'
               import base64
               import json
+              from typing import Any
+
               from fastapi import FastAPI, Header, HTTPException
 
               app = FastAPI()
 
-              def decode_jwt_payload(token: str) -> dict:
+              def decode_jwt_payload(token: str) -> dict[str, Any]:
                   parts = token.split(".")
                   if len(parts) < 2:
                       raise ValueError("Token is not a JWT")
@@ -41,22 +43,115 @@ spec:
                   decoded = base64.urlsafe_b64decode(payload.encode("utf-8")).decode("utf-8")
                   return json.loads(decoded)
 
+              def bearer_from_authorization(header_value: str | None) -> str | None:
+                  value = (header_value or "").strip()
+                  if not value.lower().startswith("bearer "):
+                      return None
+                  token = value.split(" ", 1)[1].strip()
+                  return token or None
+
+              def token_hint(token: str) -> str:
+                  if len(token) <= 24:
+                      return token
+                  return f"{token[:12]}...{token[-12:]}"
+
+              def collect_token_details(
+                  authorization: str | None,
+                  forwarded_access_token: str | None,
+              ) -> dict[str, Any]:
+                  auth_bearer = bearer_from_authorization(authorization)
+                  token_sources: dict[str, str] = {}
+                  decoded_payloads: dict[str, Any] = {}
+
+                  if auth_bearer:
+                      token_sources["authorization_bearer"] = auth_bearer
+                  if (forwarded_access_token or "").strip():
+                      token_sources["x_auth_request_access_token"] = str(
+                          forwarded_access_token
+                      ).strip()
+
+                  if not token_sources:
+                      raise HTTPException(
+                          status_code=401,
+                          detail="No token found in Authorization or X-Auth-Request-Access-Token",
+                      )
+
+                  for source, token in token_sources.items():
+                      try:
+                          decoded_payloads[source] = decode_jwt_payload(token)
+                      except Exception as exc:
+                          decoded_payloads[source] = {"decode_error": str(exc)}
+
+                  return {
+                      "token_sources": token_sources,
+                      "decoded_payloads": decoded_payloads,
+                  }
+
+              @app.get("/healthz")
+              async def healthz() -> dict[str, str]:
+                  return {"status": "ok"}
+
               @app.get("/inspect-token")
-              async def inspect_token(authorization: str | None = Header(default=None)):
-                  if not authorization or not authorization.lower().startswith("bearer "):
-                      raise HTTPException(status_code=401, detail="Missing Bearer token")
+              async def inspect_token(
+                  authorization: str | None = Header(default=None),
+                  x_auth_request_access_token: str | None = Header(default=None),
+              ) -> dict[str, Any]:
+                  details = collect_token_details(
+                      authorization,
+                      x_auth_request_access_token,
+                  )
+                  token_sources = details["token_sources"]
+                  decoded_payloads = details["decoded_payloads"]
 
-                  token = authorization.split(" ", 1)[1].strip()
-                  try:
-                      payload = decode_jwt_payload(token)
-                  except Exception as exc:
-                      raise HTTPException(status_code=400, detail=f"Invalid token: {exc}")
+                  redacted_tokens = {
+                      source: token_hint(token)
+                      for source, token in token_sources.items()
+                  }
 
-                  print(f"Bearer token payload: {json.dumps(payload, separators=(",",":"))}", flush=True)
-                  return {"payload": payload}
+                  print(
+                      json.dumps(
+                          {
+                              "event": "token_inspection",
+                              "sources": list(token_sources.keys()),
+                              "decoded_payloads": decoded_payloads,
+                          },
+                          separators=(",", ":"),
+                      ),
+                      flush=True,
+                  )
+
+                  return {
+                      "sources": list(token_sources.keys()),
+                      "token_hints": redacted_tokens,
+                      "decoded_payloads": decoded_payloads,
+                      "note": "Use /token-inspection/raw to retrieve full token values.",
+                  }
+
+              @app.get("/token-inspection/raw")
+              async def token_inspection_raw(
+                  authorization: str | None = Header(default=None),
+                  x_auth_request_access_token: str | None = Header(default=None),
+                  x_auth_request_user: str | None = Header(default=None),
+                  x_auth_request_email: str | None = Header(default=None),
+              ) -> dict[str, Any]:
+                  details = collect_token_details(
+                      authorization,
+                      x_auth_request_access_token,
+                  )
+                  return {
+                      "token_sources": details["token_sources"],
+                      "decoded_payloads": details["decoded_payloads"],
+                      "auth_context": {
+                          "x_auth_request_user": x_auth_request_user,
+                          "x_auth_request_email": x_auth_request_email,
+                      },
+                  }
 
               @app.get("/token-inspection")
-              async def token_inspection_alias(authorization: str | None = Header(default=None)):
-                  return await inspect_token(authorization)
+              async def token_inspection_alias(
+                  authorization: str | None = Header(default=None),
+                  x_auth_request_access_token: str | None = Header(default=None),
+              ) -> dict[str, Any]:
+                  return await inspect_token(authorization, x_auth_request_access_token)
               PY
               uvicorn main:app --host 0.0.0.0 --port 8000

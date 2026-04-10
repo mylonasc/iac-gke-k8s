@@ -13,9 +13,11 @@ It provides:
 - workspace/session lease health and historical lease analytics (via sandboxed-react-agent admin API)
 - richer sandbox claim details (creation time, age, status, ownership mapping to lease/session/user)
 - lease event filtering (status/user/session) and CSV export from the admin UI
+- lease event pagination + text search and filtered-count visibility
 - API endpoints to scale managed deployments up/down
 - API endpoints to create/delete Agent Sandbox claims
 - API endpoints to create/scale Agent Sandbox warm pools
+- template-oriented warm-pool profile API for multi-template control panels
 - JWT validation (signature + issuer + audience + expiry) before allowing access
 
 ## What it controls
@@ -182,6 +184,14 @@ curl -X POST \
   -H "Content-Type: application/json" \
   -d '{"replicas":5}' \
   "https://magarathea.ddns.net/alt-default-ops/api/sandboxwarmpools/python-sandbox-warmpool/scale"
+```
+
+Warm pool profiles (template-oriented control data):
+
+```bash
+curl -X GET \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  "https://magarathea.ddns.net/alt-default-ops/api/sandboxwarmpool-profiles"
 ```
 
 ## Cost estimate notes

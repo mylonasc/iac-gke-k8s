@@ -23,6 +23,13 @@
     th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); font-size: 0.92rem; }
     input, select { padding: 6px 8px; border: 1px solid #b9c7d0; border-radius: 8px; }
     pre { margin: 0; max-height: 320px; overflow: auto; background: #f7fbfd; border: 1px solid var(--line); border-radius: 8px; padding: 10px; font-size: 0.82rem; }
+    .table-wrap { overflow-x: auto; }
+    .pill { display: inline-flex; align-items: center; border-radius: 999px; border: 1px solid #c8d4dc; padding: 2px 8px; font-size: 0.78rem; color: #32424f; background: #f7fbfd; }
+    .btn-danger { border-color: #d2a3a3; color: #8f1e1e; }
+    .btn-primary { border-color: #6f8ca1; background: #eff6fb; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; }
+    .section-title { display: flex; align-items: center; gap: 8px; }
+    .small { font-size: 0.82rem; }
   </style>
 </head>
 <body>
@@ -31,6 +38,18 @@
       <h1>alt-default ops console</h1>
       <div class="row" style="margin-bottom: 8px;">
         <button class="btn" onclick="logoutGoogle()">Logout</button>
+        <button id="refreshNowBtn" class="btn btn-primary" onclick="refreshNow()">Refresh now</button>
+        <button id="refreshToggleBtn" class="btn" onclick="toggleAutoRefresh()">Pause auto-refresh</button>
+        <label>
+          Interval
+          <select id="refreshInterval" onchange="changeRefreshInterval()">
+            <option value="10000">10s</option>
+            <option value="30000">30s</option>
+            <option value="60000">60s</option>
+          </select>
+        </label>
+        <span id="refreshState" class="pill">auto-refresh: on</span>
+        <span id="refreshPerf" class="pill">last refresh: n/a</span>
       </div>
       {% if authorized %}
       <div class="muted">signed in as {{ email }} via {{ issuer }}</div>
@@ -48,90 +67,131 @@
     </div>
 
     <div class="card">
-      <h2>Managed Deployments</h2>
+      <h2 class="section-title">Managed Deployments <span id="deploymentsCount" class="pill">0</span></h2>
+      <div class="table-wrap">
       <table>
         <thead><tr><th>Name</th><th>Ready</th><th>Desired</th><th>Actions</th></tr></thead>
         <tbody id="deployments"></tbody>
       </table>
+      </div>
     </div>
 
     <div class="card">
-      <h2>Sandbox Claims</h2>
+      <h2 class="section-title">Sandbox Claims <span id="claimsCount" class="pill">0</span></h2>
       <div class="row" style="margin-bottom: 10px;">
         <select id="template"></select>
         <input id="claim" placeholder="optional claim name" />
         <button class="btn" onclick="createClaim()">Create claim</button>
       </div>
+      <div class="table-wrap">
       <table>
         <thead><tr><th>Claim</th><th>Template</th><th>Ready</th><th>Created</th><th>Age</th><th>Session</th><th>User</th><th>Workspace</th><th>Action</th></tr></thead>
         <tbody id="claims"></tbody>
       </table>
+      </div>
     </div>
 
     <div class="card">
-      <h2>Sandboxes</h2>
+      <h2 class="section-title">Sandboxes <span id="sandboxesCount" class="pill">0</span></h2>
+      <div class="table-wrap">
       <table>
         <thead><tr><th>Name</th><th>Claim</th><th>Template</th><th>Ready</th><th>Phase</th><th>Created</th><th>Age</th></tr></thead>
         <tbody id="sandboxesDetailed"></tbody>
       </table>
+      </div>
     </div>
 
     <div class="card">
-      <h2>Sandbox Warm Pools</h2>
+      <h2 class="section-title">Sandbox Warm Pools <span id="warmPoolsCount" class="pill">0</span></h2>
       <div class="row" style="margin-bottom: 10px;">
         <input id="warmPoolName" value="python-sandbox-warmpool" placeholder="warm pool name" />
         <select id="warmPoolTemplate"></select>
         <input id="warmPoolReplicas" type="number" min="0" max="5" value="1" />
         <button class="btn" onclick="upsertWarmPool()">Start / Update warm pool</button>
       </div>
+      <div class="table-wrap">
       <table>
         <thead><tr><th>Name</th><th>Template</th><th>Ready</th><th>Replicas</th><th>Created</th><th>Age</th><th>Actions</th></tr></thead>
         <tbody id="warmPools"></tbody>
       </table>
+      </div>
+      <h3 class="section-title" style="margin-top: 12px;">Warm Pool by Template <span id="warmPoolProfilesCount" class="pill">0</span></h3>
+      <p class="muted small">Use this to keep a baseline warm-pool strategy per sandbox template/profile.</p>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>Template</th><th>Category</th><th>Pools</th><th>Total Replicas</th><th>Default Pool Name</th><th>Actions</th></tr></thead>
+        <tbody id="warmPoolProfiles"></tbody>
+      </table>
+      </div>
     </div>
 
     <div class="card">
-      <h2>Workspace and Lease Health</h2>
+      <h2 class="section-title">Workspace and Lease Health <span id="leaseEventsCount" class="pill">0</span></h2>
       <div class="grid" id="workspaceHealthMetrics"></div>
       <div id="workspaceHealthSummary" class="muted" style="margin-top: 10px;">No workspace/session health data yet.</div>
       <div class="row" style="margin-top: 10px; margin-bottom: 8px;">
         <label>
           Status
-          <select id="leaseStatusFilter" onchange="applyLeaseEventFilters()">
+          <select id="leaseStatusFilter" onchange="applyLeaseEventFilters(true)">
             <option value="">All statuses</option>
           </select>
         </label>
         <label>
           User
-          <input id="leaseUserFilter" placeholder="user id" oninput="applyLeaseEventFilters()" />
+          <input id="leaseUserFilter" placeholder="user id" oninput="applyLeaseEventFilters(true)" />
         </label>
         <label>
           Session
-          <input id="leaseSessionFilter" placeholder="session id" oninput="applyLeaseEventFilters()" />
+          <input id="leaseSessionFilter" placeholder="session id" oninput="applyLeaseEventFilters(true)" />
         </label>
+        <label>
+          Search
+          <input id="leaseTextFilter" placeholder="lease/claim/error" oninput="applyLeaseEventFilters(true)" />
+        </label>
+        <label>
+          Page size
+          <select id="leasePageSize" onchange="applyLeaseEventFilters(true)">
+            <option value="25">25</option>
+            <option value="50" selected>50</option>
+            <option value="100">100</option>
+            <option value="200">200</option>
+          </select>
+        </label>
+        <button id="leasePrevBtn" class="btn" type="button" onclick="prevLeaseEventsPage()">Prev</button>
+        <button id="leaseNextBtn" class="btn" type="button" onclick="nextLeaseEventsPage()">Next</button>
+        <span id="leaseEventsPager" class="pill">page 1/1</span>
         <button class="btn" type="button" onclick="exportLeaseEventsCsv()">Export filtered CSV</button>
       </div>
+      <div id="leaseEventsSummary" class="muted small">No lease events loaded.</div>
+      <div class="table-wrap">
       <table style="margin-top: 8px;">
         <thead><tr><th>Date</th><th>Leases Created</th><th>Leases Released</th></tr></thead>
         <tbody id="leaseDaily"></tbody>
       </table>
+      </div>
+      <div class="table-wrap">
       <table style="margin-top: 8px;">
         <thead><tr><th>Status</th><th>Samples</th><th>Avg Lifetime</th><th>Min</th><th>Max</th></tr></thead>
         <tbody id="leaseLifetime"></tbody>
       </table>
+      </div>
+      <div class="table-wrap">
       <table style="margin-top: 8px;">
         <thead><tr><th>Status</th><th>Lease</th><th>Claim</th><th>Session</th><th>User</th><th>Created</th><th>Released</th><th>Duration</th></tr></thead>
         <tbody id="leaseEvents"></tbody>
       </table>
+      </div>
     </div>
 
     <div class="card">
-      <h2>Node Inventory</h2>
+      <h2 class="section-title">Node Inventory <span id="nodesCount" class="pill">0</span></h2>
       <div id="nodeSummary" class="muted" style="margin-bottom: 10px;">No node data yet.</div>
+      <div class="table-wrap">
       <table>
         <thead><tr><th>Name</th><th>Ready</th><th>Instance Type</th><th>Node Pool</th><th>Pods</th><th>Pod Phases</th></tr></thead>
         <tbody id="nodes"></tbody>
       </table>
+      </div>
     </div>
 
     <div class="card">
@@ -145,15 +205,17 @@
     </div>
 
     <div class="card">
-      <h2>Persistent Volume Claims</h2>
+      <h2 class="section-title">Persistent Volume Claims <span id="pvcsCount" class="pill">0</span></h2>
+      <div class="table-wrap">
       <table>
         <thead><tr><th>Name</th><th>Status</th><th>Storage Class</th><th>Requested</th><th>Access Modes</th><th>Volume</th></tr></thead>
         <tbody id="pvcs"></tbody>
       </table>
+      </div>
     </div>
 
     <div class="card">
-      <h2>Pods</h2>
+      <h2 class="section-title">Pods <span id="podsCount" class="pill">0</span></h2>
       <div class="row" style="margin-bottom: 10px;">
         <label>
           Node
@@ -168,10 +230,12 @@
           </select>
         </label>
       </div>
+      <div class="table-wrap">
       <table>
         <thead><tr><th>Name</th><th>Phase</th><th>Node</th><th>Ready</th></tr></thead>
         <tbody id="pods"></tbody>
       </table>
+      </div>
     </div>
   </div>
 
@@ -180,6 +244,13 @@ const BASE = "{{ base_path }}";
 let allPods = [];
 let availableTemplates = [];
 let allLeaseEvents = [];
+let allWarmPools = [];
+let backendWarmPoolProfiles = [];
+let refreshTimerId = null;
+let autoRefreshEnabled = true;
+let refreshIntervalMs = 10000;
+let refreshInFlight = false;
+let leaseEventsPage = 1;
 
 function esc(value) {
   return String(value ?? '')
@@ -222,6 +293,43 @@ function withBase(path) {
   return `${BASE}${path}`;
 }
 
+function setCount(id, value) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = String(value ?? 0);
+}
+
+function emptyRow(tbody, colSpan, text) {
+  const tr = document.createElement('tr');
+  tr.innerHTML = `<td colspan="${colSpan}" class="muted">${esc(text)}</td>`;
+  tbody.appendChild(tr);
+}
+
+function updateRefreshState(durationMs) {
+  const state = document.getElementById('refreshState');
+  const perf = document.getElementById('refreshPerf');
+  const toggle = document.getElementById('refreshToggleBtn');
+  const interval = document.getElementById('refreshInterval');
+
+  if (state) state.textContent = `auto-refresh: ${autoRefreshEnabled ? 'on' : 'paused'}`;
+  if (toggle) toggle.textContent = autoRefreshEnabled ? 'Pause auto-refresh' : 'Resume auto-refresh';
+  if (interval) interval.value = String(refreshIntervalMs);
+  if (perf && typeof durationMs === 'number') {
+    perf.textContent = `last refresh: ${Math.round(durationMs)}ms`;
+  }
+}
+
+function scheduleRefresh() {
+  if (refreshTimerId) {
+    clearTimeout(refreshTimerId);
+    refreshTimerId = null;
+  }
+  if (!autoRefreshEnabled) return;
+  refreshTimerId = setTimeout(() => {
+    refresh();
+  }, refreshIntervalMs);
+}
+
 async function api(path, opts) {
   const r = await fetch(withBase(path), { ...opts, headers: { 'Content-Type': 'application/json', ...(opts?.headers || {}) } });
   const text = await r.text();
@@ -237,12 +345,38 @@ function setMsg(id, msg, cls) {
   el.className = cls || '';
 }
 
+function refreshNow() {
+  refresh();
+}
+
+function toggleAutoRefresh() {
+  autoRefreshEnabled = !autoRefreshEnabled;
+  updateRefreshState();
+  scheduleRefresh();
+}
+
+function changeRefreshInterval() {
+  const selected = Number(document.getElementById('refreshInterval').value || '10000');
+  if (!Number.isNaN(selected) && selected > 0) {
+    refreshIntervalMs = selected;
+  }
+  updateRefreshState();
+  scheduleRefresh();
+}
+
 async function refresh() {
+  if (refreshInFlight) return;
+  refreshInFlight = true;
+  const started = performance.now();
   await refreshTokenInspector();
   try {
     const ov = await api('/api/overview');
+    backendWarmPoolProfiles = Array.isArray(ov?.warm_pool_profiles)
+      ? ov.warm_pool_profiles
+      : [];
     const now = new Date().toLocaleTimeString();
-    setMsg('meta', 'mode: ' + (ov.cluster_mode || 'unknown') + ' | namespace: ' + (ov.namespace || '{{ namespace }}') + ' | last refresh: ' + now, 'muted');
+    const durationMs = performance.now() - started;
+    setMsg('meta', 'mode: ' + (ov.cluster_mode || 'unknown') + ' | namespace: ' + (ov.namespace || '{{ namespace }}') + ' | last refresh: ' + now + ` (${Math.round(durationMs)}ms)`, 'muted');
     const sraAdmin = (((ov || {}).ops_integration || {}).sra_admin || {});
     if (sraAdmin.enabled && !sraAdmin.reachable) {
       setMsg('action', 'sandboxed-react-agent admin integration unavailable: ' + (sraAdmin.error || 'unknown error'), 'warn');
@@ -258,8 +392,12 @@ async function refresh() {
     renderCostEstimate(ov.cost_estimate || {});
     renderPvcs(ov.pvcs || []);
     renderPods(ov.pods || []);
+    updateRefreshState(durationMs);
   } catch (e) {
     setMsg('action', 'refresh failed: ' + e.message, 'err');
+  } finally {
+    refreshInFlight = false;
+    scheduleRefresh();
   }
 }
 
@@ -291,6 +429,8 @@ function updateTemplateSelectors(items) {
       selectEl.value = templates[0];
     }
   });
+
+  renderWarmPoolProfiles();
 }
 
 async function refreshTokenInspector() {
@@ -311,9 +451,16 @@ async function logoutGoogle() {
 function renderDeployments(items) {
   const tbody = document.getElementById('deployments');
   tbody.innerHTML = '';
-  items.filter(d => d.manageable).forEach(d => {
+  const manageable = items.filter(d => d.manageable);
+  setCount('deploymentsCount', manageable.length);
+  if (!manageable.length) {
+    emptyRow(tbody, 4, 'No manageable deployments found.');
+    return;
+  }
+  manageable.forEach(d => {
+    const encodedName = encodeURIComponent(d.name || '');
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${d.name}</td><td>${d.ready}</td><td>${d.desired}</td><td><button class="btn" onclick="scale('${d.name}',0)">Scale 0</button> <button class="btn" onclick="scale('${d.name}',1)">Scale 1</button></td>`;
+    tr.innerHTML = `<td>${esc(d.name)}</td><td>${esc(d.ready)}</td><td>${esc(d.desired)}</td><td><button class="btn btn-danger" onclick="scaleFromEncoded('${encodedName}',0)">Scale 0</button> <button class="btn" onclick="scaleFromEncoded('${encodedName}',1)">Scale 1</button></td>`;
     tbody.appendChild(tr);
   });
 }
@@ -321,6 +468,11 @@ function renderDeployments(items) {
 function renderClaims(items) {
   const tbody = document.getElementById('claims');
   tbody.innerHTML = '';
+  setCount('claimsCount', items.length || 0);
+  if (!items.length) {
+    emptyRow(tbody, 9, 'No sandbox claims in namespace.');
+    return;
+  }
   items.forEach((item) => {
     const name = typeof item === 'string' ? item : (item.name || '');
     const template = typeof item === 'string' ? '' : (item.template || '');
@@ -331,8 +483,9 @@ function renderClaims(items) {
     const session = owner.session_id || '-';
     const user = owner.user_id || '-';
     const workspace = owner.workspace_status || '-';
+    const encodedName = encodeURIComponent(name);
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${esc(name)}</td><td>${esc(template)}</td><td>${esc(ready)}</td><td>${fmtDateTime(createdAt)}</td><td>${fmtAge(ageSeconds)}</td><td>${esc(session)}</td><td>${esc(user)}</td><td>${esc(workspace)}</td><td><button class="btn" onclick="deleteClaim('${name}')">Delete</button></td>`;
+    tr.innerHTML = `<td>${esc(name)}</td><td>${esc(template)}</td><td>${esc(ready)}</td><td>${fmtDateTime(createdAt)}</td><td>${fmtAge(ageSeconds)}</td><td>${esc(session)}</td><td class="mono">${esc(user)}</td><td>${esc(workspace)}</td><td><button class="btn btn-danger" onclick="deleteClaimFromEncoded('${encodedName}')">Delete</button></td>`;
     tbody.appendChild(tr);
   });
 }
@@ -340,6 +493,11 @@ function renderClaims(items) {
 function renderSandboxes(items) {
   const tbody = document.getElementById('sandboxesDetailed');
   tbody.innerHTML = '';
+  setCount('sandboxesCount', items.length || 0);
+  if (!items.length) {
+    emptyRow(tbody, 7, 'No sandboxes currently provisioned.');
+    return;
+  }
   items.forEach((item) => {
     const name = typeof item === 'string' ? item : (item.name || '');
     const claim = typeof item === 'string' ? '' : (item.claim_name || '');
@@ -357,15 +515,85 @@ function renderSandboxes(items) {
 function renderWarmPools(items) {
   const tbody = document.getElementById('warmPools');
   tbody.innerHTML = '';
-  items.forEach((pool) => {
+  allWarmPools = (items || []).map((pool) => {
+    if (typeof pool === 'string') {
+      return { name: pool, template: '', ready: 0, replicas: 0, created_at: null, age_seconds: null };
+    }
+    return pool;
+  });
+  setCount('warmPoolsCount', allWarmPools.length);
+  if (!allWarmPools.length) {
+    emptyRow(tbody, 7, 'No warm pools found. Use controls above to create one.');
+  }
+  allWarmPools.forEach((pool) => {
     const name = typeof pool === 'string' ? pool : (pool.name || 'unknown');
     const template = typeof pool === 'string' ? '' : (pool.template || '');
     const ready = typeof pool === 'string' ? '' : (pool.ready ?? '');
     const replicas = typeof pool === 'string' ? '' : (pool.replicas ?? '');
     const createdAt = typeof pool === 'string' ? null : pool.created_at;
     const ageSeconds = typeof pool === 'string' ? null : pool.age_seconds;
+    const encodedName = encodeURIComponent(name);
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${esc(name)}</td><td>${esc(template)}</td><td>${esc(ready)}</td><td>${esc(replicas)}</td><td>${fmtDateTime(createdAt)}</td><td>${fmtAge(ageSeconds)}</td><td><button class="btn" onclick="scaleWarmPool('${name}',0)">0</button> <button class="btn" onclick="scaleWarmPool('${name}',1)">1</button> <button class="btn" onclick="scaleWarmPool('${name}',3)">3</button> <button class="btn" onclick="scaleWarmPool('${name}',5)">5</button></td>`;
+    tr.innerHTML = `<td>${esc(name)}</td><td>${esc(template)}</td><td>${esc(ready)}</td><td>${esc(replicas)}</td><td>${fmtDateTime(createdAt)}</td><td>${fmtAge(ageSeconds)}</td><td><button class="btn btn-danger" onclick="scaleWarmPoolFromEncoded('${encodedName}',0)">0</button> <button class="btn" onclick="scaleWarmPoolFromEncoded('${encodedName}',1)">1</button> <button class="btn" onclick="scaleWarmPoolFromEncoded('${encodedName}',3)">3</button> <button class="btn" onclick="scaleWarmPoolFromEncoded('${encodedName}',5)">5</button></td>`;
+    tbody.appendChild(tr);
+  });
+
+  renderWarmPoolProfiles();
+}
+
+function warmPoolCategory(templateName) {
+  const name = String(templateName || '').toLowerCase();
+  if (name.includes('pydata')) return 'pydata';
+  if (name.includes('large')) return 'large';
+  if (name.includes('small')) return 'small';
+  return 'default';
+}
+
+function defaultWarmPoolNameForTemplate(templateName) {
+  const slug = String(templateName || 'sandbox')
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 50);
+  return `${slug}-warmpool`;
+}
+
+function renderWarmPoolProfiles() {
+  const tbody = document.getElementById('warmPoolProfiles');
+  tbody.innerHTML = '';
+  const profileRows = Array.isArray(backendWarmPoolProfiles) && backendWarmPoolProfiles.length
+    ? backendWarmPoolProfiles.slice()
+    : (availableTemplates || []).slice().sort().map((template) => {
+        const matching = allWarmPools.filter((pool) => String(pool.template || '') === template);
+        const poolNames = matching.map((pool) => String(pool.name || '')).filter(Boolean).sort();
+        return {
+          template_name: template,
+          category: warmPoolCategory(template),
+          pools: matching,
+          total_replicas: matching.reduce((acc, pool) => acc + Number(pool.replicas || 0), 0),
+          default_warm_pool_name: poolNames[0] || defaultWarmPoolNameForTemplate(template),
+        };
+      });
+
+  setCount('warmPoolProfilesCount', profileRows.length || 0);
+
+  if (!profileRows.length) {
+    emptyRow(tbody, 6, 'No sandbox templates available.');
+    return;
+  }
+
+  profileRows.forEach((profile) => {
+    const template = String(profile.template_name || '');
+    const category = String(profile.category || warmPoolCategory(template));
+    const pools = Array.isArray(profile.pools) ? profile.pools : [];
+    const poolNames = pools.map((pool) => String(pool.name || '')).filter(Boolean).sort();
+    const totalReplicas = Number(profile.total_replicas ?? profile.totalReplicas ?? 0);
+    const defaultPoolName = String(profile.default_warm_pool_name || defaultWarmPoolNameForTemplate(template));
+
+    const encodedTemplate = encodeURIComponent(template);
+    const encodedPoolName = encodeURIComponent(defaultPoolName);
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${esc(template)}</td><td>${esc(category)}</td><td>${esc(poolNames.join(', ') || '-')}</td><td>${esc(totalReplicas)}</td><td class="mono">${esc(defaultPoolName)}</td><td><button class="btn btn-danger" onclick="applyTemplateWarmPool('${encodedTemplate}','${encodedPoolName}',0)">0</button> <button class="btn" onclick="applyTemplateWarmPool('${encodedTemplate}','${encodedPoolName}',1)">1</button> <button class="btn" onclick="applyTemplateWarmPool('${encodedTemplate}','${encodedPoolName}',3)">3</button></td>`;
     tbody.appendChild(tr);
   });
 }
@@ -398,20 +626,30 @@ function renderWorkspaceHealth(summary, analytics) {
     releasedByDate[row.date] = row.count ?? 0;
   });
   dailyTbody.innerHTML = '';
-  createdSeries.forEach((row) => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${esc(row.date || '')}</td><td>${esc(row.count ?? 0)}</td><td>${esc(releasedByDate[row.date] ?? 0)}</td>`;
-    dailyTbody.appendChild(tr);
-  });
+  if (!createdSeries.length) {
+    emptyRow(dailyTbody, 3, 'No lease daily data.');
+  } else {
+    createdSeries.forEach((row) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${esc(row.date || '')}</td><td>${esc(row.count ?? 0)}</td><td>${esc(releasedByDate[row.date] ?? 0)}</td>`;
+      dailyTbody.appendChild(tr);
+    });
+  }
 
   lifetimeTbody.innerHTML = '';
-  (analytics.lifetime_by_status || []).forEach((row) => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${esc(row.status || '')}</td><td>${esc(row.samples ?? 0)}</td><td>${fmtDuration(row.avg_seconds)}</td><td>${fmtDuration(row.min_seconds)}</td><td>${fmtDuration(row.max_seconds)}</td>`;
-    lifetimeTbody.appendChild(tr);
-  });
+  const lifetimeRows = analytics.lifetime_by_status || [];
+  if (!lifetimeRows.length) {
+    emptyRow(lifetimeTbody, 5, 'No lease lifetime data.');
+  } else {
+    lifetimeRows.forEach((row) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${esc(row.status || '')}</td><td>${esc(row.samples ?? 0)}</td><td>${fmtDuration(row.avg_seconds)}</td><td>${fmtDuration(row.min_seconds)}</td><td>${fmtDuration(row.max_seconds)}</td>`;
+      lifetimeTbody.appendChild(tr);
+    });
+  }
 
-  allLeaseEvents = (analytics.recent_events || []).slice(0, 200);
+  allLeaseEvents = (analytics.recent_events || []).slice();
+  setCount('leaseEventsCount', allLeaseEvents.length);
   const statusFilter = document.getElementById('leaseStatusFilter');
   const currentStatus = statusFilter.value;
   const statuses = Array.from(new Set(allLeaseEvents.map((row) => row.status || '').filter(Boolean))).sort();
@@ -425,27 +663,78 @@ function renderWorkspaceHealth(summary, analytics) {
   if (statuses.includes(currentStatus)) {
     statusFilter.value = currentStatus;
   }
-  applyLeaseEventFilters();
+  applyLeaseEventFilters(true);
 }
 
 function filteredLeaseEvents() {
   const status = (document.getElementById('leaseStatusFilter').value || '').trim().toLowerCase();
   const user = (document.getElementById('leaseUserFilter').value || '').trim().toLowerCase();
   const session = (document.getElementById('leaseSessionFilter').value || '').trim().toLowerCase();
+  const text = (document.getElementById('leaseTextFilter').value || '').trim().toLowerCase();
   return allLeaseEvents
     .filter((row) => !status || String(row.status || '').toLowerCase() === status)
     .filter((row) => !user || String(row.user_id || '').toLowerCase().includes(user))
-    .filter((row) => !session || String(row.session_id || '').toLowerCase().includes(session));
+    .filter((row) => !session || String(row.session_id || '').toLowerCase().includes(session))
+    .filter((row) => {
+      if (!text) return true;
+      return [
+        row.lease_id,
+        row.claim_name,
+        row.session_id,
+        row.user_id,
+        row.status,
+        row.last_error,
+      ].some((value) => String(value || '').toLowerCase().includes(text));
+    });
 }
 
-function applyLeaseEventFilters() {
+function applyLeaseEventFilters(resetPage = false) {
+  const pageSize = Number(document.getElementById('leasePageSize').value || '50');
+  if (!Number.isNaN(pageSize) && pageSize > 0) {
+    // keep as user preference
+  }
+  if (resetPage) leaseEventsPage = 1;
+
   const eventsTbody = document.getElementById('leaseEvents');
+  const pager = document.getElementById('leaseEventsPager');
+  const summary = document.getElementById('leaseEventsSummary');
+  const prevBtn = document.getElementById('leasePrevBtn');
+  const nextBtn = document.getElementById('leaseNextBtn');
+
   eventsTbody.innerHTML = '';
-  filteredLeaseEvents().slice(0, 50).forEach((row) => {
+  const rows = filteredLeaseEvents();
+  const size = Number(document.getElementById('leasePageSize').value || '50');
+  const pageSizeSafe = (!Number.isNaN(size) && size > 0) ? size : 50;
+  const totalPages = Math.max(1, Math.ceil(rows.length / pageSizeSafe));
+  leaseEventsPage = Math.max(1, Math.min(leaseEventsPage, totalPages));
+
+  const start = (leaseEventsPage - 1) * pageSizeSafe;
+  const pageRows = rows.slice(start, start + pageSizeSafe);
+
+  if (!pageRows.length) {
+    emptyRow(eventsTbody, 8, 'No lease events match current filters.');
+  }
+
+  pageRows.forEach((row) => {
     const tr = document.createElement('tr');
     tr.innerHTML = `<td>${esc(row.status || '')}</td><td>${esc(row.lease_id || '')}</td><td>${esc(row.claim_name || '-')}</td><td>${esc(row.session_id || '-')}</td><td>${esc(row.user_id || '-')}</td><td>${fmtDateTime(row.created_at)}</td><td>${fmtDateTime(row.released_at)}</td><td>${fmtDuration(row.duration_seconds)}</td>`;
     eventsTbody.appendChild(tr);
   });
+
+  if (pager) pager.textContent = `page ${leaseEventsPage}/${totalPages}`;
+  if (summary) summary.textContent = `showing ${pageRows.length} of ${rows.length} filtered events (${allLeaseEvents.length} total loaded)`;
+  if (prevBtn) prevBtn.disabled = leaseEventsPage <= 1;
+  if (nextBtn) nextBtn.disabled = leaseEventsPage >= totalPages;
+}
+
+function prevLeaseEventsPage() {
+  leaseEventsPage = Math.max(1, leaseEventsPage - 1);
+  applyLeaseEventFilters(false);
+}
+
+function nextLeaseEventsPage() {
+  leaseEventsPage += 1;
+  applyLeaseEventFilters(false);
 }
 
 function exportLeaseEventsCsv() {
@@ -506,10 +795,16 @@ function renderNodes(items, summary) {
   const tbody = document.getElementById('nodes');
   tbody.innerHTML = '';
   const nodeSummary = document.getElementById('nodeSummary');
+  setCount('nodesCount', items.length || 0);
 
   const typeText = (summary.types || []).map((t) => `${t.name}: ${t.count}`).join(', ') || 'n/a';
   const poolText = (summary.pools || []).map((p) => `${p.name}: ${p.count}`).join(', ') || 'n/a';
   nodeSummary.textContent = `Nodes: ${summary.total || 0} total (${summary.ready || 0} ready) | Types: ${typeText} | Pools: ${poolText}`;
+
+  if (!items.length) {
+    emptyRow(tbody, 6, 'No nodes detected.');
+    return;
+  }
 
   items.forEach((node) => {
     const phaseCounts = node.phase_counts || {};
@@ -549,6 +844,11 @@ function renderCostEstimate(cost) {
 function renderPvcs(items) {
   const tbody = document.getElementById('pvcs');
   tbody.innerHTML = '';
+  setCount('pvcsCount', items.length || 0);
+  if (!items.length) {
+    emptyRow(tbody, 6, 'No persistent volume claims found.');
+    return;
+  }
   items.forEach((pvc) => {
     const tr = document.createElement('tr');
     const modes = (pvc.access_modes || []).join(', ');
@@ -598,17 +898,48 @@ function applyPodFilters() {
   const selectedStatus = document.getElementById('podStatusFilter').value;
 
   tbody.innerHTML = '';
-  allPods
+  const filtered = allPods
     .filter((pod) => !selectedNode || (pod.node || '') === selectedNode)
-    .filter((pod) => !selectedStatus || (pod.phase || '') === selectedStatus)
-    .forEach((pod) => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${pod.name}</td><td>${pod.phase}</td><td>${pod.node || ''}</td><td>${pod.ready ? 'yes' : 'no'}</td>`;
-      tbody.appendChild(tr);
-    });
+    .filter((pod) => !selectedStatus || (pod.phase || '') === selectedStatus);
+
+  setCount('podsCount', `${filtered.length}/${allPods.length}`);
+  if (!filtered.length) {
+    emptyRow(tbody, 4, 'No pods match selected filters.');
+    return;
+  }
+
+  filtered.forEach((pod) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${esc(pod.name || '')}</td><td>${esc(pod.phase || '')}</td><td>${esc(pod.node || '')}</td><td>${pod.ready ? 'yes' : 'no'}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+function requireScaleConfirmation(resourceType, name, replicas) {
+  if (replicas !== 0) return true;
+  const typed = prompt(`Safety check: type \"${name}\" to scale ${resourceType} to 0.`);
+  if (typed === null) return false;
+  if (typed.trim() !== name) {
+    setMsg('action', `aborted: confirmation name did not match for ${resourceType}`, 'err');
+    return false;
+  }
+  return true;
+}
+
+function scaleFromEncoded(encodedName, replicas) {
+  return scale(decodeURIComponent(encodedName), replicas);
+}
+
+function deleteClaimFromEncoded(encodedName) {
+  return deleteClaim(decodeURIComponent(encodedName));
+}
+
+function scaleWarmPoolFromEncoded(encodedName, replicas) {
+  return scaleWarmPool(decodeURIComponent(encodedName), replicas);
 }
 
 async function scale(name, replicas) {
+  if (!requireScaleConfirmation('deployment', name, replicas)) return;
   try {
     await api(`/api/deployments/${name}/scale`, { method: 'POST', body: JSON.stringify({ replicas }) });
     setMsg('action', `scaled ${name} to ${replicas}`, 'ok');
@@ -636,7 +967,7 @@ async function createClaim() {
 }
 
 async function deleteClaim(name) {
-  if (!confirm('Delete ' + name + '?')) return;
+  if (!confirm('Delete sandbox claim ' + name + '?')) return;
   try {
     await api(`/api/sandboxclaims/${name}`, { method: 'DELETE' });
     setMsg('action', `deleted sandbox claim ${name}`, 'ok');
@@ -659,6 +990,7 @@ async function upsertWarmPool() {
     return;
   }
   try {
+    if (!requireScaleConfirmation('warm pool', warmPoolName, replicas)) return;
     await api('/api/sandboxwarmpools', {
       method: 'POST',
       body: JSON.stringify({ warm_pool_name: warmPoolName, template_name: templateName, replicas }),
@@ -670,7 +1002,24 @@ async function upsertWarmPool() {
   }
 }
 
+async function applyTemplateWarmPool(encodedTemplate, encodedPoolName, replicas) {
+  const templateName = decodeURIComponent(encodedTemplate);
+  const warmPoolName = decodeURIComponent(encodedPoolName);
+  if (!requireScaleConfirmation('warm pool', warmPoolName, replicas)) return;
+  try {
+    await api('/api/sandboxwarmpools', {
+      method: 'POST',
+      body: JSON.stringify({ warm_pool_name: warmPoolName, template_name: templateName, replicas }),
+    });
+    setMsg('action', `set ${warmPoolName} (${templateName}) replicas to ${replicas}`, 'ok');
+    await refresh();
+  } catch (e) {
+    setMsg('action', 'template warm pool update failed: ' + e.message, 'err');
+  }
+}
+
 async function scaleWarmPool(name, replicas) {
+  if (!requireScaleConfirmation('warm pool', name, replicas)) return;
   try {
     await api(`/api/sandboxwarmpools/${name}/scale`, {
       method: 'POST',
@@ -684,7 +1033,7 @@ async function scaleWarmPool(name, replicas) {
 }
 
 refresh();
-setInterval(refresh, 10000);
+updateRefreshState();
 </script>
 </body>
 </html>

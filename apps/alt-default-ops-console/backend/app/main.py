@@ -678,6 +678,76 @@ def _warm_pool_status(warm_pool: dict[str, Any], *, now: datetime) -> dict[str, 
     }
 
 
+def _warm_pool_category(template_name: str) -> str:
+    lowered = str(template_name or "").strip().lower()
+    if "pydata" in lowered:
+        return "pydata"
+    if "large" in lowered:
+        return "large"
+    if "small" in lowered:
+        return "small"
+    return "default"
+
+
+def _default_warm_pool_name(template_name: str) -> str:
+    cleaned = "".join(
+        char if (char.isalnum() or char == "-") else "-"
+        for char in str(template_name or "sandbox")
+    ).strip("-")
+    cleaned = "-".join(part for part in cleaned.split("-") if part)
+    cleaned = cleaned.lower()[:50] or "sandbox"
+    return f"{cleaned}-warmpool"
+
+
+def _build_warm_pool_profiles(
+    templates: list[str],
+    warm_pools: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    normalized_templates = sorted(
+        str(item).strip() for item in templates if str(item).strip()
+    )
+    normalized_pools: list[dict[str, Any]] = []
+    for item in warm_pools:
+        if not isinstance(item, dict):
+            continue
+        normalized_pools.append(
+            {
+                "name": str(item.get("name") or ""),
+                "template": str(item.get("template") or ""),
+                "replicas": int(item.get("replicas") or 0),
+                "ready": int(item.get("ready") or 0),
+            }
+        )
+
+    profiles: list[dict[str, Any]] = []
+    for template_name in normalized_templates:
+        matching = [
+            pool
+            for pool in normalized_pools
+            if str(pool.get("template") or "") == template_name
+        ]
+        matching.sort(key=lambda row: str(row.get("name") or ""))
+
+        profiles.append(
+            {
+                "template_name": template_name,
+                "category": _warm_pool_category(template_name),
+                "default_warm_pool_name": (
+                    str(matching[0].get("name") or "")
+                    if matching
+                    else _default_warm_pool_name(template_name)
+                ),
+                "pool_count": len(matching),
+                "total_replicas": sum(
+                    int(pool.get("replicas") or 0) for pool in matching
+                ),
+                "total_ready": sum(int(pool.get("ready") or 0) for pool in matching),
+                "pools": matching,
+            }
+        )
+    return profiles
+
+
 def _claim_status(
     claim: dict[str, Any],
     *,
@@ -1035,6 +1105,25 @@ async def _overview_data(request: Request) -> dict[str, Any]:
             }
             for name in sorted(mock_state["sandboxes"])
         ]
+        mock_templates = [
+            "python-runtime-template-small",
+            "python-runtime-template",
+            "python-runtime-template-large",
+            "python-runtime-template-pydata",
+        ]
+        mock_warm_pools = [
+            {
+                "name": name,
+                "replicas": int(state.get("replicas") or 0),
+                "template": str(state.get("template") or ""),
+                "ready": int(state.get("replicas") or 0),
+                "ready_condition": True,
+                "conditions": [],
+                "created_at": _iso(now),
+                "age_seconds": 0,
+            }
+            for name, state in sorted(mock_state["warm_pools"].items())
+        ]
         return {
             "cluster_mode": "mock",
             "namespace": ns,
@@ -1064,25 +1153,12 @@ async def _overview_data(request: Request) -> dict[str, Any]:
             "sandboxes": sorted(mock_state["sandboxes"]),
             "sandboxclaims_detailed": claims_detailed,
             "sandboxes_detailed": sandboxes_detailed,
-            "sandboxwarmpools": [
-                {
-                    "name": name,
-                    "replicas": int(state.get("replicas") or 0),
-                    "template": str(state.get("template") or ""),
-                    "ready": int(state.get("replicas") or 0),
-                    "ready_condition": True,
-                    "conditions": [],
-                    "created_at": _iso(now),
-                    "age_seconds": 0,
-                }
-                for name, state in sorted(mock_state["warm_pools"].items())
-            ],
-            "sandboxtemplates": [
-                "python-runtime-template-small",
-                "python-runtime-template",
-                "python-runtime-template-large",
-                "python-runtime-template-pydata",
-            ],
+            "sandboxwarmpools": mock_warm_pools,
+            "sandboxtemplates": mock_templates,
+            "warm_pool_profiles": _build_warm_pool_profiles(
+                mock_templates,
+                mock_warm_pools,
+            ),
             "nodes": mock_nodes,
             "node_summary": _node_summary(mock_nodes),
             "pvcs": [
@@ -1245,6 +1321,13 @@ async def _overview_data(request: Request) -> dict[str, Any]:
         (_sandbox_status(sandbox, now=now) for sandbox in sandboxes),
         key=lambda item: str(item.get("name") or ""),
     )
+    warm_pool_rows = sorted(
+        (_warm_pool_status(w, now=now) for w in warm_pools),
+        key=lambda x: str(x.get("name") or ""),
+    )
+    template_names = sorted(
+        [t.get("metadata", {}).get("name") for t in templates if t.get("metadata")]
+    )
 
     return {
         "cluster_mode": "live",
@@ -1262,13 +1345,9 @@ async def _overview_data(request: Request) -> dict[str, Any]:
         "sandboxes": [s.get("metadata", {}).get("name") for s in sandboxes],
         "sandboxclaims_detailed": claims_detailed,
         "sandboxes_detailed": sandboxes_detailed,
-        "sandboxwarmpools": sorted(
-            (_warm_pool_status(w, now=now) for w in warm_pools),
-            key=lambda x: str(x.get("name") or ""),
-        ),
-        "sandboxtemplates": sorted(
-            [t.get("metadata", {}).get("name") for t in templates if t.get("metadata")]
-        ),
+        "sandboxwarmpools": warm_pool_rows,
+        "sandboxtemplates": template_names,
+        "warm_pool_profiles": _build_warm_pool_profiles(template_names, warm_pool_rows),
         "nodes": sorted(node_rows, key=lambda x: str(x.get("name") or "")),
         "node_summary": _node_summary(node_rows),
         "pvcs": sorted(pvc_rows, key=lambda x: str(x.get("name") or "")),
@@ -1422,6 +1501,26 @@ async def overview(
     _: dict[str, Any] = Depends(require_auth),
 ) -> dict[str, Any]:
     return await _overview_data(request)
+
+
+@app.get("/api/sandboxwarmpool-profiles")
+async def sandbox_warm_pool_profiles(
+    request: Request,
+    _: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
+    overview_payload = await _overview_data(request)
+    profiles = overview_payload.get("warm_pool_profiles") or []
+
+    return {
+        "namespace": str(
+            overview_payload.get("namespace") or settings.target_namespace
+        ),
+        "profiles": profiles,
+        "limits": {
+            "replicas_min": 0,
+            "replicas_max": 5,
+        },
+    }
 
 
 @app.get("/api/sandboxes")
