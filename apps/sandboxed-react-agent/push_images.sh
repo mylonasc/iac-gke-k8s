@@ -4,13 +4,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Keep defaults aligned with current Kubernetes manifest image names:
-# docker.io/mylonasc/magarathea:sandboxed-react-agent-backend-0.6.18
-# docker.io/mylonasc/magarathea:sandboxed-react-agent-frontend-0.5.13
+# docker.io/mylonasc/magarathea:sandboxed-react-agent-backend-0.6.20
+# docker.io/mylonasc/magarathea:sandboxed-react-agent-frontend-0.5.14
 DOCKER_REGISTRY="${DOCKER_REGISTRY:-docker.io}"
 DOCKERHUB_NAMESPACE="${DOCKERHUB_NAMESPACE:-mylonasc}"
 IMAGE_REPO="${IMAGE_REPO:-magarathea}"
-BACKEND_TAG="${TAG:-0.6.18}"
-FRONTEND_TAG="${TAG:-0.5.13}"
+BACKEND_TAG="${TAG:-0.6.20}"
+FRONTEND_TAG="${TAG:-0.5.14}"
 
 BACKEND_IMAGE="${DOCKER_REGISTRY}/${DOCKERHUB_NAMESPACE}/${IMAGE_REPO}:sandboxed-react-agent-backend-${BACKEND_TAG}"
 FRONTEND_IMAGE="${DOCKER_REGISTRY}/${DOCKERHUB_NAMESPACE}/${IMAGE_REPO}:sandboxed-react-agent-frontend-${FRONTEND_TAG}"

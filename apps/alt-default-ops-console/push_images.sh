@@ -4,11 +4,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Keep defaults aligned with current Kubernetes manifest image name:
-# docker.io/mylonasc/magarathea:alt-default-ops-console-0.1.0
+# docker.io/mylonasc/magarathea:alt-default-ops-console-0.1.9
 DOCKER_REGISTRY="${DOCKER_REGISTRY:-docker.io}"
 DOCKERHUB_NAMESPACE="${DOCKERHUB_NAMESPACE:-mylonasc}"
 IMAGE_REPO="${IMAGE_REPO:-magarathea}"
-TAG="${TAG:-0.1.8}"
+TAG="${TAG:-0.1.9}"
 
 IMAGE="${DOCKER_REGISTRY}/${DOCKERHUB_NAMESPACE}/${IMAGE_REPO}:alt-default-ops-console-${TAG}"
 
