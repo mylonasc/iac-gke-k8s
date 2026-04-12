@@ -12,3 +12,6 @@ class UserRepository:
 
     def get_user(self, user_id: str) -> dict[str, Any] | None:
         return self.session_store.get_user(user_id)
+
+    def search_users(self, query: str = "", *, limit: int = 20) -> list[dict[str, Any]]:
+        return self.session_store.search_users(query=query, limit=limit)

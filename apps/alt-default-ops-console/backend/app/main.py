@@ -13,7 +13,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 import httpx
-from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from jose import JWTError, jwt
@@ -503,6 +503,54 @@ async def _fetch_sra_admin_payload(request: Request) -> dict[str, Any]:
             "analytics": {},
             "error": str(exc),
         }
+
+
+async def _fetch_sra_admin_users(
+    request: Request,
+    *,
+    query: str,
+    limit: int,
+) -> dict[str, Any]:
+    if not settings.sra_admin_enabled:
+        raise HTTPException(status_code=503, detail="SRA admin integration is disabled")
+
+    base_url = settings.sra_admin_api_base_url.rstrip("/")
+    if not base_url:
+        raise HTTPException(status_code=503, detail="SRA_ADMIN_API_BASE_URL is empty")
+
+    headers = _upstream_auth_headers(request)
+    timeout = max(float(settings.sra_admin_api_timeout_seconds), 1.0)
+    safe_limit = min(max(int(limit), 1), 100)
+    safe_query = str(query or "").strip()
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as http_client:
+            response = await http_client.get(
+                f"{base_url}/api/admin/ops/users/search",
+                headers=headers,
+                params={"q": safe_query, "limit": safe_limit},
+            )
+        response.raise_for_status()
+        payload = response.json()
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text.strip() or str(exc)
+        raise HTTPException(
+            status_code=exc.response.status_code, detail=detail
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to fetch users from sandboxed-react-agent admin API: {exc}",
+        ) from exc
+
+    users = payload.get("users") if isinstance(payload, dict) else []
+    return {
+        "source": "sra-admin",
+        "query": safe_query,
+        "limit": safe_limit,
+        "users": users if isinstance(users, list) else [],
+        "upstream": payload if isinstance(payload, dict) else {},
+    }
 
 
 async def require_auth(
@@ -1501,6 +1549,16 @@ async def overview(
     _: dict[str, Any] = Depends(require_auth),
 ) -> dict[str, Any]:
     return await _overview_data(request)
+
+
+@app.get("/api/users/search")
+async def search_users(
+    request: Request,
+    q: str = Query(default="", max_length=200),
+    limit: int = Query(default=20, ge=1, le=100),
+    _: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
+    return await _fetch_sra_admin_users(request, query=q, limit=limit)
 
 
 @app.get("/api/sandboxwarmpool-profiles")

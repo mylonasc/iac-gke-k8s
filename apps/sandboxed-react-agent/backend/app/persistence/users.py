@@ -47,3 +47,60 @@ class SQLiteUserStore:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
+
+    def search_users(self, query: str = "", *, limit: int = 20) -> list[dict[str, Any]]:
+        normalized_query = str(query or "").strip().lower()
+        safe_limit = min(max(int(limit), 1), 100)
+
+        where_clause = ""
+        params: tuple[Any, ...] = ()
+        if normalized_query:
+            where_clause = "WHERE lower(u.user_id) LIKE ?"
+            params = (f"%{normalized_query}%",)
+
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT
+                    u.user_id,
+                    u.tier,
+                    u.created_at,
+                    u.updated_at,
+                    w.status AS workspace_status,
+                    w.updated_at AS workspace_updated_at,
+                    (
+                        SELECT MAX(s.updated_at)
+                        FROM sessions s
+                        WHERE s.user_id = u.user_id
+                    ) AS last_session_at
+                FROM users u
+                LEFT JOIN user_workspaces w ON w.user_id = u.user_id
+                {where_clause}
+                ORDER BY COALESCE(
+                    (
+                        SELECT MAX(s.updated_at)
+                        FROM sessions s
+                        WHERE s.user_id = u.user_id
+                    ),
+                    w.updated_at,
+                    u.updated_at,
+                    u.created_at
+                ) DESC,
+                u.user_id ASC
+                LIMIT ?
+                """,
+                (*params, safe_limit),
+            ).fetchall()
+
+        return [
+            {
+                "user_id": row["user_id"],
+                "tier": row["tier"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "workspace_status": row["workspace_status"],
+                "workspace_updated_at": row["workspace_updated_at"],
+                "last_session_at": row["last_session_at"],
+            }
+            for row in rows
+        ]

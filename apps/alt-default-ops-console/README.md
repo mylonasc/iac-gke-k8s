@@ -14,9 +14,13 @@ It provides:
 - richer sandbox claim details (creation time, age, status, ownership mapping to lease/session/user)
 - lease event filtering (status/user/session) and CSV export from the admin UI
 - lease event pagination + text search and filtered-count visibility
+- top-level state summary (sandbox phase counts + running node count)
+- collapsible admin sections for token inspection and lease health
+- user-centric warm-pool controls with backend user search
 - API endpoints to scale managed deployments up/down
 - API endpoints to create/delete Agent Sandbox claims
 - API endpoints to create/scale Agent Sandbox warm pools
+- API endpoint to search sandboxed-react-agent users for warm-pool targeting
 - template-oriented warm-pool profile API for multi-template control panels
 - JWT validation (signature + issuer + audience + expiry) before allowing access
 
@@ -192,6 +196,14 @@ Warm pool profiles (template-oriented control data):
 curl -X GET \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
   "https://magarathea.ddns.net/alt-default-ops/api/sandboxwarmpool-profiles"
+```
+
+Search users (for user-centric warm-pool controls):
+
+```bash
+curl -X GET \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  "https://magarathea.ddns.net/alt-default-ops/api/users/search?q=user&limit=20"
 ```
 
 ## Cost estimate notes

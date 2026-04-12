@@ -30,6 +30,7 @@
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; }
     .section-title { display: flex; align-items: center; gap: 8px; }
     .small { font-size: 0.82rem; }
+    .card-title-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
   </style>
 </head>
 <body>
@@ -61,9 +62,21 @@
     </div>
 
     <div class="card">
-      <h2>Token Inspector</h2>
-      <p class="muted">Decoded token details are shown here even when authorization fails.</p>
-      <pre id="token"></pre>
+      <div class="card-title-row">
+        <h2 class="section-title" style="margin: 0;">Token Inspector</h2>
+        <button id="tokenInspectorToggleBtn" class="btn" type="button" onclick="toggleSection('tokenInspectorBody','tokenInspectorToggleBtn','tokenInspectorSummary')">Show</button>
+      </div>
+      <div id="tokenInspectorSummary" class="muted small" style="margin-top: 8px;">Collapsed by default. Token details refresh with each poll.</div>
+      <div id="tokenInspectorBody" style="display: none; margin-top: 8px;">
+        <p class="muted">Decoded token details are shown here even when authorization fails.</p>
+        <pre id="token"></pre>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 class="section-title">State Summary <span id="stateSummaryStamp" class="pill">n/a</span></h2>
+      <div class="grid" id="topStateMetrics"></div>
+      <div id="topStateSummary" class="muted" style="margin-top: 10px;">No sandbox state summary yet.</div>
     </div>
 
     <div class="card">
@@ -104,11 +117,33 @@
     <div class="card">
       <h2 class="section-title">Sandbox Warm Pools <span id="warmPoolsCount" class="pill">0</span></h2>
       <div class="row" style="margin-bottom: 10px;">
-        <input id="warmPoolName" value="python-sandbox-warmpool" placeholder="warm pool name" />
-        <select id="warmPoolTemplate"></select>
-        <input id="warmPoolReplicas" type="number" min="0" max="5" value="1" />
+        <label>
+          User search
+          <input id="warmPoolUserSearch" placeholder="search user id" oninput="queueWarmPoolUserSearch()" />
+        </label>
+        <span id="warmPoolUserSearchStatus" class="pill">type 2+ chars</span>
+        <datalist id="warmPoolUsersList"></datalist>
+      </div>
+      <div class="row" style="margin-bottom: 10px;">
+        <label>
+          User
+          <input id="warmPoolUserId" list="warmPoolUsersList" placeholder="user id" oninput="syncWarmPoolNameFromUser()" />
+        </label>
+        <label>
+          Template
+          <select id="warmPoolTemplate" onchange="syncWarmPoolNameFromUser()"></select>
+        </label>
+        <label>
+          Replicas
+          <input id="warmPoolReplicas" type="number" min="0" max="5" value="1" />
+        </label>
+        <label>
+          Warm pool name
+          <input id="warmPoolName" placeholder="derived from user + template" readonly />
+        </label>
         <button class="btn" onclick="upsertWarmPool()">Start / Update warm pool</button>
       </div>
+      <div id="warmPoolUserHint" class="muted small" style="margin-bottom: 8px;">Select a user to create a user-scoped warm pool naming pattern.</div>
       <div class="table-wrap">
       <table>
         <thead><tr><th>Name</th><th>Template</th><th>Ready</th><th>Replicas</th><th>Created</th><th>Age</th><th>Actions</th></tr></thead>
@@ -126,7 +161,12 @@
     </div>
 
     <div class="card">
-      <h2 class="section-title">Workspace and Lease Health <span id="leaseEventsCount" class="pill">0</span></h2>
+      <div class="card-title-row">
+        <h2 class="section-title" style="margin: 0;">Workspace and Lease Health <span id="leaseEventsCount" class="pill">0</span></h2>
+        <button id="workspaceHealthToggleBtn" class="btn" type="button" onclick="toggleSection('workspaceHealthBody','workspaceHealthToggleBtn','workspaceHealthCollapsedSummary')">Show</button>
+      </div>
+      <div id="workspaceHealthCollapsedSummary" class="muted small" style="margin-top: 8px;">No workspace/session health data yet.</div>
+      <div id="workspaceHealthBody" style="display: none; margin-top: 8px;">
       <div class="grid" id="workspaceHealthMetrics"></div>
       <div id="workspaceHealthSummary" class="muted" style="margin-top: 10px;">No workspace/session health data yet.</div>
       <div class="row" style="margin-top: 10px; margin-bottom: 8px;">
@@ -135,6 +175,10 @@
           <select id="leaseStatusFilter" onchange="applyLeaseEventFilters(true)">
             <option value="">All statuses</option>
           </select>
+        </label>
+        <label>
+          <input id="leaseShowExpired" type="checkbox" onchange="applyLeaseEventFilters(true)" />
+          Show expired
         </label>
         <label>
           User
@@ -180,6 +224,7 @@
         <thead><tr><th>Status</th><th>Lease</th><th>Claim</th><th>Session</th><th>User</th><th>Created</th><th>Released</th><th>Duration</th></tr></thead>
         <tbody id="leaseEvents"></tbody>
       </table>
+      </div>
       </div>
     </div>
 
@@ -251,6 +296,27 @@ let autoRefreshEnabled = true;
 let refreshIntervalMs = 10000;
 let refreshInFlight = false;
 let leaseEventsPage = 1;
+let warmPoolUserSearchTimerId = null;
+
+function setSectionExpanded(contentId, buttonId, summaryId, expanded) {
+  const content = document.getElementById(contentId);
+  const button = document.getElementById(buttonId);
+  const summary = document.getElementById(summaryId);
+  if (content) content.style.display = expanded ? '' : 'none';
+  if (button) button.textContent = expanded ? 'Hide' : 'Show';
+  if (summary) summary.style.display = expanded ? 'none' : '';
+}
+
+function toggleSection(contentId, buttonId, summaryId) {
+  const content = document.getElementById(contentId);
+  const expanded = content ? content.style.display !== 'none' : false;
+  setSectionExpanded(contentId, buttonId, summaryId, !expanded);
+}
+
+function initializeCollapsedSections() {
+  setSectionExpanded('tokenInspectorBody', 'tokenInspectorToggleBtn', 'tokenInspectorSummary', false);
+  setSectionExpanded('workspaceHealthBody', 'workspaceHealthToggleBtn', 'workspaceHealthCollapsedSummary', false);
+}
 
 function esc(value) {
   return String(value ?? '')
@@ -381,14 +447,21 @@ async function refresh() {
     if (sraAdmin.enabled && !sraAdmin.reachable) {
       setMsg('action', 'sandboxed-react-agent admin integration unavailable: ' + (sraAdmin.error || 'unknown error'), 'warn');
     }
+    const claimsDetailed = (ov.sandboxclaims_detailed && ov.sandboxclaims_detailed.length)
+      ? ov.sandboxclaims_detailed
+      : (ov.sandboxclaims || []);
+    const sandboxesDetailed = (ov.sandboxes_detailed && ov.sandboxes_detailed.length)
+      ? ov.sandboxes_detailed
+      : (ov.sandboxes || []);
     updateTemplateSelectors(ov.sandboxtemplates || []);
     renderDeployments(ov.deployments || []);
-    renderClaims((ov.sandboxclaims_detailed && ov.sandboxclaims_detailed.length) ? ov.sandboxclaims_detailed : (ov.sandboxclaims || []));
-    renderSandboxes((ov.sandboxes_detailed && ov.sandboxes_detailed.length) ? ov.sandboxes_detailed : (ov.sandboxes || []));
+    renderClaims(claimsDetailed);
+    renderSandboxes(sandboxesDetailed);
     renderWarmPools(ov.sandboxwarmpools || []);
     renderWorkspaceHealth(ov.workspace_session_health || {}, ov.lease_analytics || {});
     renderNodes(ov.nodes || [], ov.node_summary || {});
     renderResourceSummary(ov.resource_summary || {});
+    renderTopStateSummary(sandboxesDetailed, ov.resource_summary || {}, ov.workspace_session_health || {});
     renderCostEstimate(ov.cost_estimate || {});
     renderPvcs(ov.pvcs || []);
     renderPods(ov.pods || []);
@@ -404,6 +477,58 @@ async function refresh() {
 function money(value) {
   if (typeof value !== 'number' || Number.isNaN(value)) return 'n/a';
   return `$${value.toFixed(4)}`;
+}
+
+function normalizeK8sName(value, maxLen = 63) {
+  const cleaned = String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, maxLen)
+    .replace(/-+$/g, '');
+  return cleaned || 'sandbox';
+}
+
+function userWarmPoolName(userId, templateName) {
+  const userSlug = normalizeK8sName(userId, 24);
+  const templateSlug = normalizeK8sName(templateName, 28);
+  const combined = `${userSlug}-${templateSlug}-warmpool`;
+  return normalizeK8sName(combined, 63);
+}
+
+function renderTopStateSummary(sandboxes, resourceSummary, workspaceSummary) {
+  const metrics = document.getElementById('topStateMetrics');
+  const summary = document.getElementById('topStateSummary');
+  const stamp = document.getElementById('stateSummaryStamp');
+  const rows = Array.isArray(sandboxes) ? sandboxes : [];
+  const phaseCounts = {};
+  rows.forEach((item) => {
+    const phase = String((item && item.phase) || 'unknown').toLowerCase();
+    phaseCounts[phase] = (phaseCounts[phase] || 0) + 1;
+  });
+
+  const runningSandboxes = phaseCounts.running || 0;
+  const pendingSandboxes = phaseCounts.pending || 0;
+  const failedSandboxes = phaseCounts.failed || 0;
+  const runningNodes = Number(resourceSummary.running_nodes || 0);
+  const activeLeases = Number(workspaceSummary.active_leases || 0);
+
+  const topRows = [
+    { key: 'Sandboxes total', value: `${rows.length}` },
+    { key: 'Running sandboxes', value: `${runningSandboxes}` },
+    { key: 'Pending sandboxes', value: `${pendingSandboxes}` },
+    { key: 'Failed sandboxes', value: `${failedSandboxes}` },
+    { key: 'Running nodes', value: `${runningNodes}` },
+    { key: 'Active leases', value: `${activeLeases}` },
+  ];
+  metrics.innerHTML = topRows.map((row) => `<div class="metric"><span class="k">${esc(row.key)}</span><span class="v">${esc(row.value)}</span></div>`).join('');
+
+  const phaseText = Object.keys(phaseCounts)
+    .sort()
+    .map((key) => `${key}:${phaseCounts[key]}`)
+    .join(', ') || 'none';
+  summary.textContent = `Sandbox phases: ${phaseText} | running nodes: ${runningNodes}`;
+  stamp.textContent = new Date().toLocaleTimeString();
 }
 
 function updateTemplateSelectors(items) {
@@ -431,15 +556,25 @@ function updateTemplateSelectors(items) {
   });
 
   renderWarmPoolProfiles();
+  syncWarmPoolNameFromUser();
 }
 
 async function refreshTokenInspector() {
   const tokenEl = document.getElementById('token');
+  const tokenSummary = document.getElementById('tokenInspectorSummary');
   try {
     const info = await api('/api/token-inspect');
     tokenEl.textContent = JSON.stringify(info, null, 2);
+    const claims = (info && typeof info === 'object' && typeof info.claims === 'object') ? info.claims : info;
+    const email = String((claims || {}).email || (claims || {}).upn || (claims || {}).preferred_username || '').trim();
+    const subject = String((claims || {}).sub || '').trim();
+    const issuer = String((claims || {}).iss || '').trim();
+    tokenSummary.textContent = email
+      ? `Token ready for ${email}${subject ? ` (${subject})` : ''}${issuer ? ` via ${issuer}` : ''}`
+      : 'Token decoded and ready. Expand to inspect full payload.';
   } catch (e) {
     tokenEl.textContent = JSON.stringify({ error: e.message }, null, 2);
+    tokenSummary.textContent = `Token decode failed: ${e.message}`;
   }
 }
 
@@ -539,6 +674,85 @@ function renderWarmPools(items) {
   });
 
   renderWarmPoolProfiles();
+  syncWarmPoolNameFromUser();
+}
+
+function syncWarmPoolNameFromUser() {
+  const userIdEl = document.getElementById('warmPoolUserId');
+  const templateEl = document.getElementById('warmPoolTemplate');
+  const nameEl = document.getElementById('warmPoolName');
+  const hintEl = document.getElementById('warmPoolUserHint');
+  if (!templateEl || !nameEl || !hintEl) return;
+
+  const userId = String(userIdEl?.value || '').trim();
+  const templateName = String(templateEl.value || '').trim();
+  nameEl.value = userId
+    ? userWarmPoolName(userId, templateName)
+    : defaultWarmPoolNameForTemplate(templateName);
+
+  if (!userId) {
+    hintEl.textContent = 'Select a user to create a user-scoped warm pool naming pattern.';
+    return;
+  }
+  const userPrefix = `${normalizeK8sName(userId, 24)}-`;
+  const existingForUser = allWarmPools.filter((pool) => String(pool.name || '').startsWith(userPrefix));
+  const existingText = existingForUser.length
+    ? existingForUser.map((pool) => `${pool.name}:${pool.replicas ?? 0}`).join(', ')
+    : 'none';
+  hintEl.textContent = `User ${userId} warm pools: ${existingText}`;
+}
+
+function renderWarmPoolUserSearchResults(users) {
+  const listEl = document.getElementById('warmPoolUsersList');
+  const statusEl = document.getElementById('warmPoolUserSearchStatus');
+  if (!listEl || !statusEl) return;
+
+  listEl.innerHTML = '';
+  users.forEach((user) => {
+    const userId = String(user.user_id || '').trim();
+    if (!userId) return;
+    const option = document.createElement('option');
+    option.value = userId;
+    listEl.appendChild(option);
+  });
+  statusEl.textContent = users.length ? `${users.length} user(s)` : 'no matches';
+}
+
+function queueWarmPoolUserSearch() {
+  if (warmPoolUserSearchTimerId) {
+    clearTimeout(warmPoolUserSearchTimerId);
+    warmPoolUserSearchTimerId = null;
+  }
+  warmPoolUserSearchTimerId = setTimeout(() => {
+    searchWarmPoolUsers();
+  }, 250);
+}
+
+async function searchWarmPoolUsers() {
+  const query = String(document.getElementById('warmPoolUserSearch').value || '').trim();
+  const statusEl = document.getElementById('warmPoolUserSearchStatus');
+  if (!statusEl) return;
+
+  if (query.length < 2) {
+    renderWarmPoolUserSearchResults([]);
+    statusEl.textContent = 'type 2+ chars';
+    return;
+  }
+
+  statusEl.textContent = 'searching...';
+  try {
+    const payload = await api(`/api/users/search?q=${encodeURIComponent(query)}&limit=20`);
+    const users = Array.isArray(payload?.users) ? payload.users : [];
+    renderWarmPoolUserSearchResults(users);
+    const userInput = document.getElementById('warmPoolUserId');
+    if (userInput && !String(userInput.value || '').trim() && users.length) {
+      userInput.value = String(users[0].user_id || '');
+      syncWarmPoolNameFromUser();
+    }
+  } catch (e) {
+    statusEl.textContent = 'search failed';
+    setMsg('action', `user search failed: ${e.message}`, 'err');
+  }
 }
 
 function warmPoolCategory(templateName) {
@@ -601,6 +815,7 @@ function renderWarmPoolProfiles() {
 function renderWorkspaceHealth(summary, analytics) {
   const metrics = document.getElementById('workspaceHealthMetrics');
   const summaryEl = document.getElementById('workspaceHealthSummary');
+  const collapsedSummaryEl = document.getElementById('workspaceHealthCollapsedSummary');
   const dailyTbody = document.getElementById('leaseDaily');
   const lifetimeTbody = document.getElementById('leaseLifetime');
 
@@ -619,6 +834,10 @@ function renderWorkspaceHealth(summary, analytics) {
   const statusText = Object.keys(statusCounts).sort().map((key) => `${key}:${statusCounts[key]}`).join(', ') || 'none';
   const workspaceText = Object.keys(workspaceCounts).sort().map((key) => `${key}:${workspaceCounts[key]}`).join(', ') || 'none';
   summaryEl.textContent = `Lease statuses: ${statusText} | Workspace statuses: ${workspaceText}`;
+  const collapsedText = `Active ${summary.active_leases ?? 0} | Expiring soon ${summary.expiring_soon_leases ?? 0} | Unhealthy ${summary.unhealthy_active_leases ?? 0} | Workspaces ${summary.workspace_total ?? 0}`;
+  if (collapsedSummaryEl) {
+    collapsedSummaryEl.textContent = collapsedText;
+  }
 
   const createdSeries = analytics.daily_created || [];
   const releasedByDate = {};
@@ -666,15 +885,22 @@ function renderWorkspaceHealth(summary, analytics) {
   applyLeaseEventFilters(true);
 }
 
+function isExpiredLeaseEvent(row) {
+  const status = String((row || {}).status || '').trim().toLowerCase();
+  return status.includes('expired');
+}
+
 function filteredLeaseEvents() {
   const status = (document.getElementById('leaseStatusFilter').value || '').trim().toLowerCase();
   const user = (document.getElementById('leaseUserFilter').value || '').trim().toLowerCase();
   const session = (document.getElementById('leaseSessionFilter').value || '').trim().toLowerCase();
   const text = (document.getElementById('leaseTextFilter').value || '').trim().toLowerCase();
+  const showExpired = Boolean(document.getElementById('leaseShowExpired')?.checked);
   return allLeaseEvents
     .filter((row) => !status || String(row.status || '').toLowerCase() === status)
     .filter((row) => !user || String(row.user_id || '').toLowerCase().includes(user))
     .filter((row) => !session || String(row.session_id || '').toLowerCase().includes(session))
+    .filter((row) => showExpired || !isExpiredLeaseEvent(row))
     .filter((row) => {
       if (!text) return true;
       return [
@@ -705,6 +931,7 @@ function applyLeaseEventFilters(resetPage = false) {
   const rows = filteredLeaseEvents();
   const size = Number(document.getElementById('leasePageSize').value || '50');
   const pageSizeSafe = (!Number.isNaN(size) && size > 0) ? size : 50;
+  const showExpired = Boolean(document.getElementById('leaseShowExpired')?.checked);
   const totalPages = Math.max(1, Math.ceil(rows.length / pageSizeSafe));
   leaseEventsPage = Math.max(1, Math.min(leaseEventsPage, totalPages));
 
@@ -722,7 +949,7 @@ function applyLeaseEventFilters(resetPage = false) {
   });
 
   if (pager) pager.textContent = `page ${leaseEventsPage}/${totalPages}`;
-  if (summary) summary.textContent = `showing ${pageRows.length} of ${rows.length} filtered events (${allLeaseEvents.length} total loaded)`;
+  if (summary) summary.textContent = `showing ${pageRows.length} of ${rows.length} filtered events (${allLeaseEvents.length} total loaded${showExpired ? ', expired shown' : ', expired hidden'})`;
   if (prevBtn) prevBtn.disabled = leaseEventsPage <= 1;
   if (nextBtn) nextBtn.disabled = leaseEventsPage >= totalPages;
 }
@@ -978,9 +1205,14 @@ async function deleteClaim(name) {
 }
 
 async function upsertWarmPool() {
+  const userId = document.getElementById('warmPoolUserId').value.trim();
   const warmPoolName = document.getElementById('warmPoolName').value.trim();
   const templateName = document.getElementById('warmPoolTemplate').value.trim();
   const replicas = Number(document.getElementById('warmPoolReplicas').value);
+  if (!userId) {
+    setMsg('action', 'select a user before updating a warm pool', 'err');
+    return;
+  }
   if (!availableTemplates.includes(templateName)) {
     setMsg('action', 'select a valid sandbox template', 'err');
     return;
@@ -995,7 +1227,7 @@ async function upsertWarmPool() {
       method: 'POST',
       body: JSON.stringify({ warm_pool_name: warmPoolName, template_name: templateName, replicas }),
     });
-    setMsg('action', `updated warm pool ${warmPoolName} to ${replicas}`, 'ok');
+    setMsg('action', `updated warm pool ${warmPoolName} for ${userId} to ${replicas}`, 'ok');
     await refresh();
   } catch (e) {
     setMsg('action', 'warm pool update failed: ' + e.message, 'err');
@@ -1032,6 +1264,8 @@ async function scaleWarmPool(name, replicas) {
   }
 }
 
+initializeCollapsedSections();
+syncWarmPoolNameFromUser();
 refresh();
 updateRefreshState();
 </script>

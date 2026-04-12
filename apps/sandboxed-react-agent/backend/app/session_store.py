@@ -41,6 +41,9 @@ class SessionStore:
     def get_user(self, user_id: str) -> dict[str, Any] | None:
         return self.users.get_user(user_id)
 
+    def search_users(self, query: str = "", *, limit: int = 20) -> list[dict[str, Any]]:
+        return self.users.search_users(query=query, limit=limit)
+
     def get_user_config(self, user_id: str) -> dict[str, Any] | None:
         return self.user_configs.get_user_config(user_id)
 

@@ -359,6 +359,16 @@ class SandboxedReactAgent:
     def get_user_profile(self, user_id: str) -> dict[str, Any]:
         return self._runtime_config_service.get_user_profile(user_id)
 
+    def search_admin_users(self, query: str = "", *, limit: int = 20) -> dict[str, Any]:
+        safe_limit = min(max(int(limit), 1), 100)
+        users = self.user_repository.search_users(query=query, limit=safe_limit)
+        return {
+            "generated_at": now_iso(),
+            "query": str(query or ""),
+            "limit": safe_limit,
+            "users": users,
+        }
+
     def get_workspace(self, user_id: str) -> dict[str, Any] | None:
         workspace = self._workspace_service.get_workspace_for_user(user_id)
         return workspace.as_record() if workspace else None

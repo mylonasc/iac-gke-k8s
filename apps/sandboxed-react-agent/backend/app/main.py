@@ -673,6 +673,16 @@ def get_admin_workspace_jobs(
     )
 
 
+@app.get("/api/admin/ops/users/search")
+def search_admin_users(
+    request: Request,
+    q: str = Query(default="", max_length=200),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict[str, Any]:
+    _require_ops_admin(request)
+    return agent.search_admin_users(query=q, limit=limit)
+
+
 @app.get("/api/public/{share_id}/assets/{asset_id}")
 def get_public_asset(share_id: str, asset_id: str):
     asset = agent.asset_manager.get_asset_for_share(asset_id, share_id)
