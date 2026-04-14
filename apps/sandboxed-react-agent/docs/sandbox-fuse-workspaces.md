@@ -9,7 +9,7 @@ The app now implements the core persistent workspace path and several UX/reliabi
 - per-user workspace provisioning for bucket, GSA, KSA, WI, and user-derived templates
 - persistent execution resolves selected base template flavors to user-derived templates
 - optional persistent-to-transient fallback with explicit session status metadata
-- periodic lease janitor loop in app lifecycle, with request-path reaping retained as backstop
+- periodic backend lease reaper loop in app lifecycle, with request-path reaping retained as backstop
 
 What remains mostly roadmap-oriented in this document:
 

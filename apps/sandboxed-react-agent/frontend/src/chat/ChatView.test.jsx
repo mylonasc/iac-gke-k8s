@@ -11,6 +11,12 @@ vi.mock("@assistant-ui/react", () => {
       const state = { thread: { isRunning: false, isEmpty: false } };
       return condition(state) ? <>{children}</> : null;
     },
+    useAssistantTransportState: (selector) =>
+      (typeof selector === "function" ? selector({}) : {}),
+    useAssistantState: (selector) =>
+      (typeof selector === "function"
+        ? selector({ thread: { state: {} } })
+        : { thread: { state: {} } }),
     ThreadPrimitive: {
       Root: passthrough,
       Viewport: passthrough,
@@ -31,6 +37,10 @@ vi.mock("./Composer", () => ({
 
 vi.mock("./ThinkingSidebar", () => ({
   ThinkingSidebar: () => <aside>Thinking Sidebar</aside>,
+}));
+
+vi.mock("../terminal/SandboxTerminalPanel", () => ({
+  SandboxTerminalPanel: () => <div>Terminal Panel</div>,
 }));
 
 const baseSession = {
@@ -105,6 +115,10 @@ describe("ChatView sandbox controls", () => {
 
     await user.click(screen.getByRole("button", { name: "Advanced sandbox controls" }));
 
+    expect(
+      screen.getByRole("dialog", { name: "Advanced sandbox controls" })
+    ).toBeInTheDocument();
+
     expect(screen.getByText("Workspace: ready")).toBeInTheDocument();
     expect(screen.getByText("Pending: no")).toBeInTheDocument();
     expect(screen.getByText("Effective profile: transient")).toBeInTheDocument();
@@ -134,6 +148,16 @@ describe("ChatView sandbox controls", () => {
       "reconcile_workspace",
       { wait: false }
     );
+  });
+
+  it("opens terminal modal from controls", async () => {
+    const user = userEvent.setup();
+    renderView();
+
+    await user.click(screen.getByRole("button", { name: "Terminal" }));
+
+    expect(screen.getByRole("dialog", { name: "Sandbox terminal" })).toBeInTheDocument();
+    expect(screen.getByText("Terminal Panel")).toBeInTheDocument();
   });
 
   it("sends nulls when policy fields are cleared", async () => {

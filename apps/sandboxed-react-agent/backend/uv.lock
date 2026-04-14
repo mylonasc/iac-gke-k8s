@@ -1184,7 +1184,7 @@ wheels = [
 
 [[package]]
 name = "sandboxed-react-agent-backend"
-version = "0.5.0"
+version = "0.5.1"
 source = { virtual = "." }
 dependencies = [
     { name = "assistant-stream" },

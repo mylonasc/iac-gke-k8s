@@ -3,8 +3,9 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    env_file:
+      - ./.env.local
     environment:
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
       AGENT_MAX_TOOL_CALLS_PER_TURN: ${AGENT_MAX_TOOL_CALLS_PER_TURN:-4}
       SANDBOX_MODE: ${SANDBOX_MODE:-local}
@@ -35,7 +36,7 @@ services:
     volumes:
       - backend_data:/app/data
       - ${HOME}/.kube:/root/.kube:ro
-      - ${HOME}/.config/gcloud:/root/.config/gcloud:ro
+      - ${HOME}/.config/gcloud:/root/.config/gcloud:rw
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:

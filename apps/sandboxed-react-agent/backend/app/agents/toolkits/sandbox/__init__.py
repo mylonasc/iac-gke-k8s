@@ -2,6 +2,7 @@ import asyncio
 import copy
 import json
 import time
+from contextlib import nullcontext
 from typing import Any, Awaitable, Callable
 
 from langchain_core.tools import StructuredTool
@@ -89,6 +90,7 @@ class SandboxToolkit:
         session_id: str,
         runtime_config: dict[str, Any],
         now_iso: Callable[[], str],
+        sandbox_lifecycle: SandboxLifecycleService | None = None,
         event_sink: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         get_session_status: Callable[[str], dict[str, Any]] | None = None,
         get_workspace_status: Callable[[str], dict[str, Any]] | None = None,
@@ -97,6 +99,7 @@ class SandboxToolkit:
         | None = None,
         release_session_lease: Callable[[str], dict[str, Any]] | None = None,
         reconcile_workspace: Callable[[str, bool], dict[str, Any]] | None = None,
+        open_interactive_shell: Callable[[str], dict[str, Any]] | None = None,
     ) -> None:
         """Initialize toolkit runtime wrapper.
 
@@ -105,6 +108,7 @@ class SandboxToolkit:
             session_id: Current session identifier.
             runtime_config: Effective sandbox runtime configuration.
             now_iso: Callable providing current timestamp.
+            sandbox_lifecycle: Optional lifecycle service for sandbox progress events.
             event_sink: Optional async sink for tool start/end events.
             get_session_status: Optional callback for session sandbox status.
             get_workspace_status: Optional callback for workspace status.
@@ -112,8 +116,10 @@ class SandboxToolkit:
             set_session_policy: Optional callback to update session sandbox policy.
             release_session_lease: Optional callback to release current session lease.
             reconcile_workspace: Optional callback to reconcile/ensure workspace.
+            open_interactive_shell: Optional callback to expose interactive shell hint.
         """
         self.session_sandbox = session_sandbox
+        self.sandbox_lifecycle = sandbox_lifecycle
         self.session_id = session_id
         self.runtime_config = runtime_config
         self.now_iso = now_iso
@@ -124,6 +130,7 @@ class SandboxToolkit:
         self.set_session_policy = set_session_policy
         self.release_session_lease = release_session_lease
         self.reconcile_workspace = reconcile_workspace
+        self.open_interactive_shell = open_interactive_shell
         self._tools = [
             StructuredTool.from_function(
                 func=self._exec_python,
@@ -178,6 +185,14 @@ class SandboxToolkit:
                 name="sandbox_wait_for_workspace_ready",
                 description="Poll workspace state until ready, error, or timeout.",
                 args_schema=SandboxWaitWorkspaceReadyInput,
+            ),
+            StructuredTool.from_function(
+                func=self._open_interactive_shell,
+                name="sandbox_open_interactive_shell",
+                description=(
+                    "Open an interactive shell panel for this session's sandbox in the UI."
+                ),
+                args_schema=SandboxNoArgsInput,
             ),
         ]
         self._tool_by_name = {tool.name: tool for tool in self._tools}
@@ -300,21 +315,35 @@ class SandboxToolkit:
             ValueError: If the tool name is not supported.
         """
         if name == "sandbox_exec_python":
-            return self.session_sandbox.run_python(
-                session_id=self.session_id,
-                tool_call_id=tool_call_id,
-                code=str(parsed.get("code", "")),
-                runtime_config=self.runtime_config,
-                created_at=self.now_iso(),
+            listener = self._sandbox_progress_listener()
+            listener_context = (
+                self.sandbox_lifecycle.bind_progress_listener(listener)
+                if self.sandbox_lifecycle is not None
+                else nullcontext()
             )
+            with listener_context:
+                return self.session_sandbox.run_python(
+                    session_id=self.session_id,
+                    tool_call_id=tool_call_id,
+                    code=str(parsed.get("code", "")),
+                    runtime_config=self.runtime_config,
+                    created_at=self.now_iso(),
+                )
         if name == "sandbox_exec_shell":
-            return self.session_sandbox.run_shell(
-                session_id=self.session_id,
-                tool_call_id=tool_call_id,
-                command=str(parsed.get("command", "")),
-                runtime_config=self.runtime_config,
-                created_at=self.now_iso(),
+            listener = self._sandbox_progress_listener()
+            listener_context = (
+                self.sandbox_lifecycle.bind_progress_listener(listener)
+                if self.sandbox_lifecycle is not None
+                else nullcontext()
             )
+            with listener_context:
+                return self.session_sandbox.run_shell(
+                    session_id=self.session_id,
+                    tool_call_id=tool_call_id,
+                    command=str(parsed.get("command", "")),
+                    runtime_config=self.runtime_config,
+                    created_at=self.now_iso(),
+                )
         if name == "sandbox_get_session_status":
             return self._payload_only(self._get_session_status())
         if name == "sandbox_get_workspace_status":
@@ -346,7 +375,32 @@ class SandboxToolkit:
                     poll_interval_seconds=int(parsed.get("poll_interval_seconds", 3)),
                 )
             )
+        if name == "sandbox_open_interactive_shell":
+            return self._payload_only(self._open_interactive_shell())
         raise ValueError(f"Unsupported tool: {name}")
+
+    def _sandbox_progress_listener(self) -> Callable[[dict[str, Any]], None] | None:
+        if self.event_sink is None:
+            return None
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+
+        def _listener(event: dict[str, Any]) -> None:
+            if self.event_sink is None:
+                return
+            future = asyncio.run_coroutine_threadsafe(self.event_sink(event), loop)
+
+            def _consume_exception(done_future) -> None:
+                try:
+                    done_future.result()
+                except Exception:
+                    return
+
+            future.add_done_callback(_consume_exception)
+
+        return _listener
 
     def _exec_python(self, code: str) -> dict[str, Any]:
         """LangChain adapter for Python tool execution.
@@ -390,7 +444,11 @@ class SandboxToolkit:
         return payload, []
 
     def _ok_payload(
-        self, tool_name: str, data: dict[str, Any], *, message: str = ""
+        self,
+        tool_name: str,
+        data: dict[str, Any],
+        *,
+        message: str = "",
     ) -> ToolExecutionPayload:
         return ToolExecutionPayload(
             tool=tool_name,
@@ -398,6 +456,7 @@ class SandboxToolkit:
             stdout=message or json.dumps(data, ensure_ascii=True),
             stderr="",
             exit_code=0,
+            data=data,
         )
 
     def _error_payload(self, tool_name: str, error: str) -> ToolExecutionPayload:
@@ -551,6 +610,30 @@ class SandboxToolkit:
             f"Timed out waiting for workspace readiness after {timeout_seconds}s",
         )
 
+    def _open_interactive_shell(self) -> ToolExecutionPayload:
+        tool_name = "sandbox_open_interactive_shell"
+        if self.open_interactive_shell is not None:
+            try:
+                payload = self.open_interactive_shell(self.session_id)
+                return self._ok_payload(
+                    tool_name,
+                    payload,
+                    message="Interactive shell is available in the session panel.",
+                )
+            except Exception as exc:
+                return self._error_payload(tool_name, str(exc))
+
+        payload = {
+            "session_id": self.session_id,
+            "open_terminal_path": f"/api/sessions/{self.session_id}/sandbox/terminal/open",
+            "message": "Interactive shell is available in the session panel.",
+        }
+        return self._ok_payload(
+            tool_name,
+            payload,
+            message="Interactive shell is available in the session panel.",
+        )
+
     def _error_output(self, tool_name: str, error: str) -> str:
         """Build serialized error payload for tool-level validation errors.
 
@@ -589,6 +672,7 @@ class SandboxToolkitProvider:
         | None = None,
         release_session_lease: Callable[[str], dict[str, Any]] | None = None,
         reconcile_workspace: Callable[[str, bool], dict[str, Any]] | None = None,
+        open_interactive_shell: Callable[[str], dict[str, Any]] | None = None,
     ) -> None:
         """Initialize provider dependencies.
 
@@ -603,6 +687,7 @@ class SandboxToolkitProvider:
             set_session_policy: Optional session policy mutation callback.
             release_session_lease: Optional lease release callback.
             reconcile_workspace: Optional workspace reconcile callback.
+            open_interactive_shell: Optional interactive shell callback.
         """
         self.session_sandbox = session_sandbox
         self.sandbox_manager = sandbox_manager
@@ -614,6 +699,7 @@ class SandboxToolkitProvider:
         self.set_session_policy = set_session_policy
         self.release_session_lease = release_session_lease
         self.reconcile_workspace = reconcile_workspace
+        self.open_interactive_shell = open_interactive_shell
 
     def _normalize_mode(self, value: Any) -> str:
         """Validate and normalize runtime mode value.
@@ -844,6 +930,7 @@ class SandboxToolkitProvider:
         merged_config.update(sandbox_lifecycle)
         return SandboxToolkit(
             session_sandbox=self.session_sandbox,
+            sandbox_lifecycle=self.sandbox_lifecycle,
             session_id=session_id,
             runtime_config=merged_config,
             now_iso=now_iso,
@@ -854,4 +941,5 @@ class SandboxToolkitProvider:
             set_session_policy=self.set_session_policy,
             release_session_lease=self.release_session_lease,
             reconcile_workspace=self.reconcile_workspace,
+            open_interactive_shell=self.open_interactive_shell,
         )

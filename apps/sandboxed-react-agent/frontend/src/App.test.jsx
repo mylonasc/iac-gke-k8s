@@ -56,6 +56,8 @@ vi.mock("@assistant-ui/react", () => {
           ],
         },
       }),
+    useAssistantTransportState: (selector) =>
+      (typeof selector === "function" ? selector({}) : {}),
   };
 });
 

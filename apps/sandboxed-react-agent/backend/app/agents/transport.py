@@ -4,6 +4,7 @@ from typing import Any, Awaitable, Callable
 from assistant_stream import RunController
 
 from .ui_state_adapter import AssistantUIStateAdapter
+from ..sandbox_events import is_sandbox_progress_event
 
 
 class AssistantTransportRuntime:
@@ -160,6 +161,26 @@ class AssistantTransportRuntime:
                     if assistant_index is None:
                         return
                     phase = str(event.get("phase") or "")
+
+                    if is_sandbox_progress_event(event):
+                        update = self.ui_state.append_sandbox_update(controller, event)
+                        self.ui_state.set_sandbox_live(controller, update)
+                        payload = (
+                            update.get("payload")
+                            if isinstance(update.get("payload"), dict)
+                            else {}
+                        )
+                        detail = str(payload.get("notice") or "").strip() or (
+                            f"Sandbox {update.get('stage', 'state')}: {update.get('code', 'updated')}"
+                        )
+                        self.append_tool_update(
+                            controller,
+                            stage="sandbox",
+                            status=str(update.get("status") or "info"),
+                            detail=detail,
+                            tool=(str(payload.get("tool_name") or "").strip() or None),
+                        )
+                        return
 
                     if phase == "model_token":
                         token = str(event.get("text") or "")

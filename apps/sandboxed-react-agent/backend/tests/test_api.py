@@ -45,6 +45,25 @@ def setup_function() -> None:
     shutil.rmtree(os.environ["ASSET_STORE_PATH"], ignore_errors=True)
 
 
+def _create_session(*, headers: dict[str, str] | None = None) -> str:
+    created = client.post("/api/sessions", headers=headers, json={})
+    assert created.status_code == 200
+    return str(created.json()["session_id"])
+
+
+def _terminal_open_payload(session_id: str) -> dict[str, str]:
+    return {
+        "terminal_id": "term-1",
+        "session_id": session_id,
+        "lease_id": "lease-1",
+        "claim_name": "sandbox-claim-1",
+        "namespace": "alt-default",
+        "pod_name": "sandbox-pod-1",
+        "connect_token": "tok-1",
+        "token_expires_at": "2026-01-01T00:00:45+00:00",
+    }
+
+
 def test_auth_middleware_rejects_missing_bearer_when_enabled(monkeypatch) -> None:
     monkeypatch.setattr(main_module.auth_config, "enabled", True)
 
@@ -348,6 +367,37 @@ def test_admin_workspace_jobs_endpoint_roundtrip(monkeypatch) -> None:
     assert payload["include_terminal"] is False
 
 
+def test_admin_users_search_endpoint_roundtrip(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_search_admin_users(query: str, *, limit: int) -> dict[str, object]:
+        captured["query"] = query
+        captured["limit"] = limit
+        return {
+            "generated_at": "2026-01-01T00:00:00+00:00",
+            "query": query,
+            "limit": limit,
+            "users": [
+                {
+                    "user_id": "user-alpha",
+                    "tier": "default",
+                    "workspace_status": "ready",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(agent, "search_admin_users", _fake_search_admin_users)
+
+    response = client.get("/api/admin/ops/users/search?q=alpha&limit=15")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert captured == {"query": "alpha", "limit": 15}
+    assert payload["query"] == "alpha"
+    assert payload["limit"] == 15
+    assert payload["users"][0]["user_id"] == "user-alpha"
+
+
 def test_sandbox_lifecycle_endpoints_roundtrip(monkeypatch) -> None:
     fake_lease = {
         "lease_id": "lease-123",
@@ -482,6 +532,136 @@ def test_session_sandbox_status_policy_and_actions_endpoints(monkeypatch) -> Non
     assert action_response.json()["action"] == "release_lease"
 
 
+def test_terminal_open_and_close_endpoints(monkeypatch) -> None:
+    session_id = _create_session()
+
+    monkeypatch.setattr(
+        agent,
+        "open_session_terminal",
+        lambda sid, uid: _terminal_open_payload(sid),
+    )
+    monkeypatch.setattr(agent, "close_session_terminal", lambda **kwargs: True)
+
+    opened = client.post(f"/api/sessions/{session_id}/sandbox/terminal/open")
+    assert opened.status_code == 200
+    payload = opened.json()
+    assert payload["terminal_id"] == "term-1"
+    assert payload["websocket_path"].endswith("/ws?token=tok-1")
+
+    closed = client.delete(f"/api/sessions/{session_id}/sandbox/terminal/term-1")
+    assert closed.status_code == 200
+    assert closed.json()["closed"] is True
+
+    opened_dev = client.post(f"/api/dev/sessions/{session_id}/terminal/open")
+    assert opened_dev.status_code == 200
+    assert "/api/dev/sessions/" in opened_dev.json()["websocket_path"]
+
+    closed_dev = client.delete(f"/api/dev/sessions/{session_id}/terminal/term-1")
+    assert closed_dev.status_code == 200
+    assert closed_dev.json()["closed"] is True
+
+
+def test_terminal_open_enforces_session_ownership(monkeypatch) -> None:
+    monkeypatch.setattr(main_module.auth_config, "enabled", True)
+    monkeypatch.setattr(
+        main_module.token_verifier,
+        "verify",
+        lambda token: {"sub": "user-a" if token == "token-a" else "user-b"},
+    )
+
+    session_id = _create_session(headers={"Authorization": "Bearer token-a"})
+
+    monkeypatch.setattr(
+        agent,
+        "open_session_terminal",
+        lambda sid, uid: _terminal_open_payload(sid),
+    )
+
+    forbidden = client.post(
+        f"/api/sessions/{session_id}/sandbox/terminal/open",
+        headers={"Authorization": "Bearer token-b"},
+    )
+    assert forbidden.status_code == 404
+    assert forbidden.json()["detail"] == "Session not found"
+
+
+def test_terminal_open_returns_json_for_unexpected_errors(monkeypatch) -> None:
+    session_id = _create_session()
+
+    def _raise_runtime_error(_session_id: str, _user_id: str):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(agent, "open_session_terminal", _raise_runtime_error)
+
+    opened = client.post(f"/api/sessions/{session_id}/sandbox/terminal/open")
+    assert opened.status_code == 500
+    assert opened.headers["content-type"].startswith("application/json")
+    assert opened.json()["detail"] == "Failed to open terminal session"
+
+    opened_dev = client.post(f"/api/dev/sessions/{session_id}/terminal/open")
+    assert opened_dev.status_code == 500
+    assert opened_dev.headers["content-type"].startswith("application/json")
+    assert opened_dev.json()["detail"] == "Failed to open terminal session"
+
+
+def test_terminal_websocket_stream_roundtrip(monkeypatch) -> None:
+    created = client.post("/api/sessions", json={})
+    assert created.status_code == 200
+    session_id = created.json()["session_id"]
+
+    reads = {"count": 0}
+    writes: list[str] = []
+    resizes: list[tuple[int, int]] = []
+    closes: list[str] = []
+
+    monkeypatch.setattr(
+        agent,
+        "connect_session_terminal",
+        lambda **kwargs: {
+            "terminal_id": kwargs["terminal_id"],
+            "session_id": kwargs["session_id"],
+        },
+    )
+
+    def _read_output(**kwargs):
+        reads["count"] += 1
+        if reads["count"] == 1:
+            return [{"type": "stdout", "data": "ready\\n"}]
+        return []
+
+    monkeypatch.setattr(agent, "read_session_terminal_output", _read_output)
+    monkeypatch.setattr(
+        agent,
+        "write_session_terminal_input",
+        lambda **kwargs: writes.append(kwargs["data"]),
+    )
+    monkeypatch.setattr(
+        agent,
+        "resize_session_terminal",
+        lambda **kwargs: resizes.append((kwargs["cols"], kwargs["rows"])),
+    )
+    monkeypatch.setattr(
+        agent,
+        "close_session_terminal",
+        lambda **kwargs: closes.append(kwargs["terminal_id"]) or True,
+    )
+
+    with client.websocket_connect(
+        f"/api/sessions/{session_id}/sandbox/terminal/term-1/ws?token=tok-1"
+    ) as websocket:
+        status_event = websocket.receive_json()
+        output_event = websocket.receive_json()
+        websocket.send_json({"type": "stdin", "data": "ls\\n"})
+        websocket.send_json({"type": "resize", "cols": 132, "rows": 40})
+
+    assert status_event == {"type": "status", "status": "connected"}
+    assert output_event["type"] == "stdout"
+    assert output_event["data"] == "ready\\n"
+    assert writes == ["ls\\n"]
+    assert resizes in ([], [(132, 40)])
+    assert closes in ([], ["term-1"])
+
+
 def test_sessions_list_and_share() -> None:
     created = client.post("/api/sessions", json={})
     assert created.status_code == 200
@@ -533,6 +713,17 @@ def test_assistant_endpoint_streams_transport_state(monkeypatch) -> None:
                 "detail": "Completed response",
             }
         ]
+        controller.state["sandbox_updates"] = [
+            {
+                "id": "s-1",
+                "stage": "lease",
+                "status": "completed",
+                "code": "claim_ready",
+                "timestamp": "2026-01-01T00:00:00+00:00",
+                "payload": {"claim_name": "claim-1"},
+            }
+        ]
+        controller.state["sandbox_live"] = controller.state["sandbox_updates"][-1]
 
     async def wrapper(payload, controller, user_id):
         assert isinstance(user_id, str)
@@ -561,6 +752,7 @@ def test_assistant_endpoint_streams_transport_state(monkeypatch) -> None:
     assert "aui-state:" in response.text
     assert "session-test" in response.text
     assert "Completed response" in response.text
+    assert "claim_ready" in response.text
 
 
 def test_loading_session_normalizes_stale_running_status() -> None:

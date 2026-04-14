@@ -405,6 +405,47 @@
   min-width: 0;
 }
 
+.sandbox-live-panel {
+  border: 1px solid var(--line-strong);
+  background: color-mix(in srgb, var(--bg-soft) 65%, transparent);
+  border-radius: 10px;
+  padding: 0.45rem 0.55rem;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.sandbox-live-header {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.sandbox-live-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.22rem;
+  font-size: 0.8rem;
+}
+
+.sandbox-live-list li {
+  display: grid;
+  gap: 0.08rem;
+}
+
+.sandbox-live-item-meta {
+  color: var(--text-subtle);
+  font-size: 0.75rem;
+}
+
+.sandbox-live-empty {
+  margin: 0;
+  color: var(--text-subtle);
+  font-size: 0.78rem;
+}
+
 .sandbox-controls-panel {
   border-top: 1px solid var(--line);
   padding-top: 0.55rem;
@@ -412,6 +453,52 @@
   gap: 0.45rem;
   background: color-mix(in srgb, var(--bg-soft) 60%, transparent);
   border-radius: 10px;
+}
+
+.sandbox-tools-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(6, 10, 21, 0.58);
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  padding-bottom: calc(1rem + env(safe-area-inset-bottom));
+}
+
+.sandbox-tools-modal {
+  width: min(100%, 64rem);
+  max-height: min(86dvh, 52rem);
+  background: var(--bg-solid);
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.24);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.sandbox-tools-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+  padding: 0.7rem 0.85rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.sandbox-tools-header h3 {
+  margin: 0;
+  font-size: 0.96rem;
+}
+
+.sandbox-tools-body {
+  overflow: auto;
+  padding: 0.7rem 0.85rem 0.85rem;
+}
+
+.sandbox-tools-body .sandbox-controls-panel {
+  border-top: 0;
+  padding-top: 0;
 }
 
 .sandbox-status-row {
@@ -445,6 +532,59 @@
 .sandbox-policy-row input,
 .sandbox-policy-row select {
   min-width: 12rem;
+}
+
+.terminal-dev-panel,
+.terminal-dev-empty {
+  padding: 1rem;
+}
+
+.terminal-shell {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-soft) 68%, var(--bg-solid));
+  padding: 0.8rem;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.terminal-shell-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.terminal-shell-header h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.terminal-meta {
+  margin: 0;
+  color: var(--text-subtle);
+  font-size: 0.8rem;
+}
+
+.terminal-actions {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.terminal-output {
+  margin: 0;
+  min-height: 16rem;
+  max-height: min(50dvh, 26rem);
+  overflow: auto;
+  border-radius: 10px;
+  border: 1px solid var(--line-strong);
+  background: #0b1420;
+  padding: 0.15rem;
+}
+
+.terminal-output .xterm {
+  padding: 0.45rem 0.35rem;
 }
 
 .thread-root {
@@ -1434,6 +1574,11 @@ code {
   .sandbox-policy-row button {
     width: 100%;
     min-width: 0;
+  }
+
+  .sandbox-tools-modal {
+    width: 100%;
+    max-height: calc(100dvh - 2rem - env(safe-area-inset-bottom));
   }
 }
 

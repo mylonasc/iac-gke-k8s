@@ -23,6 +23,7 @@ class ToolExecutionPayload:
     lease_id: str | None = None
     claim_name: str | None = None
     assets: list[ToolExecutionAsset] = field(default_factory=list)
+    data: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)

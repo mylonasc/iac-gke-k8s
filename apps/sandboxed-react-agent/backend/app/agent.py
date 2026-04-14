@@ -35,6 +35,7 @@ from .sandbox_lifecycle import SandboxLifecycleService
 from .sandbox_manager import SandboxManager
 from .services.runtime_config_service import RuntimeConfigService
 from .services.sandbox_admin_service import SandboxAdminService
+from .services.sandbox_terminal_service import SandboxTerminalService
 from .services.session_service import SessionService
 from .services.session_state import SessionState, now_iso
 from .services.sharing_service import SharingService
@@ -173,6 +174,9 @@ class SandboxedReactAgent:
                     wait=wait,
                 )
             ),
+            open_interactive_shell=lambda session_id: (
+                self.open_interactive_shell_for_tools(session_id)
+            ),
         )
         self.toolkit_providers: list[ToolkitProvider] = [
             self._sandbox_toolkit_provider,
@@ -186,6 +190,9 @@ class SandboxedReactAgent:
         self._sandbox_admin = SandboxAdminService(
             sandbox_lease_facade=self.sandbox_lease_facade,
             sandbox_manager=self.sandbox_manager,
+            sandbox_lifecycle=self.sandbox_lifecycle,
+        )
+        self._sandbox_terminal = SandboxTerminalService(
             sandbox_lifecycle=self.sandbox_lifecycle,
         )
         self._session_service = SessionService(
@@ -496,6 +503,19 @@ class SandboxedReactAgent:
         if session.user_id != user_id:
             return runtime
         return self._apply_session_sandbox_policy(runtime, session.sandbox_policy)
+
+    def _sandbox_runtime_context(
+        self, runtime_context: dict[str, Any]
+    ) -> dict[str, Any]:
+        sandbox_toolkit = (runtime_context.get("toolkits") or {}).get("sandbox") or {}
+        sandbox_runtime = sandbox_toolkit.get("runtime") or {}
+        sandbox_lifecycle = sandbox_toolkit.get("lifecycle") or {}
+        flattened: dict[str, Any] = {}
+        if isinstance(sandbox_runtime, dict):
+            flattened.update(sandbox_runtime)
+        if isinstance(sandbox_lifecycle, dict):
+            flattened.update(sandbox_lifecycle)
+        return flattened
 
     def get_session_sandbox_policy(
         self, session_id: str, user_id: str
@@ -1393,6 +1413,90 @@ class SandboxedReactAgent:
     def get_session(self, session_id: str, user_id: str) -> dict[str, Any] | None:
         return self._session_service.get_session(session_id, user_id)
 
+    def open_session_terminal(self, session_id: str, user_id: str) -> dict[str, Any]:
+        session = self.sessions.get(session_id)
+        if not session or session.user_id != user_id:
+            raise PermissionError("Session not found")
+        runtime_context = self._runtime_context_for_session(user_id, session_id)
+        runtime_config = self._sandbox_runtime_context(runtime_context)
+        return self._sandbox_terminal.open_terminal(
+            session_id=session_id,
+            user_id=user_id,
+            runtime_config=runtime_config,
+        )
+
+    def connect_session_terminal(
+        self,
+        *,
+        session_id: str,
+        terminal_id: str,
+        token: str,
+    ) -> dict[str, Any]:
+        return self._sandbox_terminal.consume_connect_token(
+            session_id=session_id,
+            terminal_id=terminal_id,
+            token_value=token,
+        )
+
+    def read_session_terminal_output(
+        self,
+        *,
+        session_id: str,
+        terminal_id: str,
+        timeout_seconds: float = 0.2,
+        max_chunks: int = 12,
+    ) -> list[dict[str, str]]:
+        return self._sandbox_terminal.read_output(
+            session_id=session_id,
+            terminal_id=terminal_id,
+            timeout_seconds=timeout_seconds,
+            max_chunks=max_chunks,
+        )
+
+    def write_session_terminal_input(
+        self,
+        *,
+        session_id: str,
+        terminal_id: str,
+        data: str,
+    ) -> None:
+        self._sandbox_terminal.write_input(
+            session_id=session_id,
+            terminal_id=terminal_id,
+            data=data,
+        )
+
+    def resize_session_terminal(
+        self,
+        *,
+        session_id: str,
+        terminal_id: str,
+        cols: int,
+        rows: int,
+    ) -> None:
+        self._sandbox_terminal.resize_terminal(
+            session_id=session_id,
+            terminal_id=terminal_id,
+            cols=cols,
+            rows=rows,
+        )
+
+    def close_session_terminal(
+        self,
+        *,
+        session_id: str,
+        terminal_id: str,
+        user_id: str | None = None,
+    ) -> bool:
+        if user_id is not None:
+            session = self.sessions.get(session_id)
+            if not session or session.user_id != user_id:
+                raise PermissionError("Session not found")
+        return self._sandbox_terminal.close_terminal(
+            session_id=session_id,
+            terminal_id=terminal_id,
+        )
+
     def get_session_sandbox(self, session_id: str) -> dict[str, Any]:
         return self._sandbox_admin.get_session_sandbox(session_id)
 
@@ -1541,6 +1645,14 @@ class SandboxedReactAgent:
         user_id = self._tool_user_id_for_session(session_id)
         return self.list_available_sandboxes(user_id)
 
+    def open_interactive_shell_for_tools(self, session_id: str) -> dict[str, Any]:
+        self._tool_user_id_for_session(session_id)
+        return {
+            "session_id": session_id,
+            "open_terminal_path": f"/api/sessions/{session_id}/sandbox/terminal/open",
+            "message": "Interactive shell panel is available for this session.",
+        }
+
     def set_session_sandbox_policy_for_tools(
         self, session_id: str, policy_updates: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1588,4 +1700,5 @@ class SandboxedReactAgent:
 
     def close(self) -> None:
         """Release background resources owned by the agent runtime."""
+        self._sandbox_terminal.close_all()
         self._workspace_async_service.shutdown(wait=False, timeout_seconds=1.0)

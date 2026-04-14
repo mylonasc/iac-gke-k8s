@@ -1,4 +1,6 @@
 import copy
+from datetime import UTC, datetime
+import uuid
 from typing import Any
 
 from assistant_stream import RunController
@@ -14,6 +16,10 @@ class AssistantUIStateAdapter:
             controller.state["messages"] = []
         if "tool_updates" not in controller.state:
             controller.state["tool_updates"] = []
+        if "sandbox_updates" not in controller.state:
+            controller.state["sandbox_updates"] = []
+        if "sandbox_live" not in controller.state:
+            controller.state["sandbox_live"] = None
 
     def load_session_messages(
         self, controller: RunController, ui_messages: list[dict[str, Any]]
@@ -109,3 +115,34 @@ class AssistantUIStateAdapter:
 
     def set_complete(self, controller: RunController, assistant_index: int) -> None:
         controller.state["messages"][assistant_index]["status"] = {"type": "complete"}
+
+    def append_sandbox_update(
+        self,
+        controller: RunController,
+        event: dict[str, Any],
+        *,
+        max_entries: int = 80,
+    ) -> dict[str, Any]:
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        update = {
+            "id": str(event.get("id") or uuid.uuid4()),
+            "timestamp": str(event.get("timestamp") or datetime.now(UTC).isoformat()),
+            "stage": str(event.get("stage") or "unknown"),
+            "status": str(event.get("status") or "info"),
+            "code": str(event.get("code") or "unknown"),
+            "payload": payload,
+        }
+        session_id = str(event.get("session_id") or "").strip()
+        if session_id:
+            update["session_id"] = session_id
+
+        updates = controller.state["sandbox_updates"]
+        updates.append(update)
+        if len(updates) > max_entries:
+            del updates[:-max_entries]
+        return update
+
+    def set_sandbox_live(
+        self, controller: RunController, update: dict[str, Any]
+    ) -> None:
+        controller.state["sandbox_live"] = copy.deepcopy(update)

@@ -50,9 +50,22 @@ and lifecycle can be managed per chat session (not only per user/global config).
 - `POST /api/sessions/{session_id}/sandbox/actions`
   - Runs lifecycle actions such as `release_lease`, `reconcile_workspace`,
     `ensure_workspace_async`, and `ensure_workspace`.
+- `POST /api/sessions/{session_id}/sandbox/terminal/open`
+  - Opens a session-bound interactive terminal and returns a one-time websocket
+    token + connect path.
+- `DELETE /api/sessions/{session_id}/sandbox/terminal/{terminal_id}`
+  - Closes an active interactive terminal session.
+- `WS /api/sessions/{session_id}/sandbox/terminal/{terminal_id}/ws?token=...`
+  - Bidirectional terminal stream (`stdin`, `stdout`, `stderr`, resize) bound
+    to the same session sandbox lease used by chat tools.
 
 The chat UI polls the status endpoint and provides inline session controls for
 refresh, lease release, workspace reconcile, and policy updates.
+
+During active `/api/assistant` runs, backend sandbox lifecycle updates are also
+streamed in transport state (`sandbox_updates`, `sandbox_live`) so the UI can
+render claim/runtime progress without coupling tool or lifecycle code to
+frontend components.
 
 When persistent workspace routing is selected but not ready, runtime can
 auto-fallback to transient execution (configurable via
@@ -69,7 +82,12 @@ control tools:
 - Diagnostics: `sandbox_get_session_status`, `sandbox_get_workspace_status`,
   `sandbox_list_available_sandboxes`, `sandbox_wait_for_workspace_ready`
 - Mutations: `sandbox_set_session_policy`, `sandbox_release_session_lease`,
-  `sandbox_reconcile_workspace`
+  `sandbox_reconcile_workspace`, `sandbox_open_interactive_shell`
+
+The frontend also includes a temporary dev panel for terminal-only validation:
+
+- `?dev_panel=terminal` renders an isolated terminal UI using
+  `/api/dev/sessions/{session_id}/terminal/*` endpoints.
 
 ## Deployment diagram (KubeDiagrams)
 
@@ -285,6 +303,12 @@ cp apps/sandboxed-react-agent/.env.local.example apps/sandboxed-react-agent/.env
 ./apps/sandboxed-react-agent/dev-sandbox.sh up local
 ```
 
+Direct compose also works (loads `apps/sandboxed-react-agent/.env.local` by default):
+
+```bash
+docker compose --project-directory apps/sandboxed-react-agent up --build
+```
+
 ### Option B: cluster-connected tool execution
 
 This mode expects your local kube context to have permissions to create
@@ -310,6 +334,12 @@ cp apps/sandboxed-react-agent/.env.cluster.example apps/sandboxed-react-agent/.e
 ./apps/sandboxed-react-agent/dev-sandbox.sh up cluster
 ```
 
+If running compose directly in cluster mode, pass the cluster env file explicitly:
+
+```bash
+docker compose --project-directory apps/sandboxed-react-agent --env-file apps/sandboxed-react-agent/.env.cluster up --build
+```
+
 Stop either mode:
 
 ```bash
@@ -322,6 +352,23 @@ Stop either mode:
 curl -sS http://localhost:8080/api/health
 curl -sS http://localhost:8080/api/state
 ```
+
+### Verify terminal from local compose
+
+Interactive terminal uses cluster mode (Kubernetes exec stream), even when
+frontend/backend run locally in Docker Compose.
+
+Run the end-to-end check:
+
+```bash
+./apps/sandboxed-react-agent/test-local-terminal-compose.sh
+```
+
+This helper will:
+
+- ensure router port-forward is running (`dev-sandbox.sh port-forward start` when needed)
+- switch backend to `cluster` mode with `http://host.docker.internal:18080`
+- run `frontend/e2e/terminal-compose.spec.js` against your local compose app
 
 ### Backend logging and tracing
 
@@ -386,7 +433,9 @@ For agent cluster-mode through docker compose, use router URL
 `http://host.docker.internal:18080` (the backend service is inside a container).
 On Linux this is mapped in `docker-compose.yml` via `extra_hosts`.
 The backend container also mounts your host kube and gcloud config so
-`k8s-agent-sandbox` can create `SandboxClaim` resources.
+`k8s-agent-sandbox` can create `SandboxClaim` resources. Keep the gcloud mount
+writable in compose (`${HOME}/.config/gcloud:/root/.config/gcloud:rw`) because
+the exec auth plugin writes `credentials.db` and logs during token refresh.
 
 If direct `SandboxClient` calls in notebook fail with `Connection refused`:
 
@@ -547,6 +596,7 @@ Admin operators can also load an Ops Snapshot from Settings, backed by:
 
 - `GET /api/admin/ops/sandbox-index`
 - `GET /api/admin/ops/workspace-jobs`
+- `GET /api/admin/ops/users/search`
 - `GET /api/sandboxes/{lease_id}`
 - `POST /api/sandboxes/{lease_id}/release`
 
@@ -593,6 +643,7 @@ Optional parameters:
 - `POST /api/sessions/{session_id}/reset`
 - `GET /api/admin/ops/sandbox-index` (admin-only)
 - `GET /api/admin/ops/lease-analytics` (admin-only)
+- `GET /api/admin/ops/users/search` (admin-only)
 
 ## Teardown
 
@@ -611,8 +662,12 @@ Optional cleanup of Docker pull secret too:
 - This is an example implementation for rapid iteration.
 - Session state is cached in memory and persisted in local SQLite; scaling backend replicas still requires shared storage.
 - In `session` sandbox execution mode, tool calls in the same session reuse one sandbox lease until TTL expiry or explicit release.
-- Expired lease cleanup runs periodically in-process; tune with
+- Lease cleanup runs periodically in-process via backend reaper; tune with
+  `SANDBOX_LEASE_REAPER_ENABLED`,
+  `SANDBOX_LEASE_REAPER_INTERVAL_SECONDS`, and
+  `SANDBOX_PENDING_LEASE_REAPER_TTL_SECONDS`.
+- For backward compatibility, legacy janitor envs
   `SANDBOX_LEASE_JANITOR_ENABLED` and
-  `SANDBOX_LEASE_JANITOR_INTERVAL_SECONDS`.
+  `SANDBOX_LEASE_JANITOR_INTERVAL_SECONDS` are still accepted.
 - In `local` mode, tool commands run in the backend container and are not isolated like Agent Sandbox.
 - Add rate limiting, authz, and prompt/tool guardrails before production usage.

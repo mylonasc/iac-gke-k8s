@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { Menu, Share2 } from "lucide-react";
 import { ChatView } from "./chat/ChatView";
 import { TransportProvider } from "./chat/TransportProvider";
@@ -7,6 +7,7 @@ import { useMediaQuery } from "./hooks/useMediaQuery";
 import { MobileDrawer } from "./layout/MobileDrawer";
 import { ThreadsSidebar } from "./layout/ThreadsSidebar";
 import { SettingsPanel } from "./settings/SettingsPanel";
+import { TerminalDevPanel } from "./dev/TerminalDevPanel";
 
 function IdentityBadge({ userId, userTier }) {
   if (!userId) return null;
@@ -84,6 +85,12 @@ export default function App() {
     userId,
     userTier,
   } = useAppState();
+
+  const showTerminalDevPanel = useMemo(() => {
+    if (typeof window === "undefined") return false;
+    const params = new URLSearchParams(window.location.search);
+    return params.get("dev_panel") === "terminal";
+  }, []);
 
   return (
     <main className="app-v2">
@@ -165,7 +172,9 @@ export default function App() {
         ) : null}
 
         <section className="main-column center-pane-slot">
-          {tab === "chat" ? (
+          {showTerminalDevPanel ? (
+            <TerminalDevPanel sessionId={activeSession?.session_id} />
+          ) : tab === "chat" ? (
             <TransportProvider key={runtimeKey} apiBase={apiBase} session={activeSession}>
               <ChatView
                 apiBase={apiBase}

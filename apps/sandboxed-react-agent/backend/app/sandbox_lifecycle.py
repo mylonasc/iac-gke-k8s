@@ -13,6 +13,7 @@ import os
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Callable
@@ -20,6 +21,7 @@ from typing import Any, Callable
 from k8s_agent_sandbox import SandboxClient
 
 from .repositories.sandbox_lease_repository import SandboxLeaseRepository
+from .sandbox_events import sandbox_progress_event
 from .sandbox_manager import SandboxExecutionResult, SandboxManager
 
 
@@ -171,6 +173,9 @@ class SandboxLifecycleService:
         self.max_lease_ttl_seconds = int(
             os.getenv("SANDBOX_MAX_LEASE_TTL_SECONDS", "21600")
         )
+        self.pending_lease_reaper_ttl_seconds = int(
+            os.getenv("SANDBOX_PENDING_LEASE_REAPER_TTL_SECONDS", "900")
+        )
         self.persistent_auto_fallback_enabled = _as_bool(
             os.getenv("SANDBOX_PERSISTENT_AUTO_FALLBACK_ENABLED"),
             default=True,
@@ -181,6 +186,7 @@ class SandboxLifecycleService:
         self._runtime_by_lease_id: dict[str, _LeaseRuntime] = {}
         self._lease_id_by_scope: dict[tuple[str, str], str] = {}
         self._runtime_resolution_by_session: dict[str, dict[str, Any]] = {}
+        self._progress_listener_local = threading.local()
         self._load_active_scope_index()
 
         logger.info(
@@ -190,6 +196,7 @@ class SandboxLifecycleService:
                 "sandbox_execution_model": self.execution_model,
                 "session_idle_ttl_seconds": self.session_idle_ttl_seconds,
                 "max_lease_ttl_seconds": self.max_lease_ttl_seconds,
+                "pending_lease_reaper_ttl_seconds": self.pending_lease_reaper_ttl_seconds,
                 "persistent_auto_fallback_enabled": self.persistent_auto_fallback_enabled,
             },
         )
@@ -204,6 +211,7 @@ class SandboxLifecycleService:
             "execution_model": self.execution_model,
             "session_idle_ttl_seconds": self.session_idle_ttl_seconds,
             "max_lease_ttl_seconds": self.max_lease_ttl_seconds,
+            "pending_lease_reaper_ttl_seconds": self.pending_lease_reaper_ttl_seconds,
             "persistent_auto_fallback_enabled": self.persistent_auto_fallback_enabled,
         }
 
@@ -251,6 +259,54 @@ class SandboxLifecycleService:
                 lock = threading.Lock()
                 self._scope_lock_by_scope[scope] = lock
             return lock
+
+    @contextmanager
+    def bind_progress_listener(
+        self,
+        listener: Callable[[dict[str, Any]], None] | None,
+    ):
+        previous = getattr(self._progress_listener_local, "listener", None)
+        self._progress_listener_local.listener = listener
+        try:
+            yield
+        finally:
+            if previous is None:
+                try:
+                    del self._progress_listener_local.listener
+                except AttributeError:
+                    pass
+            else:
+                self._progress_listener_local.listener = previous
+
+    def _emit_progress(
+        self,
+        *,
+        stage: str,
+        status: str,
+        code: str,
+        payload: dict[str, Any] | None = None,
+        session_id: str | None = None,
+    ) -> None:
+        listener = getattr(self._progress_listener_local, "listener", None)
+        if not callable(listener):
+            return
+        try:
+            listener(
+                sandbox_progress_event(
+                    stage=stage,
+                    status=status,
+                    code=code,
+                    payload=payload,
+                    session_id=session_id,
+                )
+            )
+        except Exception:
+            logger.debug("sandbox.progress.emit_failed", exc_info=True)
+
+    def _session_id_for_scope(self, scope_type: str, scope_key: str) -> str | None:
+        if scope_type != "session" or not scope_key:
+            return None
+        return scope_key
 
     def _runtime_for_lease(self, lease_id: str) -> _LeaseRuntime | None:
         with self._state_lock:
@@ -386,6 +442,33 @@ class SandboxLifecycleService:
 
             self._runtime_resolution_by_session[session_id] = recorded
 
+        transition = str(recorded.get("transition") or "")
+        fallback_active = bool(recorded.get("fallback_active"))
+        status = "completed"
+        code = "resolved"
+        if transition == "fallback_started":
+            status = "warning"
+            code = "fallback_started"
+        elif fallback_active:
+            status = "warning"
+            code = "fallback_active"
+        elif transition == "fallback_cleared":
+            status = "completed"
+            code = "fallback_cleared"
+
+        self._emit_progress(
+            stage="runtime_resolution",
+            status=status,
+            code=code,
+            session_id=session_id,
+            payload={
+                "requested_runtime": dict(recorded.get("requested_runtime") or {}),
+                "resolved_runtime": dict(recorded.get("resolved_runtime") or {}),
+                "fallback_reason_code": recorded.get("fallback_reason_code"),
+                "notice": recorded.get("notice"),
+            },
+        )
+
     def get_session_runtime_resolution(self, session_id: str) -> dict[str, Any] | None:
         with self._state_lock:
             record = self._runtime_resolution_by_session.get(session_id)
@@ -396,6 +479,22 @@ class SandboxLifecycleService:
             "requested_runtime": dict(record.get("requested_runtime") or {}),
             "resolved_runtime": dict(record.get("resolved_runtime") or {}),
         }
+
+    def resolve_runtime_for_session(
+        self,
+        session_id: str,
+        *,
+        runtime_config: dict[str, object] | None = None,
+    ) -> tuple[dict[str, object] | None, str | None]:
+        """Resolve effective runtime for one session.
+
+        This is a public wrapper used by services that need session runtime
+        routing semantics without directly executing shell/python tools.
+        """
+        return self._resolve_runtime_for_session(
+            session_id,
+            runtime_config=runtime_config,
+        )
 
     def _resolve_runtime_for_session(
         self,
@@ -806,6 +905,18 @@ class SandboxLifecycleService:
         Returns:
             Runtime wrapper with entered sandbox client.
         """
+        session_id = self._session_id_for_scope(lease.scope_type, lease.scope_key)
+        self._emit_progress(
+            stage="lease",
+            status="running",
+            code="claim_create_started",
+            session_id=session_id,
+            payload={
+                "lease_id": lease.lease_id,
+                "template_name": lease.template_name,
+                "namespace": lease.namespace,
+            },
+        )
         logger.info(
             "lease.acquire.start",
             extra={
@@ -829,6 +940,17 @@ class SandboxLifecycleService:
         try:
             client.__enter__()
         except Exception as exc:
+            self._emit_progress(
+                stage="lease",
+                status="error",
+                code="claim_create_failed",
+                session_id=session_id,
+                payload={
+                    "lease_id": lease.lease_id,
+                    "claim_name": getattr(client, "claim_name", None),
+                    "error": str(exc),
+                },
+            )
             claim_name = getattr(client, "claim_name", None)
             if claim_name:
                 lease.claim_name = claim_name
@@ -875,6 +997,18 @@ class SandboxLifecycleService:
                 "scope_type": lease.scope_type,
                 "scope_key": lease.scope_key,
                 "claim_name": lease.claim_name,
+            },
+        )
+        self._emit_progress(
+            stage="lease",
+            status="completed",
+            code="claim_ready",
+            session_id=session_id,
+            payload={
+                "lease_id": lease.lease_id,
+                "claim_name": lease.claim_name,
+                "template_name": lease.template_name,
+                "namespace": lease.namespace,
             },
         )
         return runtime
@@ -998,10 +1132,22 @@ class SandboxLifecycleService:
         Raises:
             RuntimeError: If claim metadata is missing or claim no longer exists.
         """
+        session_id = self._session_id_for_scope(lease.scope_type, lease.scope_key)
         if not lease.claim_name:
             raise RuntimeError("cannot attach runtime without claim_name")
         if not self._claim_exists(lease):
             raise RuntimeError(f"sandbox claim {lease.claim_name} no longer exists")
+
+        self._emit_progress(
+            stage="lease",
+            status="running",
+            code="attach_started",
+            session_id=session_id,
+            payload={
+                "lease_id": lease.lease_id,
+                "claim_name": lease.claim_name,
+            },
+        )
 
         logger.info(
             "lease.attach.start",
@@ -1034,8 +1180,19 @@ class SandboxLifecycleService:
                 client._wait_for_gateway_ip()
             else:
                 client._start_and_wait_for_port_forward()
-        except Exception:
+        except Exception as exc:
             self._cleanup_attach_client(client)
+            self._emit_progress(
+                stage="lease",
+                status="error",
+                code="attach_failed",
+                session_id=session_id,
+                payload={
+                    "lease_id": lease.lease_id,
+                    "claim_name": lease.claim_name,
+                    "error": str(exc),
+                },
+            )
             raise
 
         lease.status = "ready"
@@ -1053,6 +1210,16 @@ class SandboxLifecycleService:
                 "lease_id": lease.lease_id,
                 "scope_type": lease.scope_type,
                 "scope_key": lease.scope_key,
+                "claim_name": lease.claim_name,
+            },
+        )
+        self._emit_progress(
+            stage="lease",
+            status="completed",
+            code="attach_ready",
+            session_id=session_id,
+            payload={
+                "lease_id": lease.lease_id,
                 "claim_name": lease.claim_name,
             },
         )
@@ -1097,6 +1264,25 @@ class SandboxLifecycleService:
             ``True`` if lease is expired.
         """
         return _from_iso(lease.expires_at) <= _now_utc()
+
+    def _lease_age_seconds(self, lease: SandboxLease) -> int | None:
+        """Return lease age from last-use (or creation) timestamp.
+
+        Args:
+            lease: Lease metadata.
+
+        Returns:
+            Lease age in whole seconds, or ``None`` when timestamps are invalid.
+        """
+        now = _now_utc()
+        try:
+            activity_at = _from_iso(lease.last_used_at)
+        except Exception:
+            try:
+                activity_at = _from_iso(lease.created_at)
+            except Exception:
+                return None
+        return max(0, int((now - activity_at).total_seconds()))
 
     def _release_runtime_handle(
         self, runtime: _LeaseRuntime, *, status: str, error_text: str | None = None
@@ -1199,6 +1385,17 @@ class SandboxLifecycleService:
         Returns:
             Lease runtime wrapper containing active sandbox client.
         """
+        session_id = self._session_id_for_scope(scope_type, scope_key)
+        self._emit_progress(
+            stage="lease",
+            status="running",
+            code="acquire_requested",
+            session_id=session_id,
+            payload={
+                "scope_type": scope_type,
+                "scope_key": scope_key,
+            },
+        )
         effective = self._effective_runtime(runtime_config)
         template_name = str(effective["template_name"])
         namespace = str(effective["namespace"])
@@ -1211,6 +1408,13 @@ class SandboxLifecycleService:
         with scope_lock:
             existing_lease = self._lookup_scope_lease(scope_type, scope_key)
             if existing_lease and self._is_expired(existing_lease):
+                self._emit_progress(
+                    stage="lease",
+                    status="info",
+                    code="expired_releasing",
+                    session_id=session_id,
+                    payload={"lease_id": existing_lease.lease_id},
+                )
                 runtime = self._runtime_for_lease(existing_lease.lease_id)
                 if runtime:
                     self._release_runtime_handle(runtime, status="expired")
@@ -1229,6 +1433,19 @@ class SandboxLifecycleService:
                 existing_lease.template_name != template_name
                 or existing_lease.namespace != namespace
             ):
+                self._emit_progress(
+                    stage="lease",
+                    status="info",
+                    code="template_changed_releasing",
+                    session_id=session_id,
+                    payload={
+                        "lease_id": existing_lease.lease_id,
+                        "previous_template_name": existing_lease.template_name,
+                        "next_template_name": template_name,
+                        "previous_namespace": existing_lease.namespace,
+                        "next_namespace": namespace,
+                    },
+                )
                 runtime = self._runtime_for_lease(existing_lease.lease_id)
                 if runtime:
                     self._release_runtime_handle(runtime, status="released")
@@ -1260,6 +1477,18 @@ class SandboxLifecycleService:
                             "claim_name": runtime.lease.claim_name,
                         },
                     )
+                    self._emit_progress(
+                        stage="lease",
+                        status="completed",
+                        code="reused_active_lease",
+                        session_id=session_id,
+                        payload={
+                            "lease_id": runtime.lease.lease_id,
+                            "claim_name": runtime.lease.claim_name,
+                            "template_name": runtime.lease.template_name,
+                            "namespace": runtime.lease.namespace,
+                        },
+                    )
                     return runtime
 
                 if existing_lease.claim_name:
@@ -1284,6 +1513,17 @@ class SandboxLifecycleService:
                                 "error": str(exc),
                             },
                         )
+                        self._emit_progress(
+                            stage="lease",
+                            status="error",
+                            code="attach_failed_recreating",
+                            session_id=session_id,
+                            payload={
+                                "lease_id": existing_lease.lease_id,
+                                "claim_name": existing_lease.claim_name,
+                                "error": str(exc),
+                            },
+                        )
                         self._delete_claim_best_effort(existing_lease)
                         self.sandbox_lease_repository.mark_released(
                             existing_lease.lease_id,
@@ -1302,6 +1542,18 @@ class SandboxLifecycleService:
                 namespace=namespace,
                 session_idle_ttl_seconds=session_idle_ttl_seconds,
             )
+            if not existing_lease:
+                self._emit_progress(
+                    stage="lease",
+                    status="running",
+                    code="creating_new_lease",
+                    session_id=session_id,
+                    payload={
+                        "lease_id": lease.lease_id,
+                        "template_name": lease.template_name,
+                        "namespace": lease.namespace,
+                    },
+                )
             self.sandbox_lease_repository.upsert(lease.as_record())
             return self._create_runtime(
                 lease,
@@ -1425,6 +1677,108 @@ class SandboxLifecycleService:
                 released_count += 1
         return released_count
 
+    def reap_stale_pending_leases(
+        self, *, pending_ttl_seconds: int | None = None
+    ) -> int:
+        """Release pending leases that exceeded age threshold.
+
+        Args:
+            pending_ttl_seconds: Optional stale-pending threshold in seconds.
+
+        Returns:
+            Number of pending leases released during this call.
+        """
+        ttl = (
+            int(pending_ttl_seconds)
+            if pending_ttl_seconds is not None
+            else int(self.pending_lease_reaper_ttl_seconds)
+        )
+        if ttl <= 0:
+            return 0
+
+        now_iso = _to_iso(_now_utc())
+        released_count = 0
+        for record in self.sandbox_lease_repository.list_active():
+            if str(record.get("status") or "").strip().lower() != "pending":
+                continue
+            lease = SandboxLease.from_record(record)
+            scope_lock = self._scope_lock_for(lease.scope_type, lease.scope_key)
+            with scope_lock:
+                latest = self.sandbox_lease_repository.get(lease.lease_id)
+                if (
+                    not latest
+                    or str(latest.get("status") or "").strip().lower() != "pending"
+                ):
+                    continue
+
+                latest_lease = SandboxLease.from_record(latest)
+                age_seconds = self._lease_age_seconds(latest_lease)
+                if age_seconds is None or age_seconds < ttl:
+                    continue
+
+                reason = (
+                    f"pending lease exceeded stale threshold ({age_seconds}s >= {ttl}s)"
+                )
+                runtime = self._runtime_for_lease(latest_lease.lease_id)
+                if runtime:
+                    self._release_runtime_handle(
+                        runtime,
+                        status="expired",
+                        error_text=reason,
+                    )
+                else:
+                    self._delete_claim_best_effort(latest_lease)
+                    self.sandbox_lease_repository.mark_released(
+                        latest_lease.lease_id,
+                        released_at=now_iso,
+                        status="expired",
+                        last_error=reason,
+                    )
+                    self._remove_runtime_index(latest_lease)
+                    self._sync_workspace_claim_binding(
+                        latest_lease.scope_type,
+                        latest_lease.scope_key,
+                        None,
+                    )
+                released_count += 1
+                logger.info(
+                    "lease.reaper.pending_released",
+                    extra={
+                        "event": "lease.reaper.pending_released",
+                        "lease_id": latest_lease.lease_id,
+                        "scope_type": latest_lease.scope_type,
+                        "scope_key": latest_lease.scope_key,
+                        "claim_name": latest_lease.claim_name,
+                        "age_seconds": age_seconds,
+                        "ttl_seconds": ttl,
+                    },
+                )
+
+        return released_count
+
+    def run_reaper_cycle(
+        self,
+        *,
+        pending_lease_ttl_seconds: int | None = None,
+    ) -> dict[str, int]:
+        """Run one backend lease reaper cycle.
+
+        Args:
+            pending_lease_ttl_seconds: Optional stale-pending threshold override.
+
+        Returns:
+            Counts for released lease categories and total.
+        """
+        expired = self.reap_expired_leases()
+        pending = self.reap_stale_pending_leases(
+            pending_ttl_seconds=pending_lease_ttl_seconds
+        )
+        return {
+            "expired": expired,
+            "pending": pending,
+            "released_total": expired + pending,
+        }
+
     def exec_python(
         self,
         session_id: str,
@@ -1442,11 +1796,25 @@ class SandboxLifecycleService:
         Returns:
             Normalized sandbox execution result.
         """
+        self._emit_progress(
+            stage="execution",
+            status="running",
+            code="python_started",
+            session_id=session_id,
+            payload={"tool_name": "sandbox_exec_python"},
+        )
         effective, runtime_error = self._resolve_runtime_for_session(
             session_id,
             runtime_config=runtime_config,
         )
         if runtime_error:
+            self._emit_progress(
+                stage="execution",
+                status="error",
+                code="runtime_resolution_failed",
+                session_id=session_id,
+                payload={"tool_name": "sandbox_exec_python", "error": runtime_error},
+            )
             return SandboxExecutionResult(
                 tool_name="sandbox_exec_python",
                 ok=False,
@@ -1460,9 +1828,33 @@ class SandboxLifecycleService:
         execution_model = str(effective["execution_model"])
         self.reap_expired_leases()
         if mode == "local":
-            return self.sandbox_manager.exec_python(code, runtime_config=effective)
+            result = self.sandbox_manager.exec_python(code, runtime_config=effective)
+            self._emit_progress(
+                stage="execution",
+                status="completed" if result.ok else "error",
+                code="local_execution_completed",
+                session_id=session_id,
+                payload={
+                    "tool_name": "sandbox_exec_python",
+                    "ok": result.ok,
+                    "error": result.error,
+                },
+            )
+            return result
         if execution_model == "ephemeral":
-            return self.sandbox_manager.exec_python(code, runtime_config=effective)
+            result = self.sandbox_manager.exec_python(code, runtime_config=effective)
+            self._emit_progress(
+                stage="execution",
+                status="completed" if result.ok else "error",
+                code="ephemeral_execution_completed",
+                session_id=session_id,
+                payload={
+                    "tool_name": "sandbox_exec_python",
+                    "ok": result.ok,
+                    "error": result.error,
+                },
+            )
+            return result
 
         runtime = self.acquire_scope_lease(
             "session", session_id, runtime_config=effective
@@ -1472,13 +1864,27 @@ class SandboxLifecycleService:
                 runtime.lease,
                 session_idle_ttl_seconds=int(effective["session_idle_ttl_seconds"]),
             )
-            return self.sandbox_manager.exec_python_with_sandbox(
+            result = self.sandbox_manager.exec_python_with_sandbox(
                 code,
                 sandbox=runtime.client,
                 lease_id=runtime.lease.lease_id,
                 claim_name=runtime.lease.claim_name,
                 runtime_config=effective,
             )
+            self._emit_progress(
+                stage="execution",
+                status="completed" if result.ok else "error",
+                code="session_execution_completed",
+                session_id=session_id,
+                payload={
+                    "tool_name": "sandbox_exec_python",
+                    "ok": result.ok,
+                    "lease_id": runtime.lease.lease_id,
+                    "claim_name": runtime.lease.claim_name,
+                    "error": result.error,
+                },
+            )
+            return result
 
     def exec_shell(
         self,
@@ -1497,11 +1903,25 @@ class SandboxLifecycleService:
         Returns:
             Normalized sandbox execution result.
         """
+        self._emit_progress(
+            stage="execution",
+            status="running",
+            code="shell_started",
+            session_id=session_id,
+            payload={"tool_name": "sandbox_exec_shell"},
+        )
         effective, runtime_error = self._resolve_runtime_for_session(
             session_id,
             runtime_config=runtime_config,
         )
         if runtime_error:
+            self._emit_progress(
+                stage="execution",
+                status="error",
+                code="runtime_resolution_failed",
+                session_id=session_id,
+                payload={"tool_name": "sandbox_exec_shell", "error": runtime_error},
+            )
             return SandboxExecutionResult(
                 tool_name="sandbox_exec_shell",
                 ok=False,
@@ -1515,9 +1935,33 @@ class SandboxLifecycleService:
         execution_model = str(effective["execution_model"])
         self.reap_expired_leases()
         if mode == "local":
-            return self.sandbox_manager.exec_shell(command, runtime_config=effective)
+            result = self.sandbox_manager.exec_shell(command, runtime_config=effective)
+            self._emit_progress(
+                stage="execution",
+                status="completed" if result.ok else "error",
+                code="local_execution_completed",
+                session_id=session_id,
+                payload={
+                    "tool_name": "sandbox_exec_shell",
+                    "ok": result.ok,
+                    "error": result.error,
+                },
+            )
+            return result
         if execution_model == "ephemeral":
-            return self.sandbox_manager.exec_shell(command, runtime_config=effective)
+            result = self.sandbox_manager.exec_shell(command, runtime_config=effective)
+            self._emit_progress(
+                stage="execution",
+                status="completed" if result.ok else "error",
+                code="ephemeral_execution_completed",
+                session_id=session_id,
+                payload={
+                    "tool_name": "sandbox_exec_shell",
+                    "ok": result.ok,
+                    "error": result.error,
+                },
+            )
+            return result
 
         runtime = self.acquire_scope_lease(
             "session", session_id, runtime_config=effective
@@ -1527,13 +1971,27 @@ class SandboxLifecycleService:
                 runtime.lease,
                 session_idle_ttl_seconds=int(effective["session_idle_ttl_seconds"]),
             )
-            return self.sandbox_manager.exec_shell_with_sandbox(
+            result = self.sandbox_manager.exec_shell_with_sandbox(
                 command,
                 sandbox=runtime.client,
                 lease_id=runtime.lease.lease_id,
                 claim_name=runtime.lease.claim_name,
                 runtime_config=effective,
             )
+            self._emit_progress(
+                stage="execution",
+                status="completed" if result.ok else "error",
+                code="session_execution_completed",
+                session_id=session_id,
+                payload={
+                    "tool_name": "sandbox_exec_shell",
+                    "ok": result.ok,
+                    "lease_id": runtime.lease.lease_id,
+                    "claim_name": runtime.lease.claim_name,
+                    "error": result.error,
+                },
+            )
+            return result
 
     def list_sandboxes(self) -> list[dict[str, Any]]:
         """Return active lease records.

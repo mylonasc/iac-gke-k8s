@@ -38,7 +38,7 @@ spec:
         - name: dockerhub-regcred
       containers:
         - name: backend
-          image: docker.io/mylonasc/magarathea:sandboxed-react-agent-backend-0.6.20
+          image: docker.io/mylonasc/magarathea:sandboxed-react-agent-backend-0.6.21
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
@@ -81,7 +81,15 @@ spec:
             - name: WORKSPACE_PROVISIONER_MAX_WORKERS
               value: "4"
             - name: SANDBOX_SESSION_IDLE_TTL_SECONDS
+              value: "300"
+            - name: SANDBOX_MAX_LEASE_TTL_SECONDS
               value: "1800"
+            - name: SANDBOX_LEASE_REAPER_ENABLED
+              value: "1"
+            - name: SANDBOX_LEASE_REAPER_INTERVAL_SECONDS
+              value: "15"
+            - name: SANDBOX_PENDING_LEASE_REAPER_TTL_SECONDS
+              value: "300"
             - name: AGENT_MAX_TOOL_CALLS_PER_TURN
               value: "4"
             - name: LOG_LEVEL

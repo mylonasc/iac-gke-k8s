@@ -183,8 +183,35 @@ def test_sandbox_toolkit_exposes_openai_tool_schemas() -> None:
     assert "sandbox_exec_shell" in names
     assert "sandbox_get_session_status" in names
     assert "sandbox_set_session_policy" in names
+    assert "sandbox_open_interactive_shell" in names
     assert tools[0]["function"]["parameters"]["required"] == ["code"]
     assert tools[1]["function"]["parameters"]["required"] == ["command"]
+
+
+def test_sandbox_toolkit_open_interactive_shell_tool() -> None:
+    toolkit = SandboxToolkit(
+        session_sandbox=SessionSandboxFacade(_FakeLeaseFacade(), _FakeAssetFacade()),
+        session_id="session-shell",
+        runtime_config={"mode": "cluster"},
+        now_iso=lambda: "2026-01-01T00:00:00+00:00",
+        open_interactive_shell=lambda session_id: {
+            "session_id": session_id,
+            "open_terminal_path": f"/api/sessions/{session_id}/sandbox/terminal/open",
+        },
+    )
+
+    payload_json, stored_assets = __import__("asyncio").run(
+        toolkit.run_tool_call(
+            tool_call_id="tool-shell",
+            name="sandbox_open_interactive_shell",
+            arguments_json=json.dumps({}),
+        )
+    )
+    payload = json.loads(payload_json)
+    assert payload["ok"] is True
+    assert payload["tool"] == "sandbox_open_interactive_shell"
+    assert payload["data"]["session_id"] == "session-shell"
+    assert stored_assets == []
 
 
 def test_sandbox_toolkit_supports_diagnostic_and_mutating_controls() -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import threading
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from app.sandbox_lifecycle import SandboxLease, SandboxLifecycleService
@@ -391,6 +392,49 @@ def test_exec_python_auto_fallbacks_to_transient_when_workspace_not_ready(
     assert resolution["transition"] == "fallback_started"
 
 
+def test_exec_python_emits_sandbox_progress_events(monkeypatch) -> None:
+    monkeypatch.setenv("SANDBOX_PERSISTENT_AUTO_FALLBACK_ENABLED", "1")
+    manager = FakeSandboxManager()
+    service = SandboxLifecycleService(
+        sandbox_manager=manager,
+        sandbox_lease_repository=FakeSandboxLeaseRepository(),
+        get_user_id_for_session=lambda session_id: "user-1",
+        get_workspace_for_user=lambda user_id: None,
+        ensure_workspace_async_for_user=lambda user_id, reconcile_ready=False: (
+            {"workspace_id": "ws-1", "user_id": user_id, "status": "pending"},
+            True,
+        ),
+    )
+    monkeypatch.setattr(service, "reap_expired_leases", lambda: 0)
+    monkeypatch.setattr(
+        service, "_touch_lease", lambda lease, session_idle_ttl_seconds=None: lease
+    )
+    monkeypatch.setattr(
+        service,
+        "acquire_scope_lease",
+        lambda scope_type, scope_key, runtime_config=None: _runtime(),
+    )
+
+    events: list[dict[str, object]] = []
+
+    with service.bind_progress_listener(lambda event: events.append(dict(event))):
+        result = service.exec_python("session-1", "print('hello')")
+
+    assert result.ok is True
+    assert events
+    assert any(str(event.get("phase") or "") == "sandbox_progress" for event in events)
+    assert any(
+        str(event.get("stage") or "") == "runtime_resolution"
+        and str(event.get("code") or "") == "fallback_started"
+        for event in events
+    )
+    assert any(
+        str(event.get("stage") or "") == "execution"
+        and str(event.get("code") or "") == "session_execution_completed"
+        for event in events
+    )
+
+
 def test_exec_python_reconciles_when_ready_workspace_template_missing(
     monkeypatch,
 ) -> None:
@@ -620,3 +664,86 @@ def test_workspace_claim_binding_is_updated_on_runtime_lifecycle(monkeypatch) ->
         ("session-1", "claim-1", "alt-default"),
         ("session-1", None, None),
     ]
+
+
+def test_reap_stale_pending_leases_releases_old_pending_claim(monkeypatch) -> None:
+    manager = FakeSandboxManager()
+    stale_time = "2020-01-01T00:00:00+00:00"
+    pending = SandboxLease(
+        lease_id="lease-stale",
+        scope_type="session",
+        scope_key="session-stale",
+        status="pending",
+        claim_name="claim-stale",
+        template_name="python-runtime-template-user-a",
+        namespace="alt-default",
+        metadata={},
+        created_at=stale_time,
+        last_used_at=stale_time,
+        expires_at="2099-01-01T00:00:00+00:00",
+    )
+    repo = FakeSandboxLeaseRepository(active_lease=pending.as_record())
+    service = SandboxLifecycleService(
+        sandbox_manager=manager,
+        sandbox_lease_repository=repo,
+    )
+    deleted_claims: list[str | None] = []
+    monkeypatch.setattr(
+        service,
+        "_delete_claim_best_effort",
+        lambda lease: deleted_claims.append(lease.claim_name),
+    )
+
+    released = service.reap_stale_pending_leases(pending_ttl_seconds=60)
+
+    assert released == 1
+    assert deleted_claims == ["claim-stale"]
+    assert repo.releases
+    assert repo.releases[0]["lease_id"] == "lease-stale"
+    assert repo.releases[0]["status"] == "expired"
+    assert "stale threshold" in str(repo.releases[0]["last_error"])
+
+
+def test_reap_stale_pending_leases_skips_recent_pending_claim() -> None:
+    manager = FakeSandboxManager()
+    now_iso = datetime.now(UTC).isoformat()
+    pending = SandboxLease(
+        lease_id="lease-fresh",
+        scope_type="session",
+        scope_key="session-fresh",
+        status="pending",
+        claim_name="claim-fresh",
+        template_name="python-runtime-template-user-a",
+        namespace="alt-default",
+        metadata={},
+        created_at=now_iso,
+        last_used_at=now_iso,
+        expires_at="2099-01-01T00:00:00+00:00",
+    )
+    repo = FakeSandboxLeaseRepository(active_lease=pending.as_record())
+    service = SandboxLifecycleService(
+        sandbox_manager=manager,
+        sandbox_lease_repository=repo,
+    )
+
+    released = service.reap_stale_pending_leases(pending_ttl_seconds=600)
+
+    assert released == 0
+    assert repo.releases == []
+
+
+def test_run_reaper_cycle_reports_counts(monkeypatch) -> None:
+    service = SandboxLifecycleService(
+        sandbox_manager=FakeSandboxManager(),
+        sandbox_lease_repository=FakeSandboxLeaseRepository(),
+    )
+    monkeypatch.setattr(service, "reap_expired_leases", lambda: 2)
+    monkeypatch.setattr(
+        service,
+        "reap_stale_pending_leases",
+        lambda pending_ttl_seconds=None: 3,
+    )
+
+    counts = service.run_reaper_cycle(pending_lease_ttl_seconds=120)
+
+    assert counts == {"expired": 2, "pending": 3, "released_total": 5}

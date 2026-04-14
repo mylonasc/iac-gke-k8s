@@ -93,14 +93,25 @@ function ToolCallPart(props) {
     ? "UI Widget"
     : props.toolName === "sandbox_exec_python"
       ? "Python"
-      : props.toolName === "sandbox_exec_shell"
-        ? "Shell"
+    : props.toolName === "sandbox_exec_shell"
+      ? "Shell"
+      : props.toolName === "sandbox_open_interactive_shell"
+        ? "Interactive Shell"
         : props.toolName;
   const [maximizedWidget, setMaximizedWidget] = useState(null);
   const [expanded, setExpanded] = useState(false);
   const claimName = props.result?.claim_name || "";
   const leaseId = props.result?.lease_id || "";
   const isPending = props.result === undefined;
+  const isInteractiveShellTool = props.toolName === "sandbox_open_interactive_shell";
+  const interactiveShellData =
+    props.result && typeof props.result.data === "object" && props.result.data
+      ? props.result.data
+      : null;
+  const interactiveSessionId =
+    typeof interactiveShellData?.session_id === "string"
+      ? interactiveShellData.session_id
+      : "";
 
   useEffect(() => {
     if (!maximizedWidget || typeof window === "undefined" || typeof document === "undefined") {
@@ -140,6 +151,27 @@ function ToolCallPart(props) {
           <span className="pill">No claim metadata</span>
         )}
       </div>
+
+      {isInteractiveShellTool ? (
+        <div className="tool-block">
+          <strong>Interactive shell</strong>
+          <button
+            type="button"
+            className="btn btn-subtle tiny"
+            onClick={() => {
+              window.dispatchEvent(
+                new CustomEvent("sra-open-session-terminal", {
+                  detail: {
+                    sessionId: interactiveSessionId,
+                  },
+                })
+              );
+            }}
+          >
+            Open terminal panel
+          </button>
+        </div>
+      ) : null}
 
       <div className="tool-block">
         <strong>{commandText ? commandLabel : "Arguments"}</strong>

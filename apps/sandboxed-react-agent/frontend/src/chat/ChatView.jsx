@@ -4,7 +4,9 @@ import { Share2, Trash2 } from "lucide-react";
 import { apiFetch, getAppBasePath } from "../api/client";
 import { AssistantMessage, UserMessage } from "./MessageParts";
 import { Composer } from "./Composer";
+import { SandboxLiveStatus } from "./SandboxLiveStatus";
 import { ThinkingSidebar } from "./ThinkingSidebar";
+import { SandboxTerminalPanel } from "../terminal/SandboxTerminalPanel";
 
 function ClaimBadge({ session }) {
   const sandbox = session?.sandbox || {};
@@ -47,6 +49,7 @@ export function ChatView({
   const [copiedMarkdown, setCopiedMarkdown] = useState(false);
   const [showThinking, setShowThinking] = useState(false);
   const [showSandboxControls, setShowSandboxControls] = useState(false);
+  const [showTerminal, setShowTerminal] = useState(false);
   const [sessionProfile, setSessionProfile] = useState(
     session?.sandbox_policy?.profile || ""
   );
@@ -68,6 +71,30 @@ export function ChatView({
       setShowSandboxControls(true);
     }
   }, [sandboxStatusError]);
+
+  useEffect(() => {
+    if (!showSandboxControls) return undefined;
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") {
+        setShowSandboxControls(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [showSandboxControls]);
+
+  useEffect(() => {
+    const onOpenTerminal = (event) => {
+      const detail = event?.detail || {};
+      const targetSessionId = typeof detail.sessionId === "string" ? detail.sessionId : "";
+      if (!session?.session_id || (targetSessionId && targetSessionId !== session.session_id)) {
+        return;
+      }
+      setShowTerminal(true);
+    };
+    window.addEventListener("sra-open-session-terminal", onOpenTerminal);
+    return () => window.removeEventListener("sra-open-session-terminal", onOpenTerminal);
+  }, [session?.session_id]);
 
   const threadComponents = useMemo(
     () => ({ UserMessage, AssistantMessage }),
@@ -183,6 +210,117 @@ export function ChatView({
     await onUpdateSessionSandboxPolicy(session.session_id, patch);
   };
 
+  const sandboxControlsPanel = (
+    <div className="sandbox-controls-panel">
+      <div className="sandbox-status-row">
+        <span className="pill">Workspace: {workspace?.status || "none"}</span>
+        <span className="pill">Pending: {provisioningPending ? "yes" : "no"}</span>
+        <span className="pill">
+          Effective profile: {sessionStatus?.effective?.runtime?.profile || config?.sandbox_profile}
+        </span>
+        <span className={`pill ${fallbackActive ? "pill-warning" : "pill-success"}`}>
+          Active profile: {currentSandboxProfile}
+        </span>
+        <span className="pill">
+          Effective template: {sessionStatus?.effective?.runtime?.template_name || config?.sandbox_template_name}
+        </span>
+        <span className="pill">Active template: {currentSandboxTemplate}</span>
+        <span className="pill">Execution: {currentExecutionModel}</span>
+        <button
+          type="button"
+          className="btn btn-subtle tiny"
+          disabled={!session?.session_id || sandboxStatusLoading}
+          onClick={() => onRefreshSandboxStatus?.(session.session_id)}
+        >
+          {sandboxStatusLoading ? "Refreshing..." : "Refresh status"}
+        </button>
+        <button
+          type="button"
+          className="btn btn-subtle tiny"
+          disabled={!session?.session_id || sandboxStatusLoading}
+          onClick={() =>
+            onRunSessionSandboxAction?.(session.session_id, "release_lease", {
+              wait: false,
+            })
+          }
+        >
+          Release lease
+        </button>
+        <button
+          type="button"
+          className="btn btn-subtle tiny"
+          disabled={!session?.session_id || sandboxStatusLoading}
+          onClick={() =>
+            onRunSessionSandboxAction?.(session.session_id, "reconcile_workspace", {
+              wait: false,
+            })
+          }
+        >
+          Reconcile workspace
+        </button>
+        <button
+          type="button"
+          className="btn btn-subtle tiny"
+          disabled={!session?.session_id}
+          onClick={() => setShowTerminal(true)}
+        >
+          Open terminal
+        </button>
+      </div>
+      <div className="sandbox-policy-row">
+        <p className="sandbox-policy-hint">
+          <strong>Persistent base templates:</strong> {persistentTemplateHint}
+          {persistentPrimaryBaseTemplate ? ` (primary: ${persistentPrimaryBaseTemplate})` : ""}
+        </p>
+        <label>
+          Session profile
+          <select value={sessionProfile} onChange={(event) => setSessionProfile(event.target.value)}>
+            <option value="">(inherit)</option>
+            {availableProfiles.map((profile) => (
+              <option key={profile} value={profile}>
+                {profile}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Session template
+          <select value={sessionTemplate} onChange={(event) => setSessionTemplate(event.target.value)}>
+            <option value="">(inherit)</option>
+            {availableTemplateNames.map((templateName) => (
+              <option key={templateName} value={templateName}>
+                {templateName}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Session execution model
+          <select
+            value={sessionExecutionModel}
+            onChange={(event) => setSessionExecutionModel(event.target.value)}
+          >
+            <option value="">(inherit)</option>
+            {availableExecutionModels.map((executionModel) => (
+              <option key={executionModel} value={executionModel}>
+                {executionModel}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          type="button"
+          className="btn btn-primary tiny"
+          disabled={!session?.session_id || sandboxStatusLoading}
+          onClick={applySessionPolicy}
+        >
+          Apply session policy
+        </button>
+      </div>
+      {sandboxStatusError ? <p className="feedback feedback-error">{sandboxStatusError}</p> : null}
+    </div>
+  );
+
   return (
     <section className="chat-card">
       <header className={`chat-header ${isMobile ? "chat-header-mobile" : ""}`}>
@@ -211,11 +349,19 @@ export function ChatView({
               <button
                 type="button"
                 className="btn btn-subtle"
-                onClick={() => setShowSandboxControls((prev) => !prev)}
+                onClick={() => setShowSandboxControls(true)}
               >
-                {showSandboxControls
-                  ? "Hide advanced sandbox controls"
-                  : "Advanced sandbox controls"}
+                Advanced sandbox controls
+              </button>
+            ) : null}
+            {!readOnly ? (
+              <button
+                type="button"
+                className="btn btn-subtle"
+                disabled={!session?.session_id}
+                onClick={() => setShowTerminal(true)}
+              >
+                Terminal
               </button>
             ) : null}
             {!readOnly ? (
@@ -278,110 +424,7 @@ export function ChatView({
             <span className="pill">Execution: {currentExecutionModel}</span>
           </div>
         ) : null}
-        {!readOnly && showSandboxControls ? (
-          <div className="sandbox-controls-panel">
-            <div className="sandbox-status-row">
-              <span className="pill">Workspace: {workspace?.status || "none"}</span>
-              <span className="pill">
-                Pending: {provisioningPending ? "yes" : "no"}
-              </span>
-              <span className="pill">
-                Effective profile: {sessionStatus?.effective?.runtime?.profile || config?.sandbox_profile}
-              </span>
-              <span className={`pill ${fallbackActive ? "pill-warning" : "pill-success"}`}>
-                Active profile: {currentSandboxProfile}
-              </span>
-              <span className="pill">
-                Effective template: {sessionStatus?.effective?.runtime?.template_name || config?.sandbox_template_name}
-              </span>
-              <span className="pill">Active template: {currentSandboxTemplate}</span>
-              <span className="pill">Execution: {currentExecutionModel}</span>
-              <button
-                type="button"
-                className="btn btn-subtle tiny"
-                disabled={!session?.session_id || sandboxStatusLoading}
-                onClick={() => onRefreshSandboxStatus?.(session.session_id)}
-              >
-                {sandboxStatusLoading ? "Refreshing..." : "Refresh status"}
-              </button>
-              <button
-                type="button"
-                className="btn btn-subtle tiny"
-                disabled={!session?.session_id || sandboxStatusLoading}
-                onClick={() =>
-                  onRunSessionSandboxAction?.(session.session_id, "release_lease", {
-                    wait: false,
-                  })
-                }
-              >
-                Release lease
-              </button>
-              <button
-                type="button"
-                className="btn btn-subtle tiny"
-                disabled={!session?.session_id || sandboxStatusLoading}
-                onClick={() =>
-                  onRunSessionSandboxAction?.(session.session_id, "reconcile_workspace", {
-                    wait: false,
-                  })
-                }
-              >
-                Reconcile workspace
-              </button>
-            </div>
-            <div className="sandbox-policy-row">
-              <p className="sandbox-policy-hint">
-                <strong>Persistent base templates:</strong> {persistentTemplateHint}
-                {persistentPrimaryBaseTemplate ? ` (primary: ${persistentPrimaryBaseTemplate})` : ""}
-              </p>
-              <label>
-                Session profile
-                <select value={sessionProfile} onChange={(event) => setSessionProfile(event.target.value)}>
-                  <option value="">(inherit)</option>
-                  {availableProfiles.map((profile) => (
-                    <option key={profile} value={profile}>
-                      {profile}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Session template
-                <select value={sessionTemplate} onChange={(event) => setSessionTemplate(event.target.value)}>
-                  <option value="">(inherit)</option>
-                  {availableTemplateNames.map((templateName) => (
-                    <option key={templateName} value={templateName}>
-                      {templateName}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Session execution model
-                <select
-                  value={sessionExecutionModel}
-                  onChange={(event) => setSessionExecutionModel(event.target.value)}
-                >
-                  <option value="">(inherit)</option>
-                  {availableExecutionModels.map((executionModel) => (
-                    <option key={executionModel} value={executionModel}>
-                      {executionModel}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button
-                type="button"
-                className="btn btn-primary tiny"
-                disabled={!session?.session_id || sandboxStatusLoading}
-                onClick={applySessionPolicy}
-              >
-                Apply session policy
-              </button>
-            </div>
-            {sandboxStatusError ? <p className="feedback feedback-error">{sandboxStatusError}</p> : null}
-          </div>
-        ) : null}
+        <SandboxLiveStatus readOnly={readOnly} />
       </header>
 
       <ThreadPrimitive.Root className="thread-root">
@@ -404,6 +447,69 @@ export function ChatView({
         ) : null}
         <Composer readOnly={readOnly} />
       </ThreadPrimitive.Root>
+      {!readOnly && showSandboxControls ? (
+        <div
+          className="sandbox-tools-backdrop"
+          role="presentation"
+          onClick={() => setShowSandboxControls(false)}
+        >
+          <section
+            className="sandbox-tools-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Advanced sandbox controls"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="sandbox-tools-header">
+              <h3>Advanced sandbox controls</h3>
+              <button
+                type="button"
+                className="btn btn-subtle tiny"
+                onClick={() => setShowSandboxControls(false)}
+              >
+                Close
+              </button>
+            </div>
+            <div className="sandbox-tools-body">{sandboxControlsPanel}</div>
+          </section>
+        </div>
+      ) : null}
+      {!readOnly && showTerminal ? (
+        <div
+          className="sandbox-tools-backdrop"
+          role="presentation"
+          onClick={() => setShowTerminal(false)}
+        >
+          <section
+            className="sandbox-tools-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Sandbox terminal"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="sandbox-tools-header">
+              <h3>Sandbox terminal</h3>
+              <button
+                type="button"
+                className="btn btn-subtle tiny"
+                onClick={() => setShowTerminal(false)}
+              >
+                Close
+              </button>
+            </div>
+            <div className="sandbox-tools-body">
+              <SandboxTerminalPanel
+                title="Interactive shell"
+                openPath={
+                  session?.session_id
+                    ? `/api/sessions/${session.session_id}/sandbox/terminal/open`
+                    : ""
+                }
+              />
+            </div>
+          </section>
+        </div>
+      ) : null}
     </section>
   );
 }

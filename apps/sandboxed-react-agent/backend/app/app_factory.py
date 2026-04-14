@@ -35,48 +35,64 @@ def create_app_runtime() -> AppRuntime:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        raw_janitor_interval = os.getenv("SANDBOX_LEASE_JANITOR_INTERVAL_SECONDS", "45")
+        raw_reaper_interval = os.getenv(
+            "SANDBOX_LEASE_REAPER_INTERVAL_SECONDS",
+            os.getenv("SANDBOX_LEASE_JANITOR_INTERVAL_SECONDS", "15"),
+        )
         try:
-            janitor_interval = max(5, int(raw_janitor_interval))
+            reaper_interval = max(5, int(raw_reaper_interval))
         except (TypeError, ValueError):
-            janitor_interval = 45
-        janitor_enabled = _as_bool(
-            os.getenv("SANDBOX_LEASE_JANITOR_ENABLED"),
+            reaper_interval = 15
+        reaper_enabled = _as_bool(
+            os.getenv(
+                "SANDBOX_LEASE_REAPER_ENABLED",
+                os.getenv("SANDBOX_LEASE_JANITOR_ENABLED"),
+            ),
             default=True,
         )
-        janitor_task: asyncio.Task[None] | None = None
+        raw_pending_ttl = os.getenv("SANDBOX_PENDING_LEASE_REAPER_TTL_SECONDS")
+        try:
+            pending_ttl_override = (
+                int(raw_pending_ttl) if raw_pending_ttl is not None else None
+            )
+        except (TypeError, ValueError):
+            pending_ttl_override = None
+        reaper_task: asyncio.Task[None] | None = None
 
-        async def _lease_janitor_loop() -> None:
+        async def _lease_reaper_loop() -> None:
             while True:
-                await asyncio.sleep(janitor_interval)
                 try:
-                    released = await asyncio.to_thread(
-                        agent.sandbox_lifecycle.reap_expired_leases
+                    counts = await asyncio.to_thread(
+                        agent.sandbox_lifecycle.run_reaper_cycle,
+                        pending_lease_ttl_seconds=pending_ttl_override,
                     )
-                    if released > 0:
+                    if counts.get("released_total", 0) > 0:
                         logger.info(
-                            "sandbox.lease_janitor.reaped",
+                            "sandbox.lease_reaper.reaped",
                             extra={
-                                "event": "sandbox.lease_janitor.reaped",
-                                "released_count": released,
+                                "event": "sandbox.lease_reaper.reaped",
+                                "released_total": counts.get("released_total", 0),
+                                "expired_released": counts.get("expired", 0),
+                                "pending_released": counts.get("pending", 0),
                             },
                         )
                 except asyncio.CancelledError:
                     raise
                 except Exception:
-                    logger.exception("sandbox.lease_janitor.error")
+                    logger.exception("sandbox.lease_reaper.error")
+                await asyncio.sleep(reaper_interval)
 
         app.state.agent = agent
         agent.frontend_library_cache.ensure_libraries()
-        if janitor_enabled:
-            janitor_task = asyncio.create_task(_lease_janitor_loop())
+        if reaper_enabled:
+            reaper_task = asyncio.create_task(_lease_reaper_loop())
         try:
             yield
         finally:
-            if janitor_task is not None:
-                janitor_task.cancel()
+            if reaper_task is not None:
+                reaper_task.cancel()
                 try:
-                    await janitor_task
+                    await reaper_task
                 except asyncio.CancelledError:
                     pass
             agent.close()

@@ -7,7 +7,14 @@ from typing import Any
 
 from assistant_stream import create_run
 from assistant_stream.serialization import DataStreamResponse
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
@@ -17,6 +24,11 @@ from .auth import (
     ensure_anonymous_user_id,
 )
 from .logging_config import bind_context, configure_logging
+from .services.sandbox_terminal_service import (
+    TerminalConfigurationError,
+    TerminalSessionNotFoundError,
+    TerminalTokenError,
+)
 
 
 class ChatRequest(BaseModel):
@@ -229,6 +241,207 @@ def _asset_security_headers(asset: dict[str, Any]) -> dict[str, str]:
         "X-Content-Type-Options": "nosniff",
         "Referrer-Policy": "no-referrer",
     }
+
+
+def _terminal_websocket_path(
+    *,
+    session_id: str,
+    terminal_id: str,
+    token: str,
+    dev_mode: bool = False,
+) -> str:
+    if dev_mode:
+        return f"/api/dev/sessions/{session_id}/terminal/{terminal_id}/ws?token={token}"
+    return f"/api/sessions/{session_id}/sandbox/terminal/{terminal_id}/ws?token={token}"
+
+
+def _terminal_close_path(
+    *, session_id: str, terminal_id: str, dev_mode: bool = False
+) -> str:
+    if dev_mode:
+        return f"/api/dev/sessions/{session_id}/terminal/{terminal_id}"
+    return f"/api/sessions/{session_id}/sandbox/terminal/{terminal_id}"
+
+
+def _open_terminal_or_raise(
+    *,
+    session_id: str,
+    user_id: str,
+    dev_mode: bool,
+) -> dict[str, Any]:
+    try:
+        opened = agent.open_session_terminal(session_id, user_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail="Session not found") from exc
+    except TerminalConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception(
+            "terminal.open_failed",
+            extra={
+                "event": "terminal.open_failed",
+                "session_id": session_id,
+            },
+        )
+        raise HTTPException(
+            status_code=500, detail="Failed to open terminal session"
+        ) from exc
+
+    token = str(opened.get("connect_token") or "")
+    terminal_id = str(opened.get("terminal_id") or "")
+    return {
+        **opened,
+        "websocket_path": _terminal_websocket_path(
+            session_id=session_id,
+            terminal_id=terminal_id,
+            token=token,
+            dev_mode=dev_mode,
+        ),
+        "close_path": _terminal_close_path(
+            session_id=session_id,
+            terminal_id=terminal_id,
+            dev_mode=dev_mode,
+        ),
+    }
+
+
+def _close_terminal_or_raise(
+    *,
+    session_id: str,
+    terminal_id: str,
+    user_id: str,
+) -> bool:
+    try:
+        return bool(
+            agent.close_session_terminal(
+                session_id=session_id,
+                terminal_id=terminal_id,
+                user_id=user_id,
+            )
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail="Session not found") from exc
+    except TerminalSessionNotFoundError as exc:
+        raise HTTPException(
+            status_code=404, detail="Terminal session not found"
+        ) from exc
+
+
+async def _terminal_websocket_endpoint(
+    websocket: WebSocket,
+    *,
+    session_id: str,
+    terminal_id: str,
+) -> None:
+    token = str(websocket.query_params.get("token") or "")
+    if not token:
+        await websocket.close(code=4401)
+        return
+    await _run_terminal_websocket(
+        websocket,
+        session_id=session_id,
+        terminal_id=terminal_id,
+        token=token,
+    )
+
+
+async def _run_terminal_websocket(
+    websocket: WebSocket,
+    *,
+    session_id: str,
+    terminal_id: str,
+    token: str,
+) -> None:
+    await websocket.accept()
+    try:
+        await asyncio.to_thread(
+            agent.connect_session_terminal,
+            session_id=session_id,
+            terminal_id=terminal_id,
+            token=token,
+        )
+    except (TerminalTokenError, TerminalSessionNotFoundError):
+        await websocket.close(code=4404)
+        return
+
+    async def _read_pod_output() -> None:
+        while True:
+            try:
+                chunks = await asyncio.to_thread(
+                    agent.read_session_terminal_output,
+                    session_id=session_id,
+                    terminal_id=terminal_id,
+                    timeout_seconds=0.2,
+                    max_chunks=16,
+                )
+            except TerminalSessionNotFoundError:
+                return
+            if not chunks:
+                await asyncio.sleep(0.05)
+                continue
+            for chunk in chunks:
+                await websocket.send_json(chunk)
+
+    async def _handle_client_input() -> None:
+        while True:
+            payload = await websocket.receive_json()
+            if not isinstance(payload, dict):
+                continue
+            message_type = str(payload.get("type") or "").strip().lower()
+            if message_type == "stdin":
+                data = str(payload.get("data") or "")
+                if data:
+                    await asyncio.to_thread(
+                        agent.write_session_terminal_input,
+                        session_id=session_id,
+                        terminal_id=terminal_id,
+                        data=data,
+                    )
+                continue
+            if message_type == "resize":
+                cols = int(payload.get("cols") or 80)
+                rows = int(payload.get("rows") or 24)
+                await asyncio.to_thread(
+                    agent.resize_session_terminal,
+                    session_id=session_id,
+                    terminal_id=terminal_id,
+                    cols=cols,
+                    rows=rows,
+                )
+                continue
+            if message_type == "ping":
+                await websocket.send_json({"type": "pong"})
+
+    reader_task = asyncio.create_task(_read_pod_output())
+    writer_task = asyncio.create_task(_handle_client_input())
+
+    try:
+        await websocket.send_json({"type": "status", "status": "connected"})
+        done, pending = await asyncio.wait(
+            {reader_task, writer_task},
+            return_when=asyncio.FIRST_EXCEPTION,
+        )
+        for task in done:
+            exc = task.exception()
+            if exc is None or isinstance(exc, WebSocketDisconnect):
+                continue
+            raise exc
+        for task in pending:
+            task.cancel()
+    except WebSocketDisconnect:
+        return
+    finally:
+        reader_task.cancel()
+        writer_task.cancel()
+        try:
+            await asyncio.to_thread(
+                agent.close_session_terminal,
+                session_id=session_id,
+                terminal_id=terminal_id,
+                user_id=None,
+            )
+        except Exception:
+            return
 
 
 @app.middleware("http")
@@ -585,6 +798,98 @@ def session_sandbox_action(
         raise HTTPException(status_code=404, detail="Session not found")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/sessions/{session_id}/sandbox/terminal/open")
+def open_session_terminal(session_id: str, request: Request) -> dict[str, Any]:
+    user_id = _request_user_id(request)
+    session = agent.get_session(session_id, user_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return _open_terminal_or_raise(
+        session_id=session_id,
+        user_id=user_id,
+        dev_mode=False,
+    )
+
+
+@app.delete("/api/sessions/{session_id}/sandbox/terminal/{terminal_id}")
+def close_session_terminal(
+    session_id: str, terminal_id: str, request: Request
+) -> dict[str, Any]:
+    user_id = _request_user_id(request)
+    session = agent.get_session(session_id, user_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    closed = _close_terminal_or_raise(
+        session_id=session_id,
+        terminal_id=terminal_id,
+        user_id=user_id,
+    )
+    return {
+        "session_id": session_id,
+        "terminal_id": terminal_id,
+        "closed": closed,
+    }
+
+
+@app.websocket("/api/sessions/{session_id}/sandbox/terminal/{terminal_id}/ws")
+async def session_terminal_websocket(
+    session_id: str, terminal_id: str, websocket: WebSocket
+):
+    await _terminal_websocket_endpoint(
+        websocket,
+        session_id=session_id,
+        terminal_id=terminal_id,
+    )
+
+
+@app.post("/api/dev/sessions/{session_id}/terminal/open")
+def open_session_terminal_dev(session_id: str, request: Request) -> dict[str, Any]:
+    user_id = _request_user_id(request)
+    session = agent.get_session(session_id, user_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return _open_terminal_or_raise(
+        session_id=session_id,
+        user_id=user_id,
+        dev_mode=True,
+    )
+
+
+@app.delete("/api/dev/sessions/{session_id}/terminal/{terminal_id}")
+def close_session_terminal_dev(
+    session_id: str,
+    terminal_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    user_id = _request_user_id(request)
+    session = agent.get_session(session_id, user_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    closed = _close_terminal_or_raise(
+        session_id=session_id,
+        terminal_id=terminal_id,
+        user_id=user_id,
+    )
+    return {
+        "session_id": session_id,
+        "terminal_id": terminal_id,
+        "closed": closed,
+    }
+
+
+@app.websocket("/api/dev/sessions/{session_id}/terminal/{terminal_id}/ws")
+async def session_terminal_websocket_dev(
+    session_id: str,
+    terminal_id: str,
+    websocket: WebSocket,
+):
+    await _terminal_websocket_endpoint(
+        websocket,
+        session_id=session_id,
+        terminal_id=terminal_id,
+    )
 
 
 @app.post("/api/sessions/{session_id}/share")

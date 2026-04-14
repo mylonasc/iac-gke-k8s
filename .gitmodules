@@ -1,0 +1,3 @@
+[submodule "apps/sandboxed-react-agent/backend/app/agents/toolkits/browser_tools_js/browser-tools"]
+	path = apps/sandboxed-react-agent/backend/app/agents/toolkits/browser_tools_js/browser-tools
+	url = https://github.com/badlogic/browser-tools
