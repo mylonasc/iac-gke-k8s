@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sandbox Authz Policy</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header>
+        <h1>Sandbox Authz Policy</h1>
+        <p>Edit and validate YAML policy served to backend authz clients.</p>
+      </header>
+      <section class="actions">
+        <button id="reload">Reload</button>
+        <button id="validate">Validate</button>
+        <button id="save">Save</button>
+        <button id="audit">Audit</button>
+      </section>
+      <p id="status" class="status"></p>
+      <textarea id="editor" spellcheck="false"></textarea>
+      <pre id="auditlog" class="auditlog"></pre>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+  </html>

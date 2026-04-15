@@ -1,0 +1,47 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sandboxed-react-agent-authz-api
+  namespace: alt-default
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /api/$2
+    nginx.ingress.kubernetes.io/auth-url: "https://$host/oauth2/auth"
+    nginx.ingress.kubernetes.io/auth-signin: "https://$host/oauth2/start?rd=$escaped_request_uri"
+    nginx.ingress.kubernetes.io/auth-response-headers: "X-Auth-Request-Email,X-Auth-Request-User,X-Auth-Request-Groups"
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /sandboxed-react-agent-authz/api(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: sandboxed-react-agent-authz-backend
+                port:
+                  number: 8081
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sandboxed-react-agent-authz-web
+  namespace: alt-default
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/auth-url: "https://$host/oauth2/auth"
+    nginx.ingress.kubernetes.io/auth-signin: "https://$host/oauth2/start?rd=$escaped_request_uri"
+    nginx.ingress.kubernetes.io/auth-response-headers: "X-Auth-Request-Email,X-Auth-Request-User,X-Auth-Request-Groups"
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /sandboxed-react-agent-authz(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: sandboxed-react-agent-authz-frontend
+                port:
+                  number: 80

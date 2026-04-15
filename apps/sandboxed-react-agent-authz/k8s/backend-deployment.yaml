@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandboxed-react-agent-authz-backend
+  namespace: alt-default
+  labels:
+    app: sandboxed-react-agent-authz-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sandboxed-react-agent-authz-backend
+  template:
+    metadata:
+      labels:
+        app: sandboxed-react-agent-authz-backend
+    spec:
+      containers:
+        - name: backend
+          image: docker.io/<your-dockerhub-user>/sandboxed-react-agent-authz-backend:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8081
+          env:
+            - name: AUTHZ_POLICY_PATH
+              value: /app/data/authz-policy.yaml
+            - name: AUTHZ_POLICY_AUDIT_LOG_PATH
+              value: /app/data/policy-audit.log
+            - name: AUTHZ_ADMIN_GROUP_ALLOWLIST
+              value: sra-admins
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8081
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8081
+            periodSeconds: 20
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: authz-data
+              mountPath: /app/data
+      volumes:
+        - name: authz-data
+          persistentVolumeClaim:
+            claimName: sandboxed-react-agent-authz-data

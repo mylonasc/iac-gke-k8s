@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandboxed-react-agent-authz-frontend
+  namespace: alt-default
+spec:
+  selector:
+    app: sandboxed-react-agent-authz-frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80

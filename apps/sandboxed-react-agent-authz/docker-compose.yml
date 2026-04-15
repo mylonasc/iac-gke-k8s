@@ -1,0 +1,22 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      AUTHZ_POLICY_PATH: /app/data/authz-policy.yaml
+      AUTHZ_ADMIN_GROUP_ALLOWLIST: sra-admins
+    volumes:
+      - authz_data:/app/data
+    ports:
+      - "8081:8081"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "8082:80"
+
+volumes:
+  authz_data:

@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandboxed-react-agent-authz-frontend
+  namespace: alt-default
+  labels:
+    app: sandboxed-react-agent-authz-frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sandboxed-react-agent-authz-frontend
+  template:
+    metadata:
+      labels:
+        app: sandboxed-react-agent-authz-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: docker.io/<your-dockerhub-user>/sandboxed-react-agent-authz-frontend:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
