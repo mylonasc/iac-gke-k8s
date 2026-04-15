@@ -12,13 +12,16 @@ export function ThreadsSidebar({
 }) {
   return (
     <aside className="panel threads-panel">
-      <div className="panel-header">
-        <h3>Threads</h3>
-        {!isSharedView ? (
-          <button type="button" className="btn btn-primary" onClick={onCreate}>
-            New
+      {!isSharedView ? (
+        <div className="sidebar-actions">
+          <button type="button" className="btn btn-primary new-chat-btn" onClick={onCreate}>
+            + New Chat
           </button>
-        ) : null}
+        </div>
+      ) : null}
+
+      <div className="panel-header">
+        <h3>History</h3>
       </div>
       <ul className="threads-list">
         {sessions.map((session) => (

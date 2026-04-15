@@ -53,6 +53,7 @@ from .services.workspace_provisioning_service import WorkspaceProvisioningServic
 from .services.workspace_service import WorkspaceService
 from .session_store import SessionStore
 from .authz import AccessContext, AuthorizationPolicyService
+from .public_path import with_public_base
 
 
 def _parse_iso_datetime(value: Any) -> datetime | None:
@@ -1947,7 +1948,9 @@ class SandboxedReactAgent:
         self._assert_authorized_feature(user_id, "terminal.open")
         return {
             "session_id": session_id,
-            "open_terminal_path": f"/api/sessions/{session_id}/sandbox/terminal/open",
+            "open_terminal_path": with_public_base(
+                f"/api/sessions/{session_id}/sandbox/terminal/open"
+            ),
             "message": "Interactive shell panel is available for this session.",
         }
 

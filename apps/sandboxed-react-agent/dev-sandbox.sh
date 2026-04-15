@@ -63,6 +63,12 @@ compose_up() {
   local env_file="${SCRIPT_DIR}/.env.${mode}"
   local example_file="${SCRIPT_DIR}/.env.${mode}.example"
   ensure_env_file "${env_file}" "${example_file}"
+  
+  if [[ "${mode}" == "cluster" ]]; then
+    echo "Cluster mode detected. Ensuring sandbox router port-forward is running..."
+    port_forward_start
+  fi
+
   docker compose --project-directory "${PROJECT_DIR}" --env-file "${env_file}" up --build
 }
 

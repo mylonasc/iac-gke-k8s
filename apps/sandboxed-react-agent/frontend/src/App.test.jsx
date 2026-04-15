@@ -101,7 +101,7 @@ describe("App v2", () => {
   it("renders redesigned shell", async () => {
     render(<App />);
     expect(screen.getByRole("heading", { name: "Sandboxed React Agent" })).toBeInTheDocument();
-    expect(await screen.findByText("Threads")).toBeInTheDocument();
-    expect(screen.getByText("Start by sending a message.")).toBeInTheDocument();
+    expect(await screen.findByText("History")).toBeInTheDocument();
+    expect(screen.getByText("How can I help you today?")).toBeInTheDocument();
   });
 });

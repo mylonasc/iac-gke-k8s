@@ -214,6 +214,32 @@ def test_sandbox_toolkit_open_interactive_shell_tool() -> None:
     assert stored_assets == []
 
 
+def test_sandbox_toolkit_open_interactive_shell_prefixes_public_base_path(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("APP_PUBLIC_BASE_PATH", "/sandboxed-react-agent")
+    toolkit = SandboxToolkit(
+        session_sandbox=SessionSandboxFacade(_FakeLeaseFacade(), _FakeAssetFacade()),
+        session_id="session-shell",
+        runtime_config={"mode": "cluster"},
+        now_iso=lambda: "2026-01-01T00:00:00+00:00",
+    )
+
+    payload_json, _ = __import__("asyncio").run(
+        toolkit.run_tool_call(
+            tool_call_id="tool-shell",
+            name="sandbox_open_interactive_shell",
+            arguments_json=json.dumps({}),
+        )
+    )
+    payload = json.loads(payload_json)
+    assert payload["ok"] is True
+    assert (
+        payload["data"]["open_terminal_path"]
+        == "/sandboxed-react-agent/api/sessions/session-shell/sandbox/terminal/open"
+    )
+
+
 def test_sandbox_toolkit_supports_diagnostic_and_mutating_controls() -> None:
     session_sandbox = SessionSandboxFacade(_FakeLeaseFacade(), _FakeAssetFacade())
     callback_calls: list[tuple[str, object]] = []

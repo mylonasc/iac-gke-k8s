@@ -1,0 +1,44 @@
+Metadata-Version: 2.4
+Name: onboarding-client
+Version: 0.1.0
+Summary: Onboarding gateway for invitations, profile collection, and role assignment
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: fastapi>=0.115.0
+Requires-Dist: uvicorn[standard]>=0.32.0
+Requires-Dist: sqlalchemy>=2.0.36
+Requires-Dist: pydantic-settings>=2.6.1
+Requires-Dist: email-validator>=2.2.0
+Requires-Dist: python-multipart>=0.0.12
+Requires-Dist: pyjwt[crypto]>=2.10.0
+Requires-Dist: resend>=2.5.1
+Provides-Extra: dev
+Requires-Dist: pytest>=8.3.3; extra == "dev"
+Requires-Dist: httpx>=0.28.0; extra == "dev"
+
+# Onboarding Client
+
+Python FastAPI onboarding gateway for invitation delivery, profile collection, and role assignment.
+
+## Current scope
+
+- Admin API for roles and invitations
+- Email invitation delivery via Resend
+- Public confirmation and profile submission flow
+- Runtime role lookup for Dex-authenticated users
+- SQLite-first persistence and automated tests
+
+## Local run
+
+```bash
+python -m venv .venv
+. .venv/bin/activate
+pip install -e .[dev]
+uvicorn onboarding_client.main:app --reload
+```
+
+## Test
+
+```bash
+pytest
+```

@@ -1,4 +1,5 @@
 import React from "react";
+import { DEFAULT_API_BASE } from "../api/client";
 import { SandboxTerminalPanel } from "../terminal/SandboxTerminalPanel";
 
 export function TerminalDevPanel({ sessionId }) {
@@ -17,7 +18,7 @@ export function TerminalDevPanel({ sessionId }) {
       <p className="terminal-meta">Session: {sessionId}</p>
       <SandboxTerminalPanel
         title="Dev terminal"
-        openPath={`/api/dev/sessions/${sessionId}/terminal/open`}
+        openPath={`${DEFAULT_API_BASE}/dev/sessions/${sessionId}/terminal/open`}
       />
     </section>
   );

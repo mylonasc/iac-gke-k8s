@@ -9,12 +9,13 @@ import { ThreadsSidebar } from "./layout/ThreadsSidebar";
 import { SettingsPanel } from "./settings/SettingsPanel";
 import { TerminalDevPanel } from "./dev/TerminalDevPanel";
 
-function IdentityBadge({ userId, userTier }) {
-  if (!userId) return null;
+function IdentityBadge({ userId, userEmail, userDisplayName, userTier }) {
+  if (!userId && !userEmail && !userDisplayName) return null;
+  const label = userDisplayName || userEmail || userId;
   return (
-    <div className="identity-badge" title={userId}>
+    <div className="identity-badge" title={userId || userEmail}>
       <span className="identity-label">User</span>
-      <code>{userId}</code>
+      <code>{label}</code>
       <span className="pill">Tier: {userTier}</span>
     </div>
   );
@@ -83,6 +84,8 @@ export default function App() {
     tab,
     theme,
     userId,
+    userEmail,
+    userDisplayName,
     userTier,
     userCapabilities,
   } = useAppState();
@@ -118,7 +121,7 @@ export default function App() {
             <p className="tagline">Gemini/ChatGPT-style shell for sandboxed workflows</p>
           </div>
           <div className="topbar-right">
-            {!isSharedView ? <IdentityBadge userId={userId} userTier={userTier} /> : null}
+            {!isSharedView ? <IdentityBadge userId={userId} userEmail={userEmail} userDisplayName={userDisplayName} userTier={userTier} /> : null}
             <div className="tab-row">
               <button
                 type="button"
@@ -268,7 +271,7 @@ export default function App() {
 
       <MobileDrawer open={menuDrawerOpen} title="Sandboxed React Agent" onClose={() => setMenuDrawerOpen(false)}>
         <div className="mobile-menu-content">
-          {!isSharedView ? <IdentityBadge userId={userId} userTier={userTier} /> : null}
+          {!isSharedView ? <IdentityBadge userId={userId} userEmail={userEmail} userDisplayName={userDisplayName} userTier={userTier} /> : null}
           <div className="mobile-menu-group">
             <button
               type="button"

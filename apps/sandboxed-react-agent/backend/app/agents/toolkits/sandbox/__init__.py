@@ -12,6 +12,7 @@ from ..base import ToolkitProvider
 from ...tool_events import tool_end_event, tool_start_event
 from ...tool_payloads import ToolExecutionPayload
 from ...integrations.sandbox_sessions import SessionSandboxFacade
+from ....public_path import with_public_base
 from ....sandbox_lifecycle import SandboxLifecycleService
 from ....sandbox_manager import SandboxManager
 
@@ -625,7 +626,9 @@ class SandboxToolkit:
 
         payload = {
             "session_id": self.session_id,
-            "open_terminal_path": f"/api/sessions/{self.session_id}/sandbox/terminal/open",
+            "open_terminal_path": with_public_base(
+                f"/api/sessions/{self.session_id}/sandbox/terminal/open"
+            ),
             "message": "Interactive shell is available in the session panel.",
         }
         return self._ok_payload(

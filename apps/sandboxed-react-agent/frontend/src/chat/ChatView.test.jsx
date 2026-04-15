@@ -113,17 +113,12 @@ describe("ChatView sandbox controls", () => {
     const user = userEvent.setup();
     renderView();
 
-    await user.click(screen.getByRole("button", { name: "Advanced sandbox controls" }));
+    await user.click(screen.getByRole("button", { name: "Sandbox runtime configuration" }));
 
-    expect(
-      screen.getByRole("dialog", { name: "Advanced sandbox controls" })
-    ).toBeInTheDocument();
-
-    expect(screen.getByText("Workspace: ready")).toBeInTheDocument();
-    expect(screen.getByText("Pending: no")).toBeInTheDocument();
-    expect(screen.getByText("Effective profile: transient")).toBeInTheDocument();
-    expect(screen.getByText("Effective template: python-runtime-template-small")).toBeInTheDocument();
-    expect(screen.getByText(/Persistent base templates:/)).toBeInTheDocument();
+    expect(screen.getByText("Workspace")).toBeInTheDocument();
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+    expect(screen.getByText("Provisioning")).toBeInTheDocument();
+    expect(screen.getByText("Execution")).toBeInTheDocument();
   });
 
   it("invokes refresh and action callbacks", async () => {
@@ -133,10 +128,10 @@ describe("ChatView sandbox controls", () => {
 
     renderView({ onRefreshSandboxStatus, onRunSessionSandboxAction });
 
-    await user.click(screen.getByRole("button", { name: "Advanced sandbox controls" }));
-    await user.click(screen.getByRole("button", { name: "Refresh status" }));
-    await user.click(screen.getByRole("button", { name: "Release lease" }));
-    await user.click(screen.getByRole("button", { name: "Reconcile workspace" }));
+    await user.click(screen.getByRole("button", { name: "Sandbox runtime configuration" }));
+    await user.click(screen.getByRole("button", { name: /Refresh Status/ }));
+    await user.click(screen.getByRole("button", { name: /Release Lease/ }));
+    await user.click(screen.getByRole("button", { name: /Reconcile Workspace/ }));
 
     expect(onRefreshSandboxStatus).toHaveBeenCalledWith("session-1");
     expect(onRunSessionSandboxAction).toHaveBeenNthCalledWith(1, "session-1", "release_lease", {
@@ -150,17 +145,18 @@ describe("ChatView sandbox controls", () => {
     );
   });
 
-  it("opens terminal modal from controls", async () => {
+  it("opens terminal modal from actions", async () => {
     const user = userEvent.setup();
     renderView();
 
-    await user.click(screen.getByRole("button", { name: "Terminal" }));
+    await user.click(screen.getByRole("button", { name: "Sandbox runtime configuration" }));
+    await user.click(screen.getByRole("button", { name: /Open Terminal/ }));
 
     expect(screen.getByRole("dialog", { name: "Sandbox terminal" })).toBeInTheDocument();
     expect(screen.getByText("Terminal Panel")).toBeInTheDocument();
   });
 
-  it("sends nulls when policy fields are cleared", async () => {
+  it("sends individual policy updates when fields change", async () => {
     const user = userEvent.setup();
     const onUpdateSessionSandboxPolicy = vi.fn();
     const session = {
@@ -174,17 +170,16 @@ describe("ChatView sandbox controls", () => {
 
     renderView({ session, onUpdateSessionSandboxPolicy });
 
-    await user.click(screen.getByRole("button", { name: "Advanced sandbox controls" }));
-    await user.selectOptions(screen.getByLabelText("Session profile"), "");
-    await user.selectOptions(screen.getByLabelText("Session template"), "");
-    await user.selectOptions(screen.getByLabelText("Session execution model"), "");
-    await user.click(screen.getByRole("button", { name: "Apply session policy" }));
-
-    expect(onUpdateSessionSandboxPolicy).toHaveBeenCalledWith("session-1", {
-      profile: null,
-      template_name: null,
-      execution_model: null,
-    });
+    await user.click(screen.getByRole("button", { name: "Sandbox runtime configuration" }));
+    
+    await user.selectOptions(screen.getByLabelText("Sandbox Profile"), "");
+    expect(onUpdateSessionSandboxPolicy).toHaveBeenCalledWith("session-1", { profile: null });
+    
+    await user.selectOptions(screen.getByLabelText("Runtime Template"), "");
+    expect(onUpdateSessionSandboxPolicy).toHaveBeenCalledWith("session-1", { template_name: null });
+    
+    await user.selectOptions(screen.getByLabelText("Execution Model"), "");
+    expect(onUpdateSessionSandboxPolicy).toHaveBeenCalledWith("session-1", { execution_model: null });
   });
 
   it("resets policy inputs when session changes", async () => {
@@ -204,11 +199,11 @@ describe("ChatView sandbox controls", () => {
       },
     };
 
-    const { rerender } = renderView({ session: firstSession });
+    const { rerender, props } = renderView({ session: firstSession });
 
-    await user.click(screen.getByRole("button", { name: "Advanced sandbox controls" }));
-    await user.selectOptions(screen.getByLabelText("Session template"), "python-runtime-template-small");
-    expect(screen.getByLabelText("Session template")).toHaveValue("python-runtime-template-small");
+    await user.click(screen.getByRole("button", { name: "Sandbox runtime configuration" }));
+    await user.selectOptions(screen.getByLabelText("Runtime Template"), "python-runtime-template-small");
+    expect(props.onUpdateSessionSandboxPolicy).toHaveBeenCalledWith("session-1", { template_name: "python-runtime-template-small" });
 
     rerender(
       <ChatView
@@ -230,9 +225,9 @@ describe("ChatView sandbox controls", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByLabelText("Session profile")).toHaveValue("persistent_workspace");
-      expect(screen.getByLabelText("Session template")).toHaveValue("template-two");
-      expect(screen.getByLabelText("Session execution model")).toHaveValue("ephemeral");
+      expect(screen.getByLabelText("Sandbox Profile")).toHaveValue("persistent_workspace");
+      expect(screen.getByLabelText("Runtime Template")).toHaveValue("template-two");
+      expect(screen.getByLabelText("Execution Model")).toHaveValue("ephemeral");
     });
   });
 });

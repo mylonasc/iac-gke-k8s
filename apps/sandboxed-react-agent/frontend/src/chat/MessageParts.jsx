@@ -1,4 +1,10 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { 
+  Box, 
+  Clock, 
+  CheckCircle2, 
+  AlertTriangle 
+} from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
@@ -131,24 +137,26 @@ function ToolCallPart(props) {
     };
   }, [maximizedWidget]);
 
+  const toolStatusIcon = isPending ? (
+    <Clock size={12} className="spin" />
+  ) : (claimName || leaseId) ? (
+    <CheckCircle2 size={12} />
+  ) : (
+    <AlertTriangle size={12} />
+  );
+
   const toolContent = (
     <>
-      <div className="tool-context">
-        {isPending ? (
-          <span className="pill pill-running tool-status-pill">
-            Waiting
-            <span className="tool-waiting-dots" aria-hidden="true">
-              <span />
-              <span />
-              <span />
-            </span>
-          </span>
-        ) : claimName ? (
-          <span className="pill pill-success">Claim ready: {claimName}</span>
-        ) : leaseId ? (
-          <span className="pill pill-success">Lease: {leaseId}</span>
-        ) : (
-          <span className="pill">No claim metadata</span>
+      <div className="tool-context-compact">
+        <div className={`tool-status-badge ${isPending ? "is-pending" : (claimName || leaseId) ? "is-ready" : "is-empty"}`}>
+          {toolStatusIcon}
+          <span>{isPending ? "Acquiring..." : (claimName || leaseId) ? "Sandbox Ready" : "Local"}</span>
+        </div>
+        {(claimName || leaseId) && (
+          <div className="tool-id-meta" title={claimName || leaseId}>
+            <Box size={10} />
+            <span>{(claimName || leaseId).slice(0, 12)}...</span>
+          </div>
         )}
       </div>
 
@@ -333,7 +341,6 @@ export function UserMessage() {
     <MessagePrimitive.Root className="message-row user">
       <div className="message-column message-column-user">
         <div className="message-bubble message-bubble-user">
-          <div className="message-label">User</div>
           <MessagePrimitive.Parts components={{ Text: UserMarkdownTextPart, Image: ImagePart }} />
         </div>
       </div>
@@ -357,8 +364,9 @@ export function AssistantMessage() {
   return (
     <MessagePrimitive.Root className="message-row assistant">
       <div className="message-column message-column-assistant">
-        <div className="message-label">Assistant</div>
-        <MessagePrimitive.Parts components={messageComponents} />
+        <div className="message-bubble message-bubble-assistant">
+          <MessagePrimitive.Parts components={messageComponents} />
+        </div>
       </div>
     </MessagePrimitive.Root>
   );

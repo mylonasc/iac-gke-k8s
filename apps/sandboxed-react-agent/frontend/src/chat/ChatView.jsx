@@ -7,26 +7,40 @@ import { Composer } from "./Composer";
 import { SandboxLiveStatus } from "./SandboxLiveStatus";
 import { ThinkingSidebar } from "./ThinkingSidebar";
 import { SandboxTerminalPanel } from "../terminal/SandboxTerminalPanel";
+import { SandboxManagementWidget } from "../runtime/SandboxManagementWidget";
 
-function ClaimBadge({ session }) {
-  const sandbox = session?.sandbox || {};
-  const activeClaim = sandbox.has_active_claim ? sandbox.claim_name : null;
-  const leaseStatus = sandbox?.status || null;
-  let text = "Claim: none";
-  let className = "pill";
+function LandingView({ readOnly }) {
+  return (
+    <div className="landing-view">
+      <div className="landing-content">
+        <div className="landing-header">
+          <h1>How can I help you today?</h1>
+          <p className="landing-subtitle">
+            Sandboxed LLM Agent ready to execute Python, Shell, and more.
+          </p>
+        </div>
+        
+        <div className="landing-composer-wrap">
+          <Composer readOnly={readOnly} />
+        </div>
 
-  if (leaseStatus === "pending") {
-    text = "Claim: acquiring";
-    className = "pill pill-running";
-  } else if (leaseStatus === "ready" && activeClaim) {
-    text = `Claim ready: ${activeClaim}`;
-    className = "pill pill-success";
-  } else if (leaseStatus) {
-    text = `Claim status: ${leaseStatus}`;
-    className = "pill pill-warning";
-  }
-
-  return <span className={className}>{text}</span>;
+        <div className="landing-suggestions">
+          <div className="suggestion-card">
+            <strong>Analyze Data</strong>
+            <p>Run Python to process large datasets and generate charts.</p>
+          </div>
+          <div className="suggestion-card">
+            <strong>Debug System</strong>
+            <p>Use Shell tools to inspect logs or troubleshoot infrastructure.</p>
+          </div>
+          <div className="suggestion-card">
+            <strong>Automate Tasks</strong>
+            <p>Write scripts to handle repetitive file or API operations.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export function ChatView({
@@ -49,40 +63,7 @@ export function ChatView({
   const title = readOnly ? "Shared Thread" : session?.title || "New Chat";
   const [copiedMarkdown, setCopiedMarkdown] = useState(false);
   const [showThinking, setShowThinking] = useState(false);
-  const [showSandboxControls, setShowSandboxControls] = useState(false);
   const [showTerminal, setShowTerminal] = useState(false);
-  const [sessionProfile, setSessionProfile] = useState(
-    session?.sandbox_policy?.profile || ""
-  );
-  const [sessionTemplate, setSessionTemplate] = useState(
-    session?.sandbox_policy?.template_name || ""
-  );
-  const [sessionExecutionModel, setSessionExecutionModel] = useState(
-    session?.sandbox_policy?.execution_model || ""
-  );
-
-  useEffect(() => {
-    setSessionProfile(session?.sandbox_policy?.profile || "");
-    setSessionTemplate(session?.sandbox_policy?.template_name || "");
-    setSessionExecutionModel(session?.sandbox_policy?.execution_model || "");
-  }, [session?.session_id]);
-
-  useEffect(() => {
-    if (sandboxStatusError) {
-      setShowSandboxControls(true);
-    }
-  }, [sandboxStatusError]);
-
-  useEffect(() => {
-    if (!showSandboxControls) return undefined;
-    const onKeyDown = (event) => {
-      if (event.key === "Escape") {
-        setShowSandboxControls(false);
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [showSandboxControls]);
 
   useEffect(() => {
     const onOpenTerminal = (event) => {
@@ -178,152 +159,11 @@ export function ChatView({
     persistentBaseTemplates.length > 0
       ? persistentBaseTemplates.join(", ")
       : "not reported by backend";
-  const workspace = sessionStatus?.workspace_status?.workspace || null;
-  const provisioningPending = sessionStatus?.workspace_status?.provisioning_pending;
-  const currentSandboxProfile =
-    activeRuntime?.profile ||
-    sessionStatus?.effective?.runtime?.profile ||
-    config?.sandbox_profile ||
-    "persistent_workspace";
-  const currentSandboxTemplate =
-    activeRuntime?.template_name ||
-    sessionStatus?.effective?.runtime?.template_name ||
-    config?.sandbox_template_name ||
-    "python-runtime-template-small";
-  const currentExecutionModel =
-    activeRuntime?.execution_model ||
-    sessionStatus?.effective?.lifecycle?.execution_model ||
-    "session";
-  const fallbackActive = Boolean(
-    activeRuntime?.fallback_active || runtimeResolution?.fallback_active
-  );
-  const fallbackNotice =
-    typeof runtimeResolution?.notice === "string" && runtimeResolution.notice
-      ? runtimeResolution.notice
-      : "Persistent sandbox is unavailable; transient fallback is active.";
-
-  const applySessionPolicy = async () => {
-    if (!session?.session_id || !onUpdateSessionSandboxPolicy) return;
-    const patch = {
-      profile: sessionProfile || null,
-      template_name: sessionTemplate || null,
-      execution_model: sessionExecutionModel || null,
-    };
-    await onUpdateSessionSandboxPolicy(session.session_id, patch);
+  
+  const applySessionPolicy = async (sessionId, patch) => {
+    if (!sessionId || !onUpdateSessionSandboxPolicy) return;
+    await onUpdateSessionSandboxPolicy(sessionId, patch);
   };
-
-  const sandboxControlsPanel = (
-    <div className="sandbox-controls-panel">
-      <div className="sandbox-status-row">
-        <span className="pill">Workspace: {workspace?.status || "none"}</span>
-        <span className="pill">Pending: {provisioningPending ? "yes" : "no"}</span>
-        <span className="pill">
-          Effective profile: {sessionStatus?.effective?.runtime?.profile || config?.sandbox_profile}
-        </span>
-        <span className={`pill ${fallbackActive ? "pill-warning" : "pill-success"}`}>
-          Active profile: {currentSandboxProfile}
-        </span>
-        <span className="pill">
-          Effective template: {sessionStatus?.effective?.runtime?.template_name || config?.sandbox_template_name}
-        </span>
-        <span className="pill">Active template: {currentSandboxTemplate}</span>
-        <span className="pill">Execution: {currentExecutionModel}</span>
-        <button
-          type="button"
-          className="btn btn-subtle tiny"
-          disabled={!session?.session_id || sandboxStatusLoading}
-          onClick={() => onRefreshSandboxStatus?.(session.session_id)}
-        >
-          {sandboxStatusLoading ? "Refreshing..." : "Refresh status"}
-        </button>
-        <button
-          type="button"
-          className="btn btn-subtle tiny"
-          disabled={!session?.session_id || sandboxStatusLoading}
-          onClick={() =>
-            onRunSessionSandboxAction?.(session.session_id, "release_lease", {
-              wait: false,
-            })
-          }
-        >
-          Release lease
-        </button>
-        <button
-          type="button"
-          className="btn btn-subtle tiny"
-          disabled={!session?.session_id || sandboxStatusLoading}
-          onClick={() =>
-            onRunSessionSandboxAction?.(session.session_id, "reconcile_workspace", {
-              wait: false,
-            })
-          }
-        >
-          Reconcile workspace
-        </button>
-        {canOpenTerminal ? (
-          <button
-            type="button"
-            className="btn btn-subtle tiny"
-            disabled={!session?.session_id}
-            onClick={() => setShowTerminal(true)}
-          >
-            Open terminal
-          </button>
-        ) : null}
-      </div>
-      <div className="sandbox-policy-row">
-        <p className="sandbox-policy-hint">
-          <strong>Persistent base templates:</strong> {persistentTemplateHint}
-          {persistentPrimaryBaseTemplate ? ` (primary: ${persistentPrimaryBaseTemplate})` : ""}
-        </p>
-        <label>
-          Session profile
-          <select value={sessionProfile} onChange={(event) => setSessionProfile(event.target.value)}>
-            <option value="">(inherit)</option>
-            {availableProfiles.map((profile) => (
-              <option key={profile} value={profile}>
-                {profile}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Session template
-          <select value={sessionTemplate} onChange={(event) => setSessionTemplate(event.target.value)}>
-            <option value="">(inherit)</option>
-            {availableTemplateNames.map((templateName) => (
-              <option key={templateName} value={templateName}>
-                {templateName}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Session execution model
-          <select
-            value={sessionExecutionModel}
-            onChange={(event) => setSessionExecutionModel(event.target.value)}
-          >
-            <option value="">(inherit)</option>
-            {availableExecutionModels.map((executionModel) => (
-              <option key={executionModel} value={executionModel}>
-                {executionModel}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button
-          type="button"
-          className="btn btn-primary tiny"
-          disabled={!session?.session_id || sandboxStatusLoading}
-          onClick={applySessionPolicy}
-        >
-          Apply session policy
-        </button>
-      </div>
-      {sandboxStatusError ? <p className="feedback feedback-error">{sandboxStatusError}</p> : null}
-    </div>
-  );
 
   return (
     <section className="chat-card">
@@ -332,42 +172,8 @@ export function ChatView({
           <div>
             {!isMobile ? <h2>{title}</h2> : null}
             {!isMobile ? <p className="chat-subtitle">Session: {session?.session_id || "new"}</p> : null}
-            {!readOnly && !isMobile ? (
-              <div className="chat-meta-row">
-                <span className="pill">Model: {config?.model || "gpt-4o-mini"}</span>
-                <span className="pill">
-                  Default profile: {config?.sandbox_profile || "persistent_workspace"}
-                </span>
-                <span className="pill">Default template: {config?.sandbox_template_name || "default"}</span>
-                <span className={`pill ${fallbackActive ? "pill-warning" : "pill-success"}`}>
-                  Sandbox now: {currentSandboxProfile}
-                </span>
-                <span className="pill">Template now: {currentSandboxTemplate}</span>
-                <span className="pill">Execution: {currentExecutionModel}</span>
-              </div>
-            ) : null}
           </div>
           <div className="chat-header-actions">
-            {!readOnly ? <ClaimBadge session={session} /> : null}
-            {!readOnly ? (
-              <button
-                type="button"
-                className="btn btn-subtle"
-                onClick={() => setShowSandboxControls(true)}
-              >
-                Advanced sandbox controls
-              </button>
-            ) : null}
-            {!readOnly && canOpenTerminal ? (
-              <button
-                type="button"
-                className="btn btn-subtle"
-                disabled={!session?.session_id}
-                onClick={() => setShowTerminal(true)}
-              >
-                Terminal
-              </button>
-            ) : null}
             {!readOnly ? (
               <button
                 type="button"
@@ -414,70 +220,50 @@ export function ChatView({
             ) : null}
           </div>
         </div>
-        {!readOnly && fallbackActive ? (
-          <div className="sandbox-fallback-banner" role="status" aria-live="polite">
-            <strong>Persistent fallback active.</strong> {fallbackNotice}
-          </div>
-        ) : null}
+
         {!readOnly ? (
-          <div className="sandbox-active-row">
-            <span className={`pill ${fallbackActive ? "pill-warning" : "pill-success"}`}>
-              Current profile: {currentSandboxProfile}
-            </span>
-            <span className="pill">Current template: {currentSandboxTemplate}</span>
-            <span className="pill">Execution: {currentExecutionModel}</span>
-          </div>
+          <SandboxManagementWidget
+            session={session}
+            config={config}
+            onRefreshStatus={onRefreshSandboxStatus}
+            onUpdatePolicy={applySessionPolicy}
+            onRunAction={onRunSessionSandboxAction}
+            onOpenTerminal={() => setShowTerminal(true)}
+            loading={sandboxStatusLoading}
+            error={sandboxStatusError}
+            canOpenTerminal={canOpenTerminal}
+            isMobile={isMobile}
+          />
         ) : null}
+
         <SandboxLiveStatus readOnly={readOnly} />
       </header>
 
       <ThreadPrimitive.Root className="thread-root">
-        <div className={`thread-layout ${showThinking ? "has-thinking" : ""}`}>
-          <ThreadPrimitive.Viewport className="thread-viewport">
-            <AuiIf condition={(s) => s.thread.isEmpty}>
-              <div className="empty-state">Start by sending a message.</div>
-            </AuiIf>
-            <ThreadPrimitive.Messages components={threadComponents} />
-            <ThreadPrimitive.ScrollToBottom className="btn btn-subtle jump-button">
-              Jump to latest
-            </ThreadPrimitive.ScrollToBottom>
-          </ThreadPrimitive.Viewport>
-          {!readOnly && showThinking ? <ThinkingSidebar /> : null}
-        </div>
-        {!readOnly && (configError || configMessage) ? (
-          <div className={configError ? "quick-config-feedback feedback-error" : "quick-config-feedback feedback-success"}>
-            {configError || configMessage}
+        <AuiIf condition={(s) => s.thread.isEmpty}>
+          <LandingView readOnly={readOnly} />
+        </AuiIf>
+        
+        <AuiIf condition={(s) => !s.thread.isEmpty}>
+          <div className={`thread-layout ${showThinking ? "has-thinking" : ""}`}>
+            <ThreadPrimitive.Viewport className="thread-viewport">
+              <div className="chat-centering-container">
+                <ThreadPrimitive.Messages components={threadComponents} />
+              </div>
+              <ThreadPrimitive.ScrollToBottom className="btn btn-subtle jump-button">
+                Jump to latest
+              </ThreadPrimitive.ScrollToBottom>
+            </ThreadPrimitive.Viewport>
+            {!readOnly && showThinking ? <ThinkingSidebar /> : null}
           </div>
-        ) : null}
-        <Composer readOnly={readOnly} />
-      </ThreadPrimitive.Root>
-      {!readOnly && showSandboxControls ? (
-        <div
-          className="sandbox-tools-backdrop"
-          role="presentation"
-          onClick={() => setShowSandboxControls(false)}
-        >
-          <section
-            className="sandbox-tools-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Advanced sandbox controls"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="sandbox-tools-header">
-              <h3>Advanced sandbox controls</h3>
-              <button
-                type="button"
-                className="btn btn-subtle tiny"
-                onClick={() => setShowSandboxControls(false)}
-              >
-                Close
-              </button>
+          {!readOnly && (configError || configMessage) ? (
+            <div className={configError ? "quick-config-feedback feedback-error" : "quick-config-feedback feedback-success"}>
+              {configError || configMessage}
             </div>
-            <div className="sandbox-tools-body">{sandboxControlsPanel}</div>
-          </section>
-        </div>
-      ) : null}
+          ) : null}
+          <Composer readOnly={readOnly} />
+        </AuiIf>
+      </ThreadPrimitive.Root>
       {!readOnly && canOpenTerminal && showTerminal ? (
         <div
           className="sandbox-tools-backdrop"
@@ -506,7 +292,7 @@ export function ChatView({
                 title="Interactive shell"
                 openPath={
                   session?.session_id
-                    ? `/api/sessions/${session.session_id}/sandbox/terminal/open`
+                    ? `${apiBase}/sessions/${session.session_id}/sandbox/terminal/open`
                     : ""
                 }
               />

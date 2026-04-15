@@ -34,6 +34,8 @@ export function useAppState() {
   const [sandboxStatusError, setSandboxStatusError] = useState("");
   const [config, setConfig] = useState(defaultConfig);
   const [userId, setUserId] = useState("");
+  const [userEmail, setUserEmail] = useState("");
+  const [userDisplayName, setUserDisplayName] = useState("");
   const [userTier, setUserTier] = useState("default");
   const [userRoles, setUserRoles] = useState([]);
   const [userCapabilities, setUserCapabilities] = useState([]);
@@ -295,12 +297,16 @@ export function useAppState() {
       .then((response) => (response.ok ? response.json() : null))
       .then((data) => {
         setUserId(typeof data?.user_id === "string" ? data.user_id : "");
+        setUserEmail(typeof data?.email === "string" ? data.email : "");
+        setUserDisplayName(typeof data?.display_name === "string" ? data.display_name : "");
         setUserTier(typeof data?.tier === "string" && data.tier ? data.tier : "default");
         setUserRoles(Array.isArray(data?.roles) ? data.roles : []);
         setUserCapabilities(Array.isArray(data?.capabilities) ? data.capabilities : []);
       })
       .catch(() => {
         setUserId("");
+        setUserEmail("");
+        setUserDisplayName("");
         setUserTier("default");
         setUserRoles([]);
         setUserCapabilities([]);
@@ -461,6 +467,8 @@ export function useAppState() {
     tab,
     theme,
     userId,
+    userEmail,
+    userDisplayName,
     userRoles,
     userTier,
     userCapabilities,

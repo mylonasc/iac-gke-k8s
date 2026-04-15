@@ -26,6 +26,7 @@ from .auth import (
 )
 from .authz import AccessContext
 from .logging_config import bind_context, configure_logging
+from .public_path import with_public_base
 from .services.sandbox_terminal_service import (
     TerminalConfigurationError,
     TerminalSessionNotFoundError,
@@ -284,16 +285,24 @@ def _terminal_websocket_path(
     dev_mode: bool = False,
 ) -> str:
     if dev_mode:
-        return f"/api/dev/sessions/{session_id}/terminal/{terminal_id}/ws?token={token}"
-    return f"/api/sessions/{session_id}/sandbox/terminal/{terminal_id}/ws?token={token}"
+        return with_public_base(
+            f"/api/dev/sessions/{session_id}/terminal/{terminal_id}/ws?token={token}"
+        )
+    return with_public_base(
+        f"/api/sessions/{session_id}/sandbox/terminal/{terminal_id}/ws?token={token}"
+    )
 
 
 def _terminal_close_path(
     *, session_id: str, terminal_id: str, dev_mode: bool = False
 ) -> str:
     if dev_mode:
-        return f"/api/dev/sessions/{session_id}/terminal/{terminal_id}"
-    return f"/api/sessions/{session_id}/sandbox/terminal/{terminal_id}"
+        return with_public_base(
+            f"/api/dev/sessions/{session_id}/terminal/{terminal_id}"
+        )
+    return with_public_base(
+        f"/api/sessions/{session_id}/sandbox/terminal/{terminal_id}"
+    )
 
 
 def _open_terminal_or_raise(
@@ -631,8 +640,21 @@ def me(request: Request) -> dict[str, Any]:
     profile = _call_with_request_access(request, agent.get_user_profile, user_id)
     access_context = _request_access_context(request)
     authz_snapshot = authorization_service.policy_snapshot()
+
+    claims = getattr(request.state, "auth_claims", {})
+    claims_dict = claims if isinstance(claims, dict) else {}
+    email = _claim_email(claims_dict)
+    display_name = str(
+        claims_dict.get("preferred_username")
+        or claims_dict.get("name")
+        or claims_dict.get("nickname")
+        or ""
+    ).strip()
+
     return {
         "user_id": user_id,
+        "email": email,
+        "display_name": display_name,
         "tier": str(profile.get("tier") or "default"),
         "roles": list(access_context.roles) if access_context is not None else [],
         "capabilities": (

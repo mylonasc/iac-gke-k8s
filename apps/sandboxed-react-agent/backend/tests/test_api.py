@@ -626,6 +626,32 @@ def test_terminal_open_and_close_endpoints(monkeypatch) -> None:
     assert closed_dev.json()["closed"] is True
 
 
+def test_terminal_paths_include_public_base_path(monkeypatch) -> None:
+    session_id = _create_session()
+    monkeypatch.setenv("APP_PUBLIC_BASE_PATH", "/sandboxed-react-agent")
+    monkeypatch.setattr(
+        agent,
+        "open_session_terminal",
+        lambda sid, uid: _terminal_open_payload(sid),
+    )
+
+    opened = client.post(f"/api/sessions/{session_id}/sandbox/terminal/open")
+    assert opened.status_code == 200
+    payload = opened.json()
+    assert payload["websocket_path"].startswith("/sandboxed-react-agent/api/sessions/")
+    assert payload["close_path"].startswith("/sandboxed-react-agent/api/sessions/")
+
+    opened_dev = client.post(f"/api/dev/sessions/{session_id}/terminal/open")
+    assert opened_dev.status_code == 200
+    payload_dev = opened_dev.json()
+    assert payload_dev["websocket_path"].startswith(
+        "/sandboxed-react-agent/api/dev/sessions/"
+    )
+    assert payload_dev["close_path"].startswith(
+        "/sandboxed-react-agent/api/dev/sessions/"
+    )
+
+
 def test_terminal_open_enforces_session_ownership(monkeypatch) -> None:
     monkeypatch.setattr(main_module.auth_config, "enabled", True)
     monkeypatch.setattr(
