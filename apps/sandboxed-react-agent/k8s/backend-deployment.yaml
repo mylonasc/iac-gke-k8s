@@ -38,7 +38,7 @@ spec:
         - name: dockerhub-regcred
       containers:
         - name: backend
-          image: docker.io/mylonasc/magarathea:sandboxed-react-agent-backend-0.6.21
+          image: docker.io/mylonasc/magarathea:sandboxed-react-agent-backend-0.6.22
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
@@ -119,6 +119,14 @@ spec:
               value: /api/health,/api/public/
             - name: AUTH_USER_ID_CLAIM
               value: sub
+            - name: AUTHZ_POLICY_PATH
+              value: /app/data/authz-policy.yaml
+            - name: AUTHZ_POLICY_URL
+              value: http://sandboxed-react-agent-authz-backend.alt-default.svc.cluster.local:8081/api/policy/current
+            - name: AUTHZ_REFRESH_INTERVAL_SECONDS
+              value: "30"
+            - name: AUTHZ_REMOTE_TIMEOUT_SECONDS
+              value: "3"
             - name: OPS_ADMIN_EMAIL_ALLOWLIST
               value: mylonas.charilaos@gmail.com
             - name: OPS_ADMIN_GROUP_ALLOWLIST

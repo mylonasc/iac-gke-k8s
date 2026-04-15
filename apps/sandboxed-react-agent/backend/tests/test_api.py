@@ -35,6 +35,7 @@ client = TestClient(app)
 
 def setup_function() -> None:
     agent.sessions.clear()
+    main_module.authorization_service.reset_to_default_policy()
     with agent.session_store._connect() as connection:
         connection.execute("DELETE FROM sessions")
         connection.execute("DELETE FROM assets")
@@ -154,6 +155,22 @@ def test_me_endpoint_returns_user_tier() -> None:
     payload = response.json()
     assert payload["user_id"]
     assert payload["tier"] == "default"
+
+
+def test_me_endpoint_includes_roles_and_capabilities(monkeypatch) -> None:
+    monkeypatch.setattr(main_module.auth_config, "enabled", True)
+    monkeypatch.setattr(
+        main_module.token_verifier,
+        "verify",
+        lambda token: {"sub": "user-1", "groups": ["sra-terminal"]},
+    )
+
+    response = client.get("/api/me", headers={"Authorization": "Bearer token-1"})
+    assert response.status_code == 200
+    payload = response.json()
+    assert "roles" in payload
+    assert "capabilities" in payload
+    assert "terminal.open" in payload["capabilities"]
 
 
 def test_workspace_endpoints_roundtrip(monkeypatch) -> None:
@@ -441,6 +458,54 @@ def test_sandbox_lifecycle_endpoints_roundtrip(monkeypatch) -> None:
     assert missing.status_code == 404
 
 
+def test_sandbox_release_requires_admin_write_capability(monkeypatch) -> None:
+    read_only_admin_policy = """
+version: 1
+default_roles:
+  authenticated: [authenticated]
+  unauthenticated: [anonymous]
+role_mappings:
+  groups:
+    sra-admins: [ops_admin]
+roles:
+  authenticated:
+    capabilities: []
+  ops_admin:
+    capabilities: [admin.ops.read]
+feature_rules:
+  admin.ops.read:
+    any_capabilities: [admin.ops.read]
+  admin.ops.write:
+    any_capabilities: [admin.ops.write]
+""".strip()
+    main_module.authorization_service.set_policy_from_yaml_text(
+        read_only_admin_policy,
+        persist=True,
+    )
+
+    monkeypatch.setattr(main_module.auth_config, "enabled", True)
+    monkeypatch.setattr(main_module, "OPS_ADMIN_ALLOW_ALL_AUTHENTICATED", False)
+    monkeypatch.setattr(main_module, "OPS_ADMIN_USER_ID_ALLOWLIST", set())
+    monkeypatch.setattr(main_module, "OPS_ADMIN_EMAIL_ALLOWLIST", set())
+    monkeypatch.setattr(main_module, "OPS_ADMIN_GROUP_ALLOWLIST", set())
+    monkeypatch.setattr(
+        main_module.token_verifier,
+        "verify",
+        lambda token: {"sub": "admin-1", "groups": ["sra-admins"]},
+    )
+    monkeypatch.setattr(agent, "list_sandboxes", lambda: [])
+    monkeypatch.setattr(agent, "release_sandbox", lambda lease_id: True)
+
+    listed = client.get("/api/sandboxes", headers={"Authorization": "Bearer token-1"})
+    assert listed.status_code == 200
+
+    released = client.post(
+        "/api/sandboxes/lease-123/release",
+        headers={"Authorization": "Bearer token-1"},
+    )
+    assert released.status_code == 403
+
+
 def test_reset_session_endpoint() -> None:
     created = client.post("/api/sessions", json={})
     assert created.status_code == 200
@@ -583,6 +648,71 @@ def test_terminal_open_enforces_session_ownership(monkeypatch) -> None:
     )
     assert forbidden.status_code == 404
     assert forbidden.json()["detail"] == "Session not found"
+
+
+def test_terminal_open_requires_terminal_capability(monkeypatch) -> None:
+    strict_policy = """
+version: 1
+default_roles:
+  authenticated: [authenticated]
+  unauthenticated: [anonymous]
+role_mappings:
+  groups:
+    sra-terminal: [terminal_user]
+roles:
+  authenticated:
+    capabilities: []
+  terminal_user:
+    capabilities: [terminal.open]
+feature_rules:
+  terminal.open:
+    any_capabilities: [terminal.open]
+""".strip()
+    main_module.authorization_service.set_policy_from_yaml_text(
+        strict_policy, persist=True
+    )
+
+    monkeypatch.setattr(main_module.auth_config, "enabled", True)
+    monkeypatch.setattr(
+        main_module.token_verifier,
+        "verify",
+        lambda token: {"sub": "user-a", "groups": []},
+    )
+
+    session_id = _create_session(headers={"Authorization": "Bearer token-a"})
+    denied = client.post(
+        f"/api/sessions/{session_id}/sandbox/terminal/open",
+        headers={"Authorization": "Bearer token-a"},
+    )
+    assert denied.status_code == 403
+
+
+def test_sandbox_status_filters_restricted_templates(monkeypatch) -> None:
+    monkeypatch.setattr(main_module.auth_config, "enabled", True)
+    monkeypatch.setattr(
+        main_module.token_verifier,
+        "verify",
+        lambda token: {"sub": "user-a", "groups": []},
+    )
+    monkeypatch.setattr(
+        agent,
+        "_available_cluster_templates",
+        lambda namespace: [
+            {"name": "python-runtime-template-small", "namespace": namespace},
+            {"name": "python-runtime-template-pydata", "namespace": namespace},
+        ],
+    )
+
+    session_id = _create_session(headers={"Authorization": "Bearer token-a"})
+    response = client.get(
+        f"/api/sessions/{session_id}/sandbox/status",
+        headers={"Authorization": "Bearer token-a"},
+    )
+    assert response.status_code == 200
+    templates = response.json()["available_sandboxes"]["templates"]
+    names = [item["name"] for item in templates]
+    assert "python-runtime-template-small" in names
+    assert "python-runtime-template-pydata" not in names
 
 
 def test_terminal_open_returns_json_for_unexpected_errors(monkeypatch) -> None:

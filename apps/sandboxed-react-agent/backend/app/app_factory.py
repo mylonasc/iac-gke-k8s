@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from .agent import SandboxedReactAgent
+from .authz import AuthorizationPolicyService
 from .auth import AnonymousIdentityConfig, AuthConfig, TokenVerifier
 from .tracing import init_tracing
 
@@ -28,10 +29,12 @@ class AppRuntime:
     auth_config: AuthConfig
     token_verifier: TokenVerifier
     anon_identity_config: AnonymousIdentityConfig
+    authorization_service: AuthorizationPolicyService
 
 
 def create_app_runtime() -> AppRuntime:
-    agent = SandboxedReactAgent()
+    authorization_service = AuthorizationPolicyService.from_env()
+    agent = SandboxedReactAgent(authorization_service=authorization_service)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -58,6 +61,12 @@ def create_app_runtime() -> AppRuntime:
         except (TypeError, ValueError):
             pending_ttl_override = None
         reaper_task: asyncio.Task[None] | None = None
+        authz_refresh_task: asyncio.Task[None] | None = None
+        authz_refresh_interval_raw = os.getenv("AUTHZ_REFRESH_INTERVAL_SECONDS", "30")
+        try:
+            authz_refresh_interval = max(5, int(authz_refresh_interval_raw))
+        except (TypeError, ValueError):
+            authz_refresh_interval = 30
 
         async def _lease_reaper_loop() -> None:
             while True:
@@ -83,12 +92,36 @@ def create_app_runtime() -> AppRuntime:
                 await asyncio.sleep(reaper_interval)
 
         app.state.agent = agent
+        app.state.authorization_service = authorization_service
         agent.frontend_library_cache.ensure_libraries()
+
+        async def _authz_refresh_loop() -> None:
+            while True:
+                try:
+                    await asyncio.to_thread(authorization_service.refresh_from_remote)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("authz.policy.refresh_loop_error")
+                await asyncio.sleep(authz_refresh_interval)
+
         if reaper_enabled:
             reaper_task = asyncio.create_task(_lease_reaper_loop())
+        if authorization_service.remote_policy_url:
+            try:
+                await asyncio.to_thread(authorization_service.refresh_from_remote)
+            except Exception:
+                logger.exception("authz.policy.initial_refresh_failed")
+            authz_refresh_task = asyncio.create_task(_authz_refresh_loop())
         try:
             yield
         finally:
+            if authz_refresh_task is not None:
+                authz_refresh_task.cancel()
+                try:
+                    await authz_refresh_task
+                except asyncio.CancelledError:
+                    pass
             if reaper_task is not None:
                 reaper_task.cancel()
                 try:
@@ -117,4 +150,5 @@ def create_app_runtime() -> AppRuntime:
         auth_config=auth_config,
         token_verifier=token_verifier,
         anon_identity_config=anon_identity_config,
+        authorization_service=authorization_service,
     )

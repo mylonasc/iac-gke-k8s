@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOCKER_REGISTRY="${DOCKER_REGISTRY:-docker.io}"
 DOCKERHUB_NAMESPACE="${DOCKERHUB_NAMESPACE:-mylonasc}"
 IMAGE_REPO="${IMAGE_REPO:-magarathea}"
-TAG="${TAG:-0.1.9}"
+TAG="${TAG:-0.1.10}"
 
 IMAGE="${DOCKER_REGISTRY}/${DOCKERHUB_NAMESPACE}/${IMAGE_REPO}:alt-default-ops-console-${TAG}"
 

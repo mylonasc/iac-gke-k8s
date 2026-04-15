@@ -19,10 +19,12 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from .app_factory import create_app_runtime
+from .agent import AuthorizationError
 from .auth import (
     authenticate_request,
     ensure_anonymous_user_id,
 )
+from .authz import AccessContext
 from .logging_config import bind_context, configure_logging
 from .services.sandbox_terminal_service import (
     TerminalConfigurationError,
@@ -130,6 +132,7 @@ agent = runtime.agent
 auth_config = runtime.auth_config
 token_verifier = runtime.token_verifier
 anon_identity_config = runtime.anon_identity_config
+authorization_service = runtime.authorization_service
 
 
 def _as_bool(value: str | None, default: bool = False) -> bool:
@@ -161,6 +164,25 @@ def _request_user_id(request: Request) -> str:
     return user_id
 
 
+def _request_access_context(request: Request) -> AccessContext | None:
+    context = getattr(request.state, "access_context", None)
+    return context if isinstance(context, AccessContext) else None
+
+
+def _require_feature(request: Request, feature: str) -> None:
+    if not auth_config.enabled:
+        return
+    context = _request_access_context(request)
+    if context is None:
+        raise HTTPException(status_code=401, detail="Missing access context")
+    if authorization_service.is_feature_allowed(context, feature):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=f"Not authorized for feature '{feature}'.",
+    )
+
+
 def _claim_email(claims: dict[str, Any]) -> str:
     value = (
         claims.get("email")
@@ -180,9 +202,15 @@ def _claim_groups(claims: dict[str, Any]) -> set[str]:
     return set()
 
 
-def _require_ops_admin(request: Request) -> None:
+def _require_ops_admin(request: Request, *, write: bool = False) -> None:
     user_id = _request_user_id(request)
     if not auth_config.enabled:
+        return
+    feature = "admin.ops.write" if write else "admin.ops.read"
+    context = _request_access_context(request)
+    if context is not None and authorization_service.is_feature_allowed(
+        context, feature
+    ):
         return
     if OPS_ADMIN_ALLOW_ALL_AUTHENTICATED:
         return
@@ -207,7 +235,7 @@ def _require_ops_admin(request: Request) -> None:
         status_code=403,
         detail=(
             "Token is valid but not authorized for admin ops endpoints. "
-            "Configure OPS_ADMIN_* allowlists."
+            f"Missing capability '{feature}' and not present in OPS_ADMIN_* allowlists."
         ),
     )
 
@@ -220,6 +248,11 @@ def _extract_transport_session_id(payload: AssistantTransportRequest) -> str | N
     if isinstance(payload.threadId, str) and payload.threadId:
         return payload.threadId
     return None
+
+
+def _call_with_request_access(request: Request, fn, *args, **kwargs):
+    with agent.bind_access_context(_request_access_context(request)):
+        return fn(*args, **kwargs)
 
 
 def _asset_security_headers(asset: dict[str, Any]) -> dict[str, str]:
@@ -271,6 +304,8 @@ def _open_terminal_or_raise(
 ) -> dict[str, Any]:
     try:
         opened = agent.open_session_terminal(session_id, user_id)
+    except AuthorizationError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=404, detail="Session not found") from exc
     except TerminalConfigurationError as exc:
@@ -447,8 +482,9 @@ async def _run_terminal_websocket(
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     try:
+        claims: dict[str, Any] | None = None
         if auth_config.enabled:
-            await authenticate_request(
+            claims = await authenticate_request(
                 request,
                 config=auth_config,
                 verifier=token_verifier,
@@ -461,6 +497,12 @@ async def auth_middleware(request: Request, call_next):
             request.state.auth_user_id = user_id
             request.state.auth_subject = user_id
             request.state.anon_identity_cookie = signed_cookie
+        user_id = str(getattr(request.state, "auth_user_id", "") or "").strip()
+        request.state.access_context = authorization_service.build_access_context(
+            user_id=user_id,
+            claims=claims,
+            authenticated=bool(auth_config.enabled),
+        )
     except HTTPException as exc:
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
     response = await call_next(request)
@@ -535,12 +577,15 @@ async def chat(payload: ChatRequest, request: Request) -> dict:
     user_id = _request_user_id(request)
     try:
         with bind_context(session_id=payload.session_id):
-            result = await asyncio.to_thread(
-                agent.chat,
-                user_message=payload.message,
-                session_id=payload.session_id,
-                user_id=user_id,
-            )
+            with agent.bind_access_context(_request_access_context(request)):
+                result = await asyncio.to_thread(
+                    agent.chat,
+                    user_message=payload.message,
+                    session_id=payload.session_id,
+                    user_id=user_id,
+                )
+    except AuthorizationError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=404, detail="Session not found") from exc
 
@@ -560,12 +605,15 @@ async def chat(payload: ChatRequest, request: Request) -> dict:
 @app.post("/api/assistant")
 async def assistant(payload: AssistantTransportRequest, request: Request):
     user_id = _request_user_id(request)
+    access_context = _request_access_context(request)
     existing_session_id = _extract_transport_session_id(payload)
-    if existing_session_id and not agent.get_session(existing_session_id, user_id):
-        raise HTTPException(status_code=404, detail="Session not found")
+    with agent.bind_access_context(access_context):
+        if existing_session_id and not agent.get_session(existing_session_id, user_id):
+            raise HTTPException(status_code=404, detail="Session not found")
 
     async def run_callback(controller):
-        await agent.run_assistant_transport(payload, controller, user_id)
+        with agent.bind_access_context(access_context):
+            await agent.run_assistant_transport(payload, controller, user_id)
 
     stream = create_run(run_callback, state=payload.state)
     return DataStreamResponse(stream)
@@ -574,36 +622,43 @@ async def assistant(payload: AssistantTransportRequest, request: Request):
 @app.get("/api/state")
 def state(request: Request) -> dict:
     user_id = _request_user_id(request)
-    return agent.get_state_summary(user_id=user_id)
+    return _call_with_request_access(request, agent.get_state_summary, user_id=user_id)
 
 
 @app.get("/api/me")
-def me(request: Request) -> dict[str, str]:
+def me(request: Request) -> dict[str, Any]:
     user_id = _request_user_id(request)
-    profile = agent.get_user_profile(user_id)
+    profile = _call_with_request_access(request, agent.get_user_profile, user_id)
+    access_context = _request_access_context(request)
+    authz_snapshot = authorization_service.policy_snapshot()
     return {
         "user_id": user_id,
         "tier": str(profile.get("tier") or "default"),
+        "roles": list(access_context.roles) if access_context is not None else [],
+        "capabilities": (
+            list(access_context.capabilities) if access_context is not None else []
+        ),
+        "authz_policy_sha256": str(authz_snapshot.get("sha256") or ""),
     }
 
 
 @app.get("/api/config")
 def get_config(request: Request) -> dict:
     user_id = _request_user_id(request)
-    return agent.get_runtime_config(user_id)
+    return _call_with_request_access(request, agent.get_runtime_config, user_id)
 
 
 @app.get("/api/workspace")
 def get_workspace(request: Request) -> dict[str, Any]:
     user_id = _request_user_id(request)
-    workspace = agent.get_workspace(user_id)
+    workspace = _call_with_request_access(request, agent.get_workspace, user_id)
     return {"workspace": workspace}
 
 
 @app.get("/api/workspace/status")
 def get_workspace_status(request: Request) -> dict[str, Any]:
     user_id = _request_user_id(request)
-    return agent.get_workspace_status(user_id)
+    return _call_with_request_access(request, agent.get_workspace_status, user_id)
 
 
 @app.post("/api/workspace")
@@ -612,11 +667,14 @@ def ensure_workspace(
 ) -> dict[str, Any]:
     user_id = _request_user_id(request)
     try:
-        if payload.wait:
-            workspace = agent.ensure_workspace(user_id)
-            return {"workspace": workspace, "started": False}
-        workspace, started = agent.ensure_workspace_async(user_id)
-        return {"workspace": workspace, "started": started}
+        with agent.bind_access_context(_request_access_context(request)):
+            if payload.wait:
+                workspace = agent.ensure_workspace(user_id)
+                return {"workspace": workspace, "started": False}
+            workspace, started = agent.ensure_workspace_async(user_id)
+            return {"workspace": workspace, "started": started}
+    except AuthorizationError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -629,7 +687,14 @@ def delete_workspace(
 ) -> dict[str, Any]:
     user_id = _request_user_id(request)
     try:
-        deleted = agent.delete_workspace(user_id, delete_data=payload.delete_data)
+        deleted = _call_with_request_access(
+            request,
+            agent.delete_workspace,
+            user_id,
+            delete_data=payload.delete_data,
+        )
+    except AuthorizationError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"deleted": deleted, "delete_data": payload.delete_data}
@@ -639,23 +704,24 @@ def delete_workspace(
 def update_config(payload: ConfigUpdateRequest, request: Request) -> dict:
     user_id = _request_user_id(request)
     try:
-        result = agent.update_runtime_config(
-            user_id=user_id,
-            agent=payload.agent,
-            toolkits=payload.toolkits,
-            model=payload.model,
-            max_tool_calls_per_turn=payload.max_tool_calls_per_turn,
-            sandbox_mode=payload.sandbox_mode,
-            sandbox_profile=payload.sandbox_profile,
-            sandbox_api_url=payload.sandbox_api_url,
-            sandbox_template_name=payload.sandbox_template_name,
-            sandbox_namespace=payload.sandbox_namespace,
-            sandbox_server_port=payload.sandbox_server_port,
-            sandbox_max_output_chars=payload.sandbox_max_output_chars,
-            sandbox_local_timeout_seconds=payload.sandbox_local_timeout_seconds,
-            sandbox_execution_model=payload.sandbox_execution_model,
-            sandbox_session_idle_ttl_seconds=payload.sandbox_session_idle_ttl_seconds,
-        )
+        with agent.bind_access_context(_request_access_context(request)):
+            result = agent.update_runtime_config(
+                user_id=user_id,
+                agent=payload.agent,
+                toolkits=payload.toolkits,
+                model=payload.model,
+                max_tool_calls_per_turn=payload.max_tool_calls_per_turn,
+                sandbox_mode=payload.sandbox_mode,
+                sandbox_profile=payload.sandbox_profile,
+                sandbox_api_url=payload.sandbox_api_url,
+                sandbox_template_name=payload.sandbox_template_name,
+                sandbox_namespace=payload.sandbox_namespace,
+                sandbox_server_port=payload.sandbox_server_port,
+                sandbox_max_output_chars=payload.sandbox_max_output_chars,
+                sandbox_local_timeout_seconds=payload.sandbox_local_timeout_seconds,
+                sandbox_execution_model=payload.sandbox_execution_model,
+                sandbox_session_idle_ttl_seconds=payload.sandbox_session_idle_ttl_seconds,
+            )
         logger.info(
             "config.updated",
             extra={
@@ -668,6 +734,8 @@ def update_config(payload: ConfigUpdateRequest, request: Request) -> dict:
             },
         )
         return result
+    except AuthorizationError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         logger.warning(
             "config.update_failed",
@@ -732,7 +800,14 @@ def get_session_sandbox_status(session_id: str, request: Request) -> dict[str, A
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     try:
-        return agent.get_session_sandbox_status(session_id, user_id)
+        return _call_with_request_access(
+            request,
+            agent.get_session_sandbox_status,
+            session_id,
+            user_id,
+        )
+    except AuthorizationError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except PermissionError:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -746,8 +821,15 @@ def get_session_sandbox_policy(session_id: str, request: Request) -> dict[str, A
     try:
         return {
             "session_id": session_id,
-            "sandbox_policy": agent.get_session_sandbox_policy(session_id, user_id),
+            "sandbox_policy": _call_with_request_access(
+                request,
+                agent.get_session_sandbox_policy,
+                session_id,
+                user_id,
+            ),
         }
+    except AuthorizationError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except PermissionError:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -763,14 +845,17 @@ def patch_session_sandbox_policy(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     try:
-        result = agent.update_session_sandbox_policy(
-            session_id,
-            user_id,
-            payload.model_dump(exclude={"clear"}, exclude_none=True),
-            clear=payload.clear,
-        )
-        result["status"] = agent.get_session_sandbox_status(session_id, user_id)
-        return result
+        with agent.bind_access_context(_request_access_context(request)):
+            result = agent.update_session_sandbox_policy(
+                session_id,
+                user_id,
+                payload.model_dump(exclude={"clear"}, exclude_none=True),
+                clear=payload.clear,
+            )
+            result["status"] = agent.get_session_sandbox_status(session_id, user_id)
+            return result
+    except AuthorizationError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except PermissionError:
         raise HTTPException(status_code=404, detail="Session not found")
     except ValueError as exc:
@@ -788,12 +873,16 @@ def session_sandbox_action(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     try:
-        return agent.perform_session_sandbox_action(
+        return _call_with_request_access(
+            request,
+            agent.perform_session_sandbox_action,
             session_id,
             user_id,
             action=payload.action,
             wait=payload.wait,
         )
+    except AuthorizationError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except PermissionError:
         raise HTTPException(status_code=404, detail="Session not found")
     except ValueError as exc:
@@ -802,15 +891,17 @@ def session_sandbox_action(
 
 @app.post("/api/sessions/{session_id}/sandbox/terminal/open")
 def open_session_terminal(session_id: str, request: Request) -> dict[str, Any]:
+    _require_feature(request, "terminal.open")
     user_id = _request_user_id(request)
     session = agent.get_session(session_id, user_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    return _open_terminal_or_raise(
-        session_id=session_id,
-        user_id=user_id,
-        dev_mode=False,
-    )
+    with agent.bind_access_context(_request_access_context(request)):
+        return _open_terminal_or_raise(
+            session_id=session_id,
+            user_id=user_id,
+            dev_mode=False,
+        )
 
 
 @app.delete("/api/sessions/{session_id}/sandbox/terminal/{terminal_id}")
@@ -846,15 +937,17 @@ async def session_terminal_websocket(
 
 @app.post("/api/dev/sessions/{session_id}/terminal/open")
 def open_session_terminal_dev(session_id: str, request: Request) -> dict[str, Any]:
+    _require_feature(request, "terminal.open")
     user_id = _request_user_id(request)
     session = agent.get_session(session_id, user_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    return _open_terminal_or_raise(
-        session_id=session_id,
-        user_id=user_id,
-        dev_mode=True,
-    )
+    with agent.bind_access_context(_request_access_context(request)):
+        return _open_terminal_or_raise(
+            session_id=session_id,
+            user_id=user_id,
+            dev_mode=True,
+        )
 
 
 @app.delete("/api/dev/sessions/{session_id}/terminal/{terminal_id}")
@@ -1012,14 +1105,16 @@ def download_public_asset(share_id: str, asset_id: str):
 
 
 @app.get("/api/sandboxes")
-def list_sandboxes() -> dict[str, Any]:
+def list_sandboxes(request: Request) -> dict[str, Any]:
     """List active sandbox lease records."""
+    _require_ops_admin(request)
     return {"sandboxes": agent.list_sandboxes()}
 
 
 @app.get("/api/sandboxes/{lease_id}")
-def get_sandbox(lease_id: str) -> dict[str, Any]:
+def get_sandbox(lease_id: str, request: Request) -> dict[str, Any]:
     """Fetch one sandbox lease record by id."""
+    _require_ops_admin(request)
     sandbox = agent.get_sandbox(lease_id)
     if not sandbox:
         raise HTTPException(status_code=404, detail="Sandbox lease not found")
@@ -1027,8 +1122,9 @@ def get_sandbox(lease_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/sandboxes/{lease_id}/release", response_model=SandboxReleaseResponse)
-def release_sandbox(lease_id: str) -> SandboxReleaseResponse:
+def release_sandbox(lease_id: str, request: Request) -> SandboxReleaseResponse:
     """Release a currently active sandbox lease."""
+    _require_ops_admin(request, write=True)
     released = agent.release_sandbox(lease_id)
     if not released:
         raise HTTPException(status_code=404, detail="Sandbox lease not found")

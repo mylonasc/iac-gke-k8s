@@ -1,8 +1,10 @@
 import asyncio
 import copy
+import contextvars
 import inspect
 import json
 import os
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -50,6 +52,7 @@ from .services.workspace_models import WorkspaceInfraConfig
 from .services.workspace_provisioning_service import WorkspaceProvisioningService
 from .services.workspace_service import WorkspaceService
 from .session_store import SessionStore
+from .authz import AccessContext, AuthorizationPolicyService
 
 
 def _parse_iso_datetime(value: Any) -> datetime | None:
@@ -87,10 +90,22 @@ def _csv_values(raw: str | None) -> list[str]:
     return values
 
 
+class AuthorizationError(RuntimeError):
+    """Raised when a request is authenticated but lacks required capability."""
+
+
 class SandboxedReactAgent:
     """Application facade that composes runtime, services, and toolkit providers."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        authorization_service: AuthorizationPolicyService | None = None,
+    ) -> None:
+        self.authorization_service = authorization_service
+        self._access_context_var: contextvars.ContextVar[AccessContext | None] = (
+            contextvars.ContextVar("authz_access_context", default=None)
+        )
         self.allow_local_sandbox_mode = str(
             os.getenv("SANDBOX_ALLOW_LOCAL_MODE", "")
         ).strip().lower() in {"1", "true", "yes", "on"}
@@ -453,8 +468,125 @@ class SandboxedReactAgent:
             claim_namespace=namespace,
         )
 
+    @contextmanager
+    def bind_access_context(self, access_context: AccessContext | None):
+        access_var = getattr(self, "_access_context_var", None)
+        if access_var is None:
+            yield
+            return
+        token = access_var.set(access_context)
+        try:
+            yield
+        finally:
+            access_var.reset(token)
+
+    def _active_access_context(self, user_id: str) -> AccessContext | None:
+        access_var = getattr(self, "_access_context_var", None)
+        if access_var is None:
+            return None
+        context = access_var.get()
+        if context is None:
+            return None
+        if str(context.user_id or "").strip() != str(user_id or "").strip():
+            return None
+        return context
+
+    def _authorized_values(
+        self,
+        context: AccessContext | None,
+        *,
+        category: str,
+        candidates: list[str],
+    ) -> list[str]:
+        authorization_service = getattr(self, "authorization_service", None)
+        if authorization_service is None:
+            return list(dict.fromkeys(candidates))
+        return authorization_service.filter_sandbox_values(
+            context,
+            category=category,
+            values=candidates,
+        )
+
+    def _constrain_runtime_context_for_access(
+        self,
+        user_id: str,
+        runtime_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        context = self._active_access_context(user_id)
+        if context is None:
+            return runtime_context
+
+        merged = copy.deepcopy(runtime_context)
+        sandbox_toolkit = merged.setdefault("toolkits", {}).setdefault("sandbox", {})
+        sandbox_runtime = sandbox_toolkit.setdefault("runtime", {})
+        sandbox_lifecycle = sandbox_toolkit.setdefault("lifecycle", {})
+
+        mode_candidates = ["cluster"] + (
+            ["local"] if self.allow_local_sandbox_mode else []
+        )
+        allowed_modes = self._authorized_values(
+            context,
+            category="modes",
+            candidates=mode_candidates,
+        )
+        current_mode = str(sandbox_runtime.get("mode") or "cluster").strip().lower()
+        if allowed_modes and current_mode not in {
+            item.lower() for item in allowed_modes
+        }:
+            sandbox_runtime["mode"] = allowed_modes[0]
+
+        profile_candidates = ["persistent_workspace", "transient"]
+        allowed_profiles = self._authorized_values(
+            context,
+            category="profiles",
+            candidates=profile_candidates,
+        )
+        current_profile = (
+            str(sandbox_runtime.get("profile") or "persistent_workspace")
+            .strip()
+            .lower()
+        )
+        if allowed_profiles and current_profile not in {
+            item.lower() for item in allowed_profiles
+        }:
+            sandbox_runtime["profile"] = allowed_profiles[0]
+
+        execution_model_candidates = ["session", "ephemeral"]
+        allowed_execution_models = self._authorized_values(
+            context,
+            category="execution_models",
+            candidates=execution_model_candidates,
+        )
+        current_execution_model = (
+            str(sandbox_lifecycle.get("execution_model") or "session").strip().lower()
+        )
+        if allowed_execution_models and current_execution_model not in {
+            item.lower() for item in allowed_execution_models
+        }:
+            sandbox_lifecycle["execution_model"] = allowed_execution_models[0]
+
+        template_candidates = [
+            str(sandbox_runtime.get("template_name") or "").strip(),
+            self.sandbox_manager.template_name,
+            *self.workspace_base_template_names(),
+        ]
+        template_candidates = [
+            candidate for candidate in template_candidates if candidate
+        ]
+        allowed_templates = self._authorized_values(
+            context,
+            category="templates",
+            candidates=template_candidates,
+        )
+        current_template = str(sandbox_runtime.get("template_name") or "").strip()
+        if allowed_templates and current_template not in set(allowed_templates):
+            sandbox_runtime["template_name"] = allowed_templates[0]
+
+        return merged
+
     def _runtime_context_for_user(self, user_id: str) -> dict[str, Any]:
-        return self._runtime_config_service.resolve_user_runtime_config(user_id)
+        runtime = self._runtime_config_service.resolve_user_runtime_config(user_id)
+        return self._constrain_runtime_context_for_access(user_id, runtime)
 
     def _apply_session_sandbox_policy(
         self, runtime_config: dict[str, Any], sandbox_policy: dict[str, Any]
@@ -503,6 +635,39 @@ class SandboxedReactAgent:
         if session.user_id != user_id:
             return runtime
         return self._apply_session_sandbox_policy(runtime, session.sandbox_policy)
+
+    def _assert_authorized_sandbox_value(
+        self,
+        user_id: str,
+        *,
+        category: str,
+        value: Any,
+    ) -> None:
+        normalized = str(value or "").strip()
+        if not normalized:
+            return
+        access_context = self._active_access_context(user_id)
+        authorization_service = getattr(self, "authorization_service", None)
+        if authorization_service is None or access_context is None:
+            return
+        if authorization_service.is_sandbox_value_allowed(
+            access_context,
+            category=category,
+            value=normalized,
+        ):
+            return
+        raise AuthorizationError(
+            f"Not authorized to use sandbox {category.rstrip('s')} '{normalized}'."
+        )
+
+    def _assert_authorized_feature(self, user_id: str, feature: str) -> None:
+        access_context = self._active_access_context(user_id)
+        authorization_service = getattr(self, "authorization_service", None)
+        if authorization_service is None or access_context is None:
+            return
+        if authorization_service.is_feature_allowed(access_context, feature):
+            return
+        raise AuthorizationError(f"Not authorized for feature '{feature}'.")
 
     def _sandbox_runtime_context(
         self, runtime_context: dict[str, Any]
@@ -553,6 +718,31 @@ class SandboxedReactAgent:
                 current_policy.pop(key, None)
                 continue
             current_policy[key] = value
+
+        if "mode" in current_policy:
+            self._assert_authorized_sandbox_value(
+                user_id,
+                category="modes",
+                value=current_policy.get("mode"),
+            )
+        if "profile" in current_policy:
+            self._assert_authorized_sandbox_value(
+                user_id,
+                category="profiles",
+                value=current_policy.get("profile"),
+            )
+        if "template_name" in current_policy:
+            self._assert_authorized_sandbox_value(
+                user_id,
+                category="templates",
+                value=current_policy.get("template_name"),
+            )
+        if "execution_model" in current_policy:
+            self._assert_authorized_sandbox_value(
+                user_id,
+                category="execution_models",
+                value=current_policy.get("execution_model"),
+            )
 
         # Validate by attempting to apply to resolved runtime.
         self._apply_session_sandbox_policy(
@@ -618,6 +808,7 @@ class SandboxedReactAgent:
         ]
 
     def list_available_sandboxes(self, user_id: str) -> dict[str, Any]:
+        access_context = self._active_access_context(user_id)
         runtime = self._runtime_context_for_user(user_id)
         sandbox_runtime = ((runtime.get("toolkits") or {}).get("sandbox") or {}).get(
             "runtime"
@@ -626,16 +817,63 @@ class SandboxedReactAgent:
             sandbox_runtime.get("namespace") or self.sandbox_manager.namespace
         )
         workspace_base_templates = self.workspace_base_template_names()
+
+        profiles = self._authorized_values(
+            access_context,
+            category="profiles",
+            candidates=["persistent_workspace", "transient"],
+        )
+        execution_models = self._authorized_values(
+            access_context,
+            category="execution_models",
+            candidates=["session", "ephemeral"],
+        )
+        modes = self._authorized_values(
+            access_context,
+            category="modes",
+            candidates=["cluster"]
+            + (["local"] if self.allow_local_sandbox_mode else []),
+        )
+        templates = self._available_cluster_templates(namespace)
+        allowed_template_names = set(
+            self._authorized_values(
+                access_context,
+                category="templates",
+                candidates=[
+                    str(item.get("name") or "")
+                    for item in templates
+                    if str(item.get("name") or "").strip()
+                ],
+            )
+        )
+        filtered_templates = [
+            item
+            for item in templates
+            if str(item.get("name") or "") in allowed_template_names
+        ]
+        allowed_workspace_base_templates = set(
+            self._authorized_values(
+                access_context,
+                category="templates",
+                candidates=workspace_base_templates,
+            )
+        )
+        filtered_workspace_base_templates = [
+            item
+            for item in workspace_base_templates
+            if item in allowed_workspace_base_templates
+        ]
+
         return {
-            "profiles": ["persistent_workspace", "transient"],
-            "execution_models": ["session", "ephemeral"],
-            "modes": ["cluster"] + (["local"] if self.allow_local_sandbox_mode else []),
-            "templates": self._available_cluster_templates(namespace),
+            "profiles": profiles,
+            "execution_models": execution_models,
+            "modes": modes,
+            "templates": filtered_templates,
             "persistent_workspace": {
-                "base_templates": workspace_base_templates,
+                "base_templates": filtered_workspace_base_templates,
                 "primary_base_template": (
-                    workspace_base_templates[0]
-                    if workspace_base_templates
+                    filtered_workspace_base_templates[0]
+                    if filtered_workspace_base_templates
                     else self.sandbox_manager.template_name
                 ),
             },
@@ -680,6 +918,64 @@ class SandboxedReactAgent:
         sandbox_execution_model: str | None = None,
         sandbox_session_idle_ttl_seconds: int | None = None,
     ) -> dict[str, Any]:
+        if sandbox_mode is not None:
+            self._assert_authorized_sandbox_value(
+                user_id,
+                category="modes",
+                value=sandbox_mode,
+            )
+        if sandbox_profile is not None:
+            self._assert_authorized_sandbox_value(
+                user_id,
+                category="profiles",
+                value=sandbox_profile,
+            )
+        if sandbox_template_name is not None:
+            self._assert_authorized_sandbox_value(
+                user_id,
+                category="templates",
+                value=sandbox_template_name,
+            )
+        if sandbox_execution_model is not None:
+            self._assert_authorized_sandbox_value(
+                user_id,
+                category="execution_models",
+                value=sandbox_execution_model,
+            )
+
+        sandbox_toolkit_updates = (
+            toolkits.get("sandbox") if isinstance(toolkits, dict) else None
+        )
+        if isinstance(sandbox_toolkit_updates, dict):
+            runtime_updates = sandbox_toolkit_updates.get("runtime")
+            if isinstance(runtime_updates, dict):
+                if runtime_updates.get("mode") is not None:
+                    self._assert_authorized_sandbox_value(
+                        user_id,
+                        category="modes",
+                        value=runtime_updates.get("mode"),
+                    )
+                if runtime_updates.get("profile") is not None:
+                    self._assert_authorized_sandbox_value(
+                        user_id,
+                        category="profiles",
+                        value=runtime_updates.get("profile"),
+                    )
+                if runtime_updates.get("template_name") is not None:
+                    self._assert_authorized_sandbox_value(
+                        user_id,
+                        category="templates",
+                        value=runtime_updates.get("template_name"),
+                    )
+            lifecycle_updates = sandbox_toolkit_updates.get("lifecycle")
+            if isinstance(lifecycle_updates, dict):
+                if lifecycle_updates.get("execution_model") is not None:
+                    self._assert_authorized_sandbox_value(
+                        user_id,
+                        category="execution_models",
+                        value=lifecycle_updates.get("execution_model"),
+                    )
+
         return self._runtime_config_service.update_runtime_config(
             user_id=user_id,
             agent=agent,
@@ -1417,6 +1713,7 @@ class SandboxedReactAgent:
         session = self.sessions.get(session_id)
         if not session or session.user_id != user_id:
             raise PermissionError("Session not found")
+        self._assert_authorized_feature(user_id, "terminal.open")
         runtime_context = self._runtime_context_for_session(user_id, session_id)
         runtime_config = self._sandbox_runtime_context(runtime_context)
         return self._sandbox_terminal.open_terminal(
@@ -1646,7 +1943,8 @@ class SandboxedReactAgent:
         return self.list_available_sandboxes(user_id)
 
     def open_interactive_shell_for_tools(self, session_id: str) -> dict[str, Any]:
-        self._tool_user_id_for_session(session_id)
+        user_id = self._tool_user_id_for_session(session_id)
+        self._assert_authorized_feature(user_id, "terminal.open")
         return {
             "session_id": session_id,
             "open_terminal_path": f"/api/sessions/{session_id}/sandbox/terminal/open",

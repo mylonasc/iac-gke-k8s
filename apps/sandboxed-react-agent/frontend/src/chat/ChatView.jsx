@@ -33,6 +33,7 @@ export function ChatView({
   apiBase,
   session,
   config,
+  canOpenTerminal = true,
   onResetSession,
   onRefreshSandboxStatus,
   onUpdateSessionSandboxPolicy,
@@ -85,6 +86,7 @@ export function ChatView({
 
   useEffect(() => {
     const onOpenTerminal = (event) => {
+      if (!canOpenTerminal) return;
       const detail = event?.detail || {};
       const targetSessionId = typeof detail.sessionId === "string" ? detail.sessionId : "";
       if (!session?.session_id || (targetSessionId && targetSessionId !== session.session_id)) {
@@ -94,7 +96,7 @@ export function ChatView({
     };
     window.addEventListener("sra-open-session-terminal", onOpenTerminal);
     return () => window.removeEventListener("sra-open-session-terminal", onOpenTerminal);
-  }, [session?.session_id]);
+  }, [canOpenTerminal, session?.session_id]);
 
   const threadComponents = useMemo(
     () => ({ UserMessage, AssistantMessage }),
@@ -258,14 +260,16 @@ export function ChatView({
         >
           Reconcile workspace
         </button>
-        <button
-          type="button"
-          className="btn btn-subtle tiny"
-          disabled={!session?.session_id}
-          onClick={() => setShowTerminal(true)}
-        >
-          Open terminal
-        </button>
+        {canOpenTerminal ? (
+          <button
+            type="button"
+            className="btn btn-subtle tiny"
+            disabled={!session?.session_id}
+            onClick={() => setShowTerminal(true)}
+          >
+            Open terminal
+          </button>
+        ) : null}
       </div>
       <div className="sandbox-policy-row">
         <p className="sandbox-policy-hint">
@@ -354,7 +358,7 @@ export function ChatView({
                 Advanced sandbox controls
               </button>
             ) : null}
-            {!readOnly ? (
+            {!readOnly && canOpenTerminal ? (
               <button
                 type="button"
                 className="btn btn-subtle"
@@ -474,7 +478,7 @@ export function ChatView({
           </section>
         </div>
       ) : null}
-      {!readOnly && showTerminal ? (
+      {!readOnly && canOpenTerminal && showTerminal ? (
         <div
           className="sandbox-tools-backdrop"
           role="presentation"

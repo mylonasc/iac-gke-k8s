@@ -195,6 +195,38 @@ least one allowlist in shared environments:
 - `OPS_ADMIN_GROUP_ALLOWLIST` (comma-separated)
 - optional: `OPS_ADMIN_ALLOW_ALL_AUTHENTICATED=1` for trusted dev environments
 
+Authorization policy is now YAML-driven and can be sourced from either local disk
+or a dedicated authz control-plane backend:
+
+- `AUTHZ_POLICY_PATH` (default: `/app/data/authz-policy.yaml`)
+- optional: `AUTHZ_POLICY_URL` (for periodic remote refresh, e.g. authz service)
+- optional: `AUTHZ_REFRESH_INTERVAL_SECONDS` (default: `30`)
+- optional: `AUTHZ_REMOTE_TIMEOUT_SECONDS` (default: `3`)
+
+Default policy template:
+
+- `apps/sandboxed-react-agent/backend/config/authz-policy.default.yaml`
+
+Standalone authz control plane component:
+
+- `apps/sandboxed-react-agent-authz/`
+
+Kubernetes manifests for authz control plane:
+
+- `apps/sandboxed-react-agent-authz/k8s/backend-pvc.yaml`
+- `apps/sandboxed-react-agent-authz/k8s/backend-deployment.yaml`
+- `apps/sandboxed-react-agent-authz/k8s/backend-service.yaml`
+- `apps/sandboxed-react-agent-authz/k8s/frontend-deployment.yaml`
+- `apps/sandboxed-react-agent-authz/k8s/frontend-service.yaml`
+- `apps/sandboxed-react-agent-authz/k8s/ingress.yaml`
+
+Policy feature gates currently used by backend APIs:
+
+- `terminal.open`
+- `admin.ops.read`
+- `admin.ops.write`
+- `authz.policy.manage`
+
 Session ownership is now scoped per authenticated user id claim. By default,
 the backend stores and filters sessions by JWT `sub`.
 

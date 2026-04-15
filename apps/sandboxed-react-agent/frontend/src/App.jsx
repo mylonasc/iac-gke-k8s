@@ -84,7 +84,15 @@ export default function App() {
     theme,
     userId,
     userTier,
+    userCapabilities,
   } = useAppState();
+
+  const capabilitySet = useMemo(
+    () => new Set(Array.isArray(userCapabilities) ? userCapabilities : []),
+    [userCapabilities]
+  );
+  const canOpenTerminal = capabilitySet.has("terminal.open");
+  const canViewAdminOps = capabilitySet.has("admin.ops.read");
 
   const showTerminalDevPanel = useMemo(() => {
     if (typeof window === "undefined") return false;
@@ -180,6 +188,7 @@ export default function App() {
                 apiBase={apiBase}
                 session={activeSession}
                 config={config}
+                canOpenTerminal={canOpenTerminal}
                 onResetSession={handleResetSession}
                 onRefreshSandboxStatus={loadSessionSandboxStatus}
                 onUpdateSessionSandboxPolicy={updateSessionSandboxPolicy}
@@ -202,6 +211,8 @@ export default function App() {
               configSaving={configSaving}
               configError={configError}
               configMessage={configMessage}
+              canViewAdminOps={canViewAdminOps}
+              authzConsoleUrl="/sandboxed-react-agent-authz/"
               adminOpsData={adminOpsData}
               adminOpsError={adminOpsError}
               adminOpsLoading={adminOpsLoading}
@@ -241,6 +252,8 @@ export default function App() {
           configSaving={configSaving}
           configError={configError}
           configMessage={configMessage}
+          canViewAdminOps={canViewAdminOps}
+          authzConsoleUrl="/sandboxed-react-agent-authz/"
           adminOpsData={adminOpsData}
           adminOpsError={adminOpsError}
           adminOpsLoading={adminOpsLoading}

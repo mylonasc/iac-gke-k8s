@@ -1071,6 +1071,12 @@ code {
   margin: 0;
 }
 
+.settings-inline-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
 .admin-ops-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(220px, 1fr));

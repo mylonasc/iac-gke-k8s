@@ -35,6 +35,8 @@ export function useAppState() {
   const [config, setConfig] = useState(defaultConfig);
   const [userId, setUserId] = useState("");
   const [userTier, setUserTier] = useState("default");
+  const [userRoles, setUserRoles] = useState([]);
+  const [userCapabilities, setUserCapabilities] = useState([]);
   const [theme, setTheme] = useState(() => {
     if (typeof window === "undefined") return "light";
     return window.localStorage.getItem(THEME_STORAGE_KEY) || "light";
@@ -285,6 +287,8 @@ export function useAppState() {
     if (isSharedView) {
       setUserId("");
       setUserTier("default");
+      setUserRoles([]);
+      setUserCapabilities([]);
       return;
     }
     apiFetch(`${apiBase}/me`)
@@ -292,10 +296,14 @@ export function useAppState() {
       .then((data) => {
         setUserId(typeof data?.user_id === "string" ? data.user_id : "");
         setUserTier(typeof data?.tier === "string" && data.tier ? data.tier : "default");
+        setUserRoles(Array.isArray(data?.roles) ? data.roles : []);
+        setUserCapabilities(Array.isArray(data?.capabilities) ? data.capabilities : []);
       })
       .catch(() => {
         setUserId("");
         setUserTier("default");
+        setUserRoles([]);
+        setUserCapabilities([]);
       });
   }, [apiBase, isSharedView]);
 
@@ -453,6 +461,8 @@ export function useAppState() {
     tab,
     theme,
     userId,
+    userRoles,
     userTier,
+    userCapabilities,
   };
 }

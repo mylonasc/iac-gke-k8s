@@ -177,6 +177,12 @@ async def authenticate_request(
         )
         raise HTTPException(status_code=401, detail="Invalid token") from exc
 
+    groups_header = (request.headers.get("x-auth-request-groups") or "").strip()
+    if groups_header and not claims.get("groups"):
+        claims["groups"] = [
+            item.strip() for item in groups_header.split(",") if item.strip()
+        ]
+
     request.state.auth_claims = claims
     user_id = str(claims.get(config.user_id_claim) or "").strip()
     if not user_id:
