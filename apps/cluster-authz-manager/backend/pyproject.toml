@@ -1,0 +1,20 @@
+[project]
+name = "cluster-authz-manager"
+version = "0.1.6"
+description = "Centralized authorization and role management for cluster applications"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "sqlalchemy>=2.0.36",
+    "pydantic-settings>=2.6.1",
+    "python-multipart>=0.0.12",
+    "pyjwt[crypto]>=2.10.0",
+    "httpx>=0.28.0",
+    "pyyaml>=6.0.2",
+    "python-dotenv>=1.0.1",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"

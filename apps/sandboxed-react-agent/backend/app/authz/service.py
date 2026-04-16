@@ -199,6 +199,8 @@ class _ResolvedPolicy:
     default_roles_authenticated: tuple[str, ...]
     default_roles_unauthenticated: tuple[str, ...]
     role_mappings_groups: dict[str, tuple[str, ...]]
+    role_mappings_user_ids: dict[str, tuple[str, ...]]
+    role_mappings_emails: dict[str, tuple[str, ...]]
     role_capabilities: dict[str, tuple[str, ...]]
     feature_rules: dict[str, _Rule]
     sandbox_template_rules: dict[str, _Rule]
@@ -225,19 +227,16 @@ def _parse_policy(raw: Any) -> _ResolvedPolicy:
     role_mappings = (
         raw.get("role_mappings") if isinstance(raw.get("role_mappings"), dict) else {}
     )
-    groups_map_raw = (
-        role_mappings.get("groups")
-        if isinstance(role_mappings.get("groups"), dict)
-        else {}
-    )
-    role_mappings_groups: dict[str, tuple[str, ...]] = {}
-    for group_name, roles in groups_map_raw.items():
-        normalized_group = str(group_name or "").strip().lower()
-        if not normalized_group:
-            continue
-        role_mappings_groups[normalized_group] = tuple(
-            item.lower() for item in _as_str_list(roles)
-        )
+    
+    def _parse_mapping(key: str) -> dict[str, tuple[str, ...]]:
+        mapping_raw = role_mappings.get(key) if isinstance(role_mappings.get(key), dict) else {}
+        result: dict[str, tuple[str, ...]] = {}
+        for identifier, roles in mapping_raw.items():
+            normalized_id = str(identifier or "").strip().lower()
+            if not normalized_id:
+                continue
+            result[normalized_id] = tuple(item.lower() for item in _as_str_list(roles))
+        return result
 
     roles_raw = raw.get("roles") if isinstance(raw.get("roles"), dict) else {}
     role_capabilities: dict[str, tuple[str, ...]] = {}
@@ -280,7 +279,9 @@ def _parse_policy(raw: Any) -> _ResolvedPolicy:
         version=version,
         default_roles_authenticated=default_roles_authenticated,
         default_roles_unauthenticated=default_roles_unauthenticated,
-        role_mappings_groups=role_mappings_groups,
+        role_mappings_groups=_parse_mapping("groups"),
+        role_mappings_user_ids=_parse_mapping("user_ids"),
+        role_mappings_emails=_parse_mapping("emails"),
         role_capabilities=role_capabilities,
         feature_rules=feature_rules,
         sandbox_template_rules=_parse_named_rules("templates"),
@@ -449,6 +450,17 @@ class AuthorizationPolicyService:
 
         for group in groups:
             for role in policy.role_mappings_groups.get(group, ()):
+                roles.add(role)
+
+        # Resolve User-specific mappings
+        normalized_user_id = str(user_id or "").strip().lower()
+        if normalized_user_id:
+            for role in policy.role_mappings_user_ids.get(normalized_user_id, ()):
+                roles.add(role)
+                
+        normalized_email = str(claims_dict.get("email") or "").strip().lower()
+        if normalized_email:
+            for role in policy.role_mappings_emails.get(normalized_email, ()):
                 roles.add(role)
 
         roles_claim = claims_dict.get("roles")

@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: cluster-authz-manager-frontend
+  namespace: alt-default
+spec:
+  selector:
+    app: cluster-authz-manager-frontend
+  ports:
+    - port: 80
+      targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster-authz-manager-frontend
+  namespace: alt-default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cluster-authz-manager-frontend
+  template:
+    metadata:
+      labels:
+        app: cluster-authz-manager-frontend
+    spec:
+      imagePullSecrets:
+        - name: dockerhub-regcred
+      tolerations:
+        - key: purpose
+          operator: Equal
+          value: general-apps
+          effect: NoSchedule
+        - key: purpose
+          operator: Equal
+          value: general-apps-small
+          effect: NoSchedule
+        - key: cloud.google.com/gke-spot
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      containers:
+        - name: frontend
+          image: docker.io/mylonasc/magarathea:cluster-authz-manager-frontend-0.1.6
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+          env:
+            - name: BACKEND_UPSTREAM
+              value: "http://cluster-authz-manager-backend:80"
