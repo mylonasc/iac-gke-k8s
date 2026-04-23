@@ -1,0 +1,129 @@
+# Default values for sandboxed-react-agent-backend.
+
+global:
+  gcpProjectId: gke-gpu-project-473410
+
+replicaCount: 1
+
+# Keep stable workload/service names for compatibility
+# with existing frontend and ingress resources.
+fullnameOverride: sandboxed-react-agent-backend
+
+image:
+  repository: docker.io/mylonasc/magarathea
+  tag: "sandboxed-react-agent-backend-0.6.25"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets:
+  - name: dockerhub-regcred
+
+serviceAccount:
+  name: sandbox-workspace-admin-ksa
+
+# Database configuration
+database:
+  # type: sqlite or postgres
+  type: sqlite
+  sqlite:
+    path: /app/data/sessions.db
+    pvc:
+      enabled: true
+      claimName: sandboxed-react-agent-backend-data
+      size: 1Gi
+      storageClass: ""
+  postgres:
+    host: "postgres-db-svc"
+    port: 5432
+    name: "sandboxed_agent"
+    secretName: sandboxed-react-agent-db-credentials
+    # If wireguard is needed to reach the DB
+    wireguard:
+      enabled: true
+      image: linuxserver/wireguard:latest
+      secretName: wg-config
+      onPremIp: "10.8.0.4"
+
+# Application specific configuration
+app:
+  openai:
+    model: gpt-4o-mini
+    secretName: sandboxed-react-agent-secrets
+    apiKeyKey: openai-api-key
+  sandbox:
+    mode: cluster
+    apiUrl: "http://sandbox-router-svc.alt-default.svc.cluster.local:8080"
+    templateName: python-runtime-template-small
+    namespace: alt-default
+    executionModel: session
+    provisioningEnabled: "1"
+    bucketPrefix: "magarathea-sandbox-workspace"
+    allowLocalMode: "0"
+    workspaceBaseTemplateName: python-runtime-template-small
+    workspaceBaseTemplateNames: "python-runtime-template-small,python-runtime-template,python-runtime-template-large,python-runtime-template-pydata"
+    idleTtlSeconds: "300"
+    maxLeaseTtlSeconds: "1800"
+    reaperEnabled: "1"
+    reaperIntervalSeconds: "15"
+    pendingReaperTtlSeconds: "300"
+    maxWorkers: "4"
+  auth:
+    enabled: "1"
+    secretName: sandboxed-react-agent-secrets
+    issuerKey: auth-issuer
+    audienceKey: auth-audience
+    jwksUrlKey: auth-jwks-url
+    userIdClaim: sub
+    exemptPathPrefixes: "/api/health,/api/public/"
+  authz:
+    policyPath: "/app/data/authz-policy.yaml"
+    policyUrl: "http://cluster-authz-manager-backend.alt-default.svc.cluster.local/api/apps/sandboxed-react-agent/policy/current"
+    refreshIntervalSeconds: "30"
+    remoteTimeoutSeconds: "3"
+  ops:
+    adminEmailAllowlist: "mylonas.charilaos@gmail.com"
+    adminGroupAllowlist: ""
+    adminUserIdAllowlist: ""
+    allowAllAuthenticated: "0"
+  anon:
+    enabled: "0"
+    secretName: sandboxed-react-agent-secrets
+    secretKey: anon-identity-secret
+    cookieName: sra_anon_uid
+    cookieSecure: "1"
+    sameSite: lax
+  logging:
+    level: INFO
+    format: json
+    commandPreviewChars: "200"
+  tracing:
+    enabled: "0"
+    sampleRatio: "0.1"
+    serviceName: sandboxed-react-agent-backend
+    otlpEndpoint: ""
+
+# Kubernetes infrastructure
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+tolerations:
+  - key: purpose
+    operator: Equal
+    value: general-apps
+    effect: NoSchedule
+  - key: purpose
+    operator: Equal
+    value: general-apps-small
+    effect: NoSchedule
+  - key: cloud.google.com/gke-spot
+    operator: Equal
+    value: "true"
+    effect: NoSchedule
+
+service:
+  type: ClusterIP
+  port: 80

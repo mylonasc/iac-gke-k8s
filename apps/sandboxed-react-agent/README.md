@@ -562,6 +562,65 @@ The app deployments are configured to use `imagePullSecrets: [dockerhub-regcred]
 
 ## Deploy
 
+### Backend with Helm (recommended)
+
+The backend now has a Helm chart at `apps/sandboxed-react-agent/helm/backend`.
+
+1. Ensure required postgres + WireGuard secrets exist in `alt-default`:
+
+```bash
+cp apps/sandboxed-react-agent/k8s/postgres-db-credentials.secret.example.yaml /tmp/postgres-db-credentials.secret.yaml
+cp apps/sandboxed-react-agent/k8s/wg-config.secret.example.yaml /tmp/wg-config.secret.yaml
+
+# Edit placeholders before apply:
+# - username/password in postgres-db-credentials.secret.yaml
+# - wg0.conf values in wg-config.secret.yaml
+
+kubectl apply -f /tmp/postgres-db-credentials.secret.yaml
+kubectl apply -f /tmp/wg-config.secret.yaml
+```
+
+2. Install/upgrade backend in sqlite mode first:
+
+```bash
+helm upgrade --install sandboxed-react-agent-backend \
+  ./apps/sandboxed-react-agent/helm/backend \
+  -n alt-default
+```
+
+If backend resources already exist from `kubectl apply`, include `--take-ownership`
+on the first Helm run.
+
+3. Switch to postgres mode once VPN/DB reachability is verified:
+
+```bash
+# Option A: inline toggle
+helm upgrade --install sandboxed-react-agent-backend \
+  ./apps/sandboxed-react-agent/helm/backend \
+  -n alt-default \
+  --set database.type=postgres
+
+# Option B: use example postgres+WireGuard overrides file
+# (copy it and set your DB/VPN values first)
+# cp apps/sandboxed-react-agent/helm/backend/values.postgres-wireguard.example.yaml /tmp/sra-postgres-values.yaml
+# helm upgrade --install sandboxed-react-agent-backend \
+#   ./apps/sandboxed-react-agent/helm/backend \
+#   -n alt-default \
+#   -f /tmp/sra-postgres-values.yaml
+```
+
+4. Verify backend pod can reach postgres alias over the WireGuard sidecar:
+
+```bash
+kubectl -n alt-default exec deploy/sandboxed-react-agent-backend -c backend -- getent hosts postgres-db-svc
+kubectl -n alt-default exec deploy/sandboxed-react-agent-backend -c backend -- nc -zv postgres-db-svc 5432
+kubectl -n alt-default exec deploy/sandboxed-react-agent-backend -c wg-sidecar -- wg show
+```
+
+If you are migrating an already-running backend managed by raw manifests, remove the old backend deployment/service first or use Helm ownership takeover semantics in your environment.
+
+### Legacy manifests
+
 ```bash
 kubectl apply -f apps/sandboxed-react-agent/k8s/backend-deployment.yaml
 kubectl apply -f apps/sandboxed-react-agent/k8s/backend-service.yaml

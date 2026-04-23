@@ -43,6 +43,26 @@ spec:
           ports:
             - containerPort: 8000
           env:
+            - name: DATABASE_TYPE
+              value: "sqlite" # Set to "postgres" to switch
+            - name: DB_HOST
+              value: "postgres-db-svc"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_NAME
+              value: "sandboxed_agent"
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: sandboxed-react-agent-db-credentials
+                  key: username
+                  optional: true
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sandboxed-react-agent-db-credentials
+                  key: password
+                  optional: true
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -202,7 +222,35 @@ spec:
           volumeMounts:
             - name: app-data
               mountPath: /app/data
+        # --- WIREGUARD NETWORK SIDECAR ---
+        - name: wg-sidecar
+          image: linuxserver/wireguard:latest
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+            privileged: false
+          env:
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+          volumeMounts:
+            - name: wg-config-volume
+              mountPath: /config/wg_confs/wg0.conf
+              subPath: wg0.conf
+              readOnly: true
+            - name: host-modules
+              mountPath: /lib/modules
+              readOnly: true
       volumes:
         - name: app-data
           persistentVolumeClaim:
             claimName: sandboxed-react-agent-backend-data
+        - name: wg-config-volume
+          secret:
+            secretName: wg-config
+            defaultMode: 0600
+        - name: host-modules
+          hostPath:
+            path: /lib/modules

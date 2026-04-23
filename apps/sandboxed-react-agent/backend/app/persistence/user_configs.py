@@ -2,12 +2,12 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from .users import SQLiteUserStore
+from .base import UserStore
 
 
 class SQLiteUserConfigStore:
     def __init__(
-        self, connect: Callable[[], object], user_store: SQLiteUserStore
+        self, connect: Callable[[], object], user_store: UserStore
     ) -> None:
         self.connect = connect
         self.user_store = user_store

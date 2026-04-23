@@ -1,0 +1,30 @@
+{{- if and (eq .Values.database.type "postgres") .Values.database.postgres.wireguard.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.database.postgres.host }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sandboxed-react-agent-backend.labels" . | nindent 4 }}
+spec:
+  ports:
+    - protocol: TCP
+      port: {{ .Values.database.postgres.port }}
+      targetPort: {{ .Values.database.postgres.port }}
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: {{ .Values.database.postgres.host }}-slice
+  namespace: {{ .Release.Namespace }}
+  labels:
+    kubernetes.io/service-name: {{ .Values.database.postgres.host }}
+    {{- include "sandboxed-react-agent-backend.labels" . | nindent 4 }}
+addressType: IPv4
+ports:
+  - protocol: TCP
+    port: {{ .Values.database.postgres.port }}
+endpoints:
+  - addresses:
+      - {{ .Values.database.postgres.wireguard.onPremIp | quote }}
+{{- end }}

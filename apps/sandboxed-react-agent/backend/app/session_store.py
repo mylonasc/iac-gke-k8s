@@ -11,29 +11,107 @@ from .persistence.user_configs import SQLiteUserConfigStore
 from .persistence.users import SQLiteUserStore
 from .persistence.workspace_jobs import SQLiteWorkspaceJobStore
 from .persistence.user_workspaces import SQLiteUserWorkspaceStore
-
+from .persistence.postgres import (
+    PostgreSQLUserStore,
+    PostgreSQLSessionStore,
+    PostgreSQLUserConfigStore,
+    PostgreSQLAssetStore,
+    PostgreSQLSandboxLeaseStore,
+    PostgreSQLUserWorkspaceStore,
+    PostgreSQLWorkspaceJobStore,
+)
+from .persistence.base import (
+    UserStore,
+    UserConfigStore,
+    SessionStoreInterface,
+    AssetStore,
+    SandboxLeaseStore,
+    UserWorkspaceStore,
+    WorkspaceJobStore,
+)
 
 class SessionStore:
-    """Compatibility facade over focused SQLite persistence modules."""
+    """
+    DB-agnostic facade that orchestrates focused persistence modules.
+    Supports SQLite and PostgreSQL.
+    """
 
     def __init__(self, db_path: str | None = None) -> None:
-        default_path = os.getenv("SESSION_STORE_PATH", "/app/data/sessions.db")
-        self.db_path = db_path or default_path
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        init_schema(self._connect)
+        self.db_type = os.getenv("DATABASE_TYPE", "sqlite").lower()
 
-        self.users = SQLiteUserStore(self._connect)
-        self.user_configs = SQLiteUserConfigStore(self._connect, self.users)
-        self.sessions = SQLiteSessionStore(self._connect)
-        self.assets = SQLiteAssetStore(self._connect)
-        self.sandbox_leases = SQLiteSandboxLeaseStore(self._connect)
-        self.user_workspaces = SQLiteUserWorkspaceStore(self._connect)
-        self.workspace_jobs = SQLiteWorkspaceJobStore(self._connect)
+        if self.db_type == "sqlite":
+            default_path = os.getenv("SESSION_STORE_PATH", "/app/data/sessions.db")
+            self.db_path = db_path or default_path
+            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+            
+            # Initialize schema
+            init_schema(self._connect_sqlite)
 
-    def _connect(self) -> sqlite3.Connection:
+            self.users: UserStore = SQLiteUserStore(self._connect_sqlite)
+            self.user_configs: UserConfigStore = SQLiteUserConfigStore(
+                self._connect_sqlite, self.users
+            )
+            self.sessions: SessionStoreInterface = SQLiteSessionStore(self._connect_sqlite)
+            self.assets: AssetStore = SQLiteAssetStore(self._connect_sqlite)
+            self.sandbox_leases: SandboxLeaseStore = SQLiteSandboxLeaseStore(
+                self._connect_sqlite
+            )
+            self.user_workspaces: UserWorkspaceStore = SQLiteUserWorkspaceStore(
+                self._connect_sqlite
+            )
+            self.workspace_jobs: WorkspaceJobStore = SQLiteWorkspaceJobStore(
+                self._connect_sqlite
+            )
+        elif self.db_type == "postgres":
+            self.pg_dsn = os.getenv("POSTGRES_DSN")
+            if not self.pg_dsn:
+                host = os.getenv("DB_HOST", "localhost")
+                port = os.getenv("DB_PORT", "5432")
+                user = os.getenv("DB_USER", "postgres")
+                password = os.getenv("DB_PASSWORD", "")
+                dbname = os.getenv("DB_NAME", "sandboxed_agent")
+                self.pg_dsn = f"host={host} port={port} dbname={dbname} user={user} password={password}"
+
+            # Initialize schema
+            init_schema(self._connect_postgres)
+
+            self.users: UserStore = PostgreSQLUserStore(self._connect_postgres)
+            self.user_configs: UserConfigStore = PostgreSQLUserConfigStore(
+                self._connect_postgres, self.users
+            )
+            self.sessions: SessionStoreInterface = PostgreSQLSessionStore(self._connect_postgres)
+            self.assets: AssetStore = PostgreSQLAssetStore(self._connect_postgres)
+            self.sandbox_leases: SandboxLeaseStore = PostgreSQLSandboxLeaseStore(
+                self._connect_postgres
+            )
+            self.user_workspaces: UserWorkspaceStore = PostgreSQLUserWorkspaceStore(
+                self._connect_postgres
+            )
+            self.workspace_jobs: WorkspaceJobStore = PostgreSQLWorkspaceJobStore(
+                self._connect_postgres
+            )
+        else:
+            raise ValueError(f"Unsupported DATABASE_TYPE: {self.db_type}")
+
+    def _connect_sqlite(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
         return connection
+
+    def _connect_postgres(self) -> Any:
+        import psycopg2
+
+        # Keep transactional semantics enabled for queue locking operations.
+        return psycopg2.connect(self.pg_dsn)
+
+    def _connect(self) -> Any:
+        if self.db_type == "sqlite":
+            return self._connect_sqlite()
+        elif self.db_type == "postgres":
+            return self._connect_postgres()
+        raise NotImplementedError(f"No connection factory for {self.db_type}")
+
+    # --- UserStore Delegation ---
 
     def ensure_user(self, user_id: str) -> dict[str, Any]:
         return self.users.ensure_user(user_id)
@@ -44,11 +122,15 @@ class SessionStore:
     def search_users(self, query: str = "", *, limit: int = 20) -> list[dict[str, Any]]:
         return self.users.search_users(query=query, limit=limit)
 
+    # --- UserConfigStore Delegation ---
+
     def get_user_config(self, user_id: str) -> dict[str, Any] | None:
         return self.user_configs.get_user_config(user_id)
 
     def upsert_user_config(self, user_id: str, config: dict[str, Any]) -> None:
         self.user_configs.upsert_user_config(user_id, config)
+
+    # --- SessionStoreInterface Delegation ---
 
     def upsert_session(self, session: dict[str, Any]) -> None:
         self.sessions.upsert_session(session)
@@ -84,6 +166,8 @@ class SessionStore:
     def get_by_share_id(self, share_id: str) -> dict[str, Any] | None:
         return self.sessions.get_by_share_id(share_id)
 
+    # --- AssetStore Delegation ---
+
     def add_asset(self, asset: dict[str, Any]) -> None:
         self.assets.add_asset(asset)
 
@@ -97,6 +181,8 @@ class SessionStore:
         self, asset_id: str, share_id: str
     ) -> dict[str, Any] | None:
         return self.assets.get_asset_for_share(asset_id, share_id)
+
+    # --- SandboxLeaseStore Delegation ---
 
     def upsert_sandbox_lease(self, lease: dict[str, Any]) -> None:
         self.sandbox_leases.upsert_sandbox_lease(lease)
@@ -133,6 +219,8 @@ class SessionStore:
             last_error=last_error,
         )
 
+    # --- UserWorkspaceStore Delegation ---
+
     def upsert_user_workspace(self, workspace: dict[str, Any]) -> None:
         self.user_workspaces.upsert_user_workspace(workspace)
 
@@ -144,6 +232,8 @@ class SessionStore:
 
     def list_user_workspaces(self) -> list[dict[str, Any]]:
         return self.user_workspaces.list_user_workspaces()
+
+    # --- WorkspaceJobStore Delegation ---
 
     def insert_workspace_job(self, job: dict[str, Any]) -> None:
         self.workspace_jobs.insert_job(job)
