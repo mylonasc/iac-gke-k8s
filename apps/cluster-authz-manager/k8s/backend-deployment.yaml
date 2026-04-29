@@ -54,7 +54,7 @@ spec:
           effect: NoSchedule
       containers:
         - name: backend
-          image: docker.io/mylonasc/magarathea:cluster-authz-manager-backend-0.1.7
+          image: docker.io/mylonasc/magarathea:cluster-authz-manager-backend-0.1.8
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000

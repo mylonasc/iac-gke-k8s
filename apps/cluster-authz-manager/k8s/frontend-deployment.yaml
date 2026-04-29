@@ -42,7 +42,7 @@ spec:
           effect: NoSchedule
       containers:
         - name: frontend
-          image: docker.io/mylonasc/magarathea:cluster-authz-manager-frontend-0.1.6
+          image: docker.io/mylonasc/magarathea:cluster-authz-manager-frontend-0.1.7
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 80

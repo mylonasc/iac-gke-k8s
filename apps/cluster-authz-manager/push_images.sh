@@ -6,8 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOCKER_REGISTRY="${DOCKER_REGISTRY:-docker.io}"
 DOCKERHUB_NAMESPACE="${DOCKERHUB_NAMESPACE:-mylonasc}"
 IMAGE_REPO="${IMAGE_REPO:-magarathea}"
-BACKEND_TAG="${TAG:-0.1.6}"
-FRONTEND_TAG="${TAG:-0.1.6}"
+BACKEND_TAG="${TAG:-0.1.8}"
+FRONTEND_TAG="${TAG:-0.1.7}"
 
 TARGET="${1:-all}"
 
@@ -24,7 +24,7 @@ Examples:
   $0           # build/push both images
   $0 backend   # build/push backend only
   $0 frontend  # build/push frontend only
-  TAG=0.1.6 $0 all
+  TAG=0.1.8 $0 all
 EOF
 }
 
