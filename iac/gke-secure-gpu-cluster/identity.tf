@@ -55,3 +55,9 @@ resource "google_project_iam_member" "backend_admin_storage_admin" {
   role    = "roles/storage.admin"
   member  = "serviceAccount:${google_service_account.backend_admin_gsa.email}"
 }
+
+resource "google_project_iam_member" "backend_admin_secret_manager_admin" {
+  project = var.project_id
+  role    = "roles/secretmanager.admin"
+  member  = "serviceAccount:${google_service_account.backend_admin_gsa.email}"
+}

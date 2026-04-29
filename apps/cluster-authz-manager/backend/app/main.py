@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import UTC, datetime
@@ -9,6 +10,7 @@ from .models.base import engine, Base, get_db, SessionLocal
 from .services.bootstrap import bootstrap_sra_profile, bootstrap_manager_profile
 from .services.policy_compiler import PolicyCompiler
 from .services.authz import require_permission
+from .auth import AuthConfig, TokenVerifier, authenticate_request
 from .routers import apps
 from .models import authz as models
 from .schemas import authz as schemas
@@ -41,6 +43,8 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(title="Cluster Authz Manager", lifespan=lifespan)
+auth_config = AuthConfig.from_env()
+token_verifier = TokenVerifier(auth_config)
 
 
 def _normalize_identity(subject: str | None, email: str | None) -> tuple[str, str | None]:
@@ -112,9 +116,25 @@ class KnownUserSyncRequest(BaseModel):
     display_name: Optional[str] = None
 
 @app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    try:
+        await authenticate_request(
+            request,
+            config=auth_config,
+            verifier=token_verifier,
+        )
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    return await call_next(request)
+
+
+@app.middleware("http")
 async def discover_user_middleware(request: Request, call_next):
-    subject = request.headers.get("x-auth-request-user")
-    email = request.headers.get("x-auth-request-email")
+    subject = str(getattr(request.state, "auth_subject", "") or "").strip()
+    email = str(getattr(request.state, "auth_email", "") or "").strip() or None
+    if not subject and not email:
+        subject = request.headers.get("x-auth-request-user")
+        email = request.headers.get("x-auth-request-email")
     
     if subject or email:
         db = SessionLocal()

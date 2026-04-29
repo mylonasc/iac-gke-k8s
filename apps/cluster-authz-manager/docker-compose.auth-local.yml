@@ -1,0 +1,27 @@
+services:
+  local-oidc:
+    build:
+      context: ../local-oidc-mock
+      dockerfile: Dockerfile
+    environment:
+      OIDC_ISSUER: http://local-oidc:9000
+      OIDC_DEFAULT_AUDIENCE: authz-manager-local
+      OIDC_TOKEN_TTL_SECONDS: "3600"
+    ports:
+      - "19002:9000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    depends_on:
+      local-oidc:
+        condition: service_healthy
+    environment:
+      AUTH_ENABLED: "true"
+      AUTH_ISSUER: "http://local-oidc:9000"
+      AUTH_AUDIENCE: "authz-manager-local"
+      AUTH_JWKS_URL: "http://local-oidc:9000/jwks"
+      AUTH_USER_ID_CLAIM: "sub"

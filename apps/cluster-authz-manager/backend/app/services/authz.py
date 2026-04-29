@@ -5,8 +5,12 @@ from ..models import authz as models
 
 def require_permission(permission_name: str):
     def dependency(request: Request, db: Session = Depends(get_db)):
-        subject = request.headers.get("x-auth-request-user")
-        email = request.headers.get("x-auth-request-email")
+        state_subject = str(getattr(request.state, "auth_subject", "") or "").strip()
+        state_email = str(getattr(request.state, "auth_email", "") or "").strip()
+        state_groups = getattr(request.state, "auth_groups", [])
+
+        subject = state_subject or request.headers.get("x-auth-request-user")
+        email = state_email or request.headers.get("x-auth-request-email")
         
         if not subject and not email:
             # For local testing if auth is disabled
@@ -44,9 +48,11 @@ def require_permission(permission_name: str):
             user_roles.extend([b.role for b in bindings])
             
         # Check group bindings (placeholder if groups are in headers)
-        groups_raw = request.headers.get("x-auth-request-groups", "")
-        if groups_raw:
+        groups = [str(g).strip() for g in state_groups if str(g).strip()]
+        if not groups:
+            groups_raw = request.headers.get("x-auth-request-groups", "")
             groups = [g.strip() for g in groups_raw.split(",") if g.strip()]
+        if groups:
             for g in groups:
                 bindings = db.query(models.GroupRoleBinding).filter(
                     models.GroupRoleBinding.app_profile_id == manager_app.id,
