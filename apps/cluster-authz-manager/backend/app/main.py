@@ -1,6 +1,10 @@
 from fastapi import FastAPI, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from typing import List, Optional
+from datetime import UTC, datetime
+import hmac
+import os
+from pydantic import BaseModel
 from .models.base import engine, Base, get_db, SessionLocal
 from .services.bootstrap import bootstrap_sra_profile, bootstrap_manager_profile
 from .services.policy_compiler import PolicyCompiler
@@ -38,25 +42,115 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Cluster Authz Manager", lifespan=lifespan)
 
+
+def _normalize_identity(subject: str | None, email: str | None) -> tuple[str, str | None]:
+    normalized_subject = (subject or "").strip()
+    normalized_email = (email or "").strip().lower() or None
+    if normalized_subject:
+        return normalized_subject, normalized_email
+    if normalized_email:
+        return f"email:{normalized_email}", normalized_email
+    raise ValueError("subject or email is required")
+
+
+def _upsert_known_user(
+    db: Session,
+    *,
+    subject: str | None,
+    email: str | None,
+    display_name: str | None = None,
+) -> models.KnownUser:
+    normalized_subject, normalized_email = _normalize_identity(subject, email)
+    normalized_display_name = (display_name or "").strip() or None
+
+    user = (
+        db.query(models.KnownUser)
+        .filter(models.KnownUser.subject == normalized_subject)
+        .first()
+    )
+    if not user and normalized_email:
+        user = (
+            db.query(models.KnownUser)
+            .filter(models.KnownUser.email == normalized_email)
+            .order_by(models.KnownUser.last_seen_at.desc())
+            .first()
+        )
+
+    if not user:
+        user = models.KnownUser(
+            subject=normalized_subject,
+            email=normalized_email,
+            display_name=normalized_display_name,
+        )
+        db.add(user)
+    else:
+        if normalized_email:
+            user.email = normalized_email
+        if normalized_display_name:
+            user.display_name = normalized_display_name
+        if user.subject.startswith("email:") and not normalized_subject.startswith("email:"):
+            user.subject = normalized_subject
+        user.last_seen_at = datetime.now(UTC)
+
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def _verify_known_user_sync_token(request: Request) -> None:
+    expected_token = (os.getenv("KNOWN_USER_SYNC_TOKEN") or "").strip()
+    if not expected_token:
+        return
+    provided_token = (request.headers.get("x-known-user-sync-token") or "").strip()
+    if not provided_token or not hmac.compare_digest(provided_token, expected_token):
+        raise HTTPException(status_code=403, detail="Invalid known-user sync token")
+
+
+class KnownUserSyncRequest(BaseModel):
+    subject: Optional[str] = None
+    email: Optional[str] = None
+    display_name: Optional[str] = None
+
 @app.middleware("http")
 async def discover_user_middleware(request: Request, call_next):
     subject = request.headers.get("x-auth-request-user")
     email = request.headers.get("x-auth-request-email")
     
-    if subject:
+    if subject or email:
         db = SessionLocal()
         try:
-            user = db.query(models.KnownUser).filter(models.KnownUser.subject == subject).first()
-            if not user:
-                user = models.KnownUser(subject=subject, email=email)
-                db.add(user)
-            else:
-                if email: user.email = email
-            db.commit()
+            _upsert_known_user(db, subject=subject, email=email)
+        except ValueError:
+            pass
         finally:
             db.close()
             
     return await call_next(request)
+
+
+@app.post("/api/internal/discover-user")
+def sync_known_user(payload: KnownUserSyncRequest, request: Request):
+    _verify_known_user_sync_token(request)
+    db = SessionLocal()
+    try:
+        try:
+            user = _upsert_known_user(
+                db,
+                subject=payload.subject,
+                email=payload.email,
+                display_name=payload.display_name,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "id": user.id,
+            "subject": user.subject,
+            "email": user.email,
+            "display_name": user.display_name,
+            "last_seen_at": user.last_seen_at,
+        }
+    finally:
+        db.close()
 
 @app.get("/health")
 def health():
@@ -83,7 +177,7 @@ def create_user(user_in: schemas.KnownUserCreate, db: Session = Depends(get_db))
     existing = db.query(models.KnownUser).filter(models.KnownUser.subject == user_in.subject).first()
     if existing:
         raise HTTPException(status_code=400, detail="User with this subject already exists")
-    user = models.KnownUser(**user_in.dict())
+    user = models.KnownUser(**user_in.model_dump())
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -95,7 +189,7 @@ def update_user(user_id: str, user_in: schemas.KnownUserUpdate, db: Session = De
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    update_data = user_in.dict(exclude_unset=True)
+    update_data = user_in.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(user, field, value)
         

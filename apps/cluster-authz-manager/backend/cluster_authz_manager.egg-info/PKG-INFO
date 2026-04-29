@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: cluster-authz-manager
-Version: 0.1.0
+Version: 0.1.6
 Summary: Centralized authorization and role management for cluster applications
 Requires-Python: >=3.11
 Requires-Dist: fastapi>=0.115.0

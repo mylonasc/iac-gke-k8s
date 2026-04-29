@@ -86,7 +86,7 @@ def update_role(
     if not role:
         raise HTTPException(status_code=404, detail="Role not found")
 
-    update_data = role_in.dict(exclude_unset=True)
+    update_data = role_in.model_dump(exclude_unset=True)
     if "name" in update_data:
         role_name = str(update_data.get("name") or "").strip()
         if not role_name:
@@ -191,7 +191,7 @@ def update_permission(
     if not permission:
         raise HTTPException(status_code=404, detail="Capability not found")
 
-    update_data = permission_in.dict(exclude_unset=True)
+    update_data = permission_in.model_dump(exclude_unset=True)
     if "name" in update_data:
         permission_name = str(update_data.get("name") or "").strip()
         if not permission_name:
@@ -230,7 +230,9 @@ def create_group_binding(
     slug: str, binding_in: schemas.GroupBindingCreate, db: Session = Depends(get_db)
 ):
     app = get_app(slug, db)
-    binding = models.GroupRoleBinding(**binding_in.dict(), app_profile_id=app.id)
+    binding = models.GroupRoleBinding(
+        **binding_in.model_dump(), app_profile_id=app.id
+    )
     db.add(binding)
     db.commit()
     db.refresh(binding)
@@ -248,7 +250,7 @@ def create_user_binding(
     slug: str, binding_in: schemas.UserBindingCreate, db: Session = Depends(get_db)
 ):
     app = get_app(slug, db)
-    binding = models.UserRoleBinding(**binding_in.dict(), app_profile_id=app.id)
+    binding = models.UserRoleBinding(**binding_in.model_dump(), app_profile_id=app.id)
     db.add(binding)
     db.commit()
     db.refresh(binding)
@@ -264,7 +266,7 @@ def create_app(app_in: schemas.AppProfileCreate, db: Session = Depends(get_db)):
     )
     if existing:
         raise HTTPException(status_code=400, detail="App with this slug already exists")
-    app = models.AppProfile(**app_in.dict())
+    app = models.AppProfile(**app_in.model_dump())
     db.add(app)
     db.commit()
     db.refresh(app)

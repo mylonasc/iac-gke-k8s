@@ -1,5 +1,5 @@
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from datetime import datetime
 
 
@@ -20,9 +20,7 @@ class PermissionUpdate(BaseModel):
 class Permission(PermissionBase):
     id: str
     app_profile_id: str
-
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class RoleBase(BaseModel):
@@ -44,9 +42,7 @@ class Role(RoleBase):
     id: str
     app_profile_id: str
     permissions: List[Permission] = []
-
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class AppProfileBase(BaseModel):
@@ -64,9 +60,7 @@ class AppProfile(AppProfileBase):
     id: str
     created_at: datetime
     updated_at: datetime
-
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class GroupBindingBase(BaseModel):
@@ -81,9 +75,7 @@ class GroupBindingCreate(GroupBindingBase):
 class GroupBinding(GroupBindingBase):
     id: str
     app_profile_id: str
-
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class UserBindingBase(BaseModel):
@@ -99,9 +91,7 @@ class UserBindingCreate(UserBindingBase):
 class UserBinding(UserBindingBase):
     id: str
     app_profile_id: str
-
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class KnownUserBase(BaseModel):
@@ -127,6 +117,4 @@ class KnownUser(KnownUserBase):
     id: str
     created_at: datetime
     last_seen_at: datetime
-
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

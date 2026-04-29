@@ -54,7 +54,7 @@ spec:
           effect: NoSchedule
       containers:
         - name: backend
-          image: docker.io/mylonasc/magarathea:cluster-authz-manager-backend-0.1.6
+          image: docker.io/mylonasc/magarathea:cluster-authz-manager-backend-0.1.7
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
@@ -67,6 +67,12 @@ spec:
               value: "true"
             - name: BOOTSTRAP_ADMIN_EMAIL
               value: "mylonas.charilaos@gmail.com"
+            - name: KNOWN_USER_SYNC_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sandboxed-react-agent-secrets
+                  key: known-user-sync-token
+                  optional: true
           volumeMounts:
             - name: data
               mountPath: /app/data
