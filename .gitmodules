@@ -5,6 +5,3 @@
 	path = apps/janet
 	url = git@github.com:mylonasc/janet.git
 	branch = release
-[submodule "apps/cluster-user-secrets-broker"]
-	path = apps/cluster-user-secrets-broker
-	url = git@github.com:mylonasc/cluster-user-secrets-broker.git
