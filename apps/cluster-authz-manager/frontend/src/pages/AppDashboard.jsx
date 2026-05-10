@@ -30,11 +30,11 @@ export function AppDashboard({ app, onBack }) {
     setError("");
     try {
       const [r, p, gb, ub, u] = await Promise.all([
-        apiFetchJson(`api/apps/${app.slug}/roles`),
-        apiFetchJson(`api/apps/${app.slug}/permissions`),
-        apiFetchJson(`api/apps/${app.slug}/bindings/groups`),
-        apiFetchJson(`api/apps/${app.slug}/bindings/users`),
-        apiFetchJson("api/users"),
+        apiFetchJson(`apps/${app.slug}/roles`),
+        apiFetchJson(`apps/${app.slug}/permissions`),
+        apiFetchJson(`apps/${app.slug}/bindings/groups`),
+        apiFetchJson(`apps/${app.slug}/bindings/users`),
+        apiFetchJson("users"),
       ]);
       setRoles(Array.isArray(r) ? r : []);
       setPermissions(Array.isArray(p) ? p : []);
@@ -70,10 +70,10 @@ export function AppDashboard({ app, onBack }) {
 
   const handleDelete = async (type, id) => {
     let url = "";
-    if (type === "role") url = `api/apps/${app.slug}/roles/${id}`;
-    if (type === "permission") url = `api/apps/${app.slug}/permissions/${id}`;
-    if (type === "group") url = `api/apps/${app.slug}/bindings/groups/${id}`;
-    if (type === "user") url = `api/apps/${app.slug}/bindings/users/${id}`;
+    if (type === "role") url = `apps/${app.slug}/roles/${id}`;
+    if (type === "permission") url = `apps/${app.slug}/permissions/${id}`;
+    if (type === "group") url = `apps/${app.slug}/bindings/groups/${id}`;
+    if (type === "user") url = `apps/${app.slug}/bindings/users/${id}`;
 
     let prompt = "Are you sure you want to delete this?";
     if (type === "permission") {
@@ -209,7 +209,7 @@ export function AppDashboard({ app, onBack }) {
             permissions={permissions} 
             onSubmit={async (data) => {
               try {
-                await apiFetchJson(`api/apps/${app.slug}/roles`, {
+                await apiFetchJson(`apps/${app.slug}/roles`, {
                   method: "POST",
                   body: JSON.stringify(data)
                 });
@@ -232,7 +232,7 @@ export function AppDashboard({ app, onBack }) {
             submitLabel="Save Changes"
             onSubmit={async (data) => {
               try {
-                await apiFetchJson(`api/apps/${app.slug}/roles/${selectedRole.id}`, {
+                await apiFetchJson(`apps/${app.slug}/roles/${selectedRole.id}`, {
                   method: "PATCH",
                   body: JSON.stringify(data)
                 });
@@ -252,7 +252,7 @@ export function AppDashboard({ app, onBack }) {
             submitLabel="Create Capability"
             onSubmit={async (data) => {
               try {
-                await apiFetchJson(`api/apps/${app.slug}/permissions`, {
+                await apiFetchJson(`apps/${app.slug}/permissions`, {
                   method: "POST",
                   body: JSON.stringify(data)
                 });
@@ -273,7 +273,7 @@ export function AppDashboard({ app, onBack }) {
             submitLabel="Save Changes"
             onSubmit={async (data) => {
               try {
-                await apiFetchJson(`api/apps/${app.slug}/permissions/${selectedCapability.id}`, {
+                await apiFetchJson(`apps/${app.slug}/permissions/${selectedCapability.id}`, {
                   method: "PATCH",
                   body: JSON.stringify(data)
                 });
@@ -300,7 +300,7 @@ export function AppDashboard({ app, onBack }) {
             type="group"
             onSubmit={async (data) => {
               try {
-                await apiFetchJson(`api/apps/${app.slug}/bindings/groups`, {
+                await apiFetchJson(`apps/${app.slug}/bindings/groups`, {
                   method: "POST",
                   body: JSON.stringify(data)
                 });
@@ -322,7 +322,7 @@ export function AppDashboard({ app, onBack }) {
             knownUsers={knownUsers}
             onSubmit={async (data) => {
               try {
-                await apiFetchJson(`api/apps/${app.slug}/bindings/users`, {
+                await apiFetchJson(`apps/${app.slug}/bindings/users`, {
                   method: "POST",
                   body: JSON.stringify(data)
                 });

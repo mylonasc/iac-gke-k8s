@@ -12,7 +12,7 @@ export function UserDirectory({ onBack }) {
   const fetchUsers = async () => {
     setLoading(true);
     setError("");
-    const url = search ? `api/users?q=${encodeURIComponent(search)}` : "api/users";
+    const url = search ? `users?q=${encodeURIComponent(search)}` : "users";
     try {
       const data = await apiFetchJson(url);
       setUsers(Array.isArray(data) ? data : []);
@@ -33,7 +33,7 @@ export function UserDirectory({ onBack }) {
 
   const toggleStatus = async (user) => {
     try {
-      await apiFetchJson(`api/users/${user.id}`, {
+      await apiFetchJson(`users/${user.id}`, {
         method: "PATCH",
         body: JSON.stringify({ is_active: !user.is_active })
       });
@@ -46,7 +46,7 @@ export function UserDirectory({ onBack }) {
   const deleteUser = async (user) => {
     if (confirm(`Remove ${user.email || user.subject} from registry? This does NOT delete their OIDC identity, only their local metadata and specific bindings.`)) {
       try {
-        await apiFetchJson(`api/users/${user.id}`, { method: "DELETE" });
+        await apiFetchJson(`users/${user.id}`, { method: "DELETE" });
         await fetchUsers();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to delete user");
@@ -163,7 +163,7 @@ export function UserDirectory({ onBack }) {
           <ProvisionUserForm 
             onSubmit={async (data) => {
               try {
-                await apiFetchJson("api/users", {
+                await apiFetchJson("users", {
                   method: "POST",
                   body: JSON.stringify(data)
                 });

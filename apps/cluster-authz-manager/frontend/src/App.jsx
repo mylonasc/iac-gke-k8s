@@ -17,7 +17,7 @@ function App() {
     setLoading(true);
     setError("");
     try {
-      const data = await apiFetchJson("api/apps");
+      const data = await apiFetchJson("apps");
       setApps(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error("Failed to fetch apps", err);

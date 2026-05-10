@@ -1,6 +1,35 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
+  name: cluster-authz-manager-api
+  namespace: alt-default
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /api/$2
+    nginx.ingress.kubernetes.io/auth-url: "https://$host/oauth2/auth"
+    nginx.ingress.kubernetes.io/auth-signin: "https://$host/oauth2/start?rd=$escaped_request_uri"
+    nginx.ingress.kubernetes.io/auth-response-headers: "X-Auth-Request-Email,X-Auth-Request-User,X-Auth-Request-Groups"
+spec:
+  tls:
+    - hosts:
+        - magarathea.ddns.net
+      secretName: magarathea-ddns-net-tls
+  rules:
+    - host: magarathea.ddns.net
+      http:
+        paths:
+          - path: /cluster-authz-manager/api(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: cluster-authz-manager-backend
+                port:
+                  number: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
   name: cluster-authz-manager-web
   namespace: alt-default
   annotations:
@@ -9,7 +38,7 @@ metadata:
     nginx.ingress.kubernetes.io/rewrite-target: /$2
     nginx.ingress.kubernetes.io/auth-url: "https://$host/oauth2/auth"
     nginx.ingress.kubernetes.io/auth-signin: "https://$host/oauth2/start?rd=$escaped_request_uri"
-    nginx.ingress.kubernetes.io/auth-response-headers: "Authorization,X-Auth-Request-Access-Token,X-Auth-Request-Email,X-Auth-Request-User,X-Auth-Request-Groups"
+    nginx.ingress.kubernetes.io/auth-response-headers: "X-Auth-Request-Email,X-Auth-Request-User,X-Auth-Request-Groups"
 spec:
   tls:
     - hosts:

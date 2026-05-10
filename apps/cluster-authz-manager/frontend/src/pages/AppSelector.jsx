@@ -59,7 +59,7 @@ export function AppSelector({ apps, onSelect, onRefresh }) {
               <CreateAppForm 
                 onSubmit={async (data) => {
                   try {
-                    await apiFetchJson("api/apps", {
+                    await apiFetchJson("apps", {
                       method: "POST",
                       body: JSON.stringify(data)
                     });

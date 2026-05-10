@@ -1,4 +1,11 @@
-export const DEFAULT_API_BASE = "api";
+export const DEFAULT_API_BASE = (
+  import.meta.env.VITE_API_BASE || "/cluster-authz-manager/api"
+).replace(/\/+$/, "");
+
+export function withApiBase(path) {
+  const normalized = path.startsWith("/") ? path : `/${path}`;
+  return `${DEFAULT_API_BASE}${normalized}`;
+}
 
 export async function apiFetch(url, options = {}) {
   const response = await fetch(url, {
@@ -12,7 +19,7 @@ export async function apiFetch(url, options = {}) {
 }
 
 export async function apiFetchJson(url, options = {}) {
-  const response = await apiFetch(url, options);
+  const response = await apiFetch(withApiBase(url), options);
   const contentType = response.headers.get("content-type") || "";
 
   let payload = null;
