@@ -1,0 +1,58 @@
+name: Repo Validation
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  validate:
+    name: Validate repo configuration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Validate JSON config
+        run: python3 -m json.tool opencode.json >/dev/null
+
+      - name: Validate opencode skills
+        run: |
+          set -euo pipefail
+          for skill_file in .opencode/skills/*/SKILL.md; do
+            skill_dir="$(basename "$(dirname "$skill_file")")"
+            skill_name="$(awk -F': ' '/^name: / {print $2; exit}' "$skill_file")"
+            description="$(awk -F': ' '/^description: / {print $2; exit}' "$skill_file")"
+            test -n "$skill_name"
+            test -n "$description"
+            test "$skill_name" = "$skill_dir"
+          done
+
+      - name: Terraform format check
+        working-directory: iac/gke-secure-gpu-cluster
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init without backend
+        working-directory: iac/gke-secure-gpu-cluster
+        run: terraform init -backend=false -input=false
+
+      - name: Terraform validate
+        working-directory: iac/gke-secure-gpu-cluster
+        run: terraform validate
+
+      - name: Helm lint Janet backend
+        run: helm lint apps/janet/helm/backend
+
+      - name: Helm lint Janet frontend
+        run: helm lint apps/janet/helm/frontend

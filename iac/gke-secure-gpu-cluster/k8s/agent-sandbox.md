@@ -28,6 +28,19 @@ Agent Sandbox resources are defined in `k8s/agent_sandbox.tf` and include:
 Router deployment intentionally runs on the regular cluster pool so gVisor pool
 capacity is preserved for sandbox runtime pods.
 
+## Lifecycle path vs execution path
+
+Sandbox lifecycle is Kubernetes API driven:
+
+1. Janet or another client creates a `SandboxClaim` through the Kubernetes API.
+2. Agent Sandbox controller observes the claim.
+3. The controller creates/binds the `Sandbox`, runtime pod, and per-sandbox service.
+4. The claim and sandbox report `Ready=True` when the runtime pod and service are ready.
+
+The sandbox router is separate from that lifecycle path. A broken router does not prevent `SandboxClaim` creation or runtime pod readiness. The router is required by the current Janet execution path after the sandbox is ready: the `k8s-agent-sandbox` client sends `/execute`, upload, download, list, and exists requests to `sandbox-router-svc`, with `X-Sandbox-*` headers that identify the target sandbox.
+
+Current compatibility note: the Janet backend currently uses `k8s-agent-sandbox==0.2.1`, which sends router routing headers but does not send a router auth token. If the router image requires `ROUTER_AUTH_TOKEN`, either configure compatible auth on both client and router, use a compatible router image, or explicitly enable unauthenticated router mode with network restrictions.
+
 ## Apply flow
 
 For a fresh install on a cluster where CRDs are not yet present:
@@ -61,6 +74,16 @@ kubectl get sandboxtemplate,sandboxwarmpool -n alt-default
 kubectl get deploy,svc -n alt-default
 kubectl get pods -n alt-default
 ```
+
+Verify lifecycle separately from execution:
+
+```bash
+kubectl -n alt-default get sandboxclaim,sandbox
+kubectl -n alt-default get deploy sandbox-router-deployment
+kubectl -n alt-default get endpoints sandbox-router-svc
+```
+
+`SandboxClaim`/`Sandbox` readiness means lifecycle is working. Ready router endpoints are additionally required for Janet cluster-mode tool execution.
 
 ## Start a sandbox with SandboxClaim
 

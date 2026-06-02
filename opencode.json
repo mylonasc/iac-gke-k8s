@@ -1,0 +1,49 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "command": {
+    "gke-plan": {
+      "description": "Run Terraform plan for the GKE stack.",
+      "template": "Use the gke-terraform-lifecycle skill. Run `terraform plan -var-file=terraform.v3.tfvars` from `iac/gke-secure-gpu-cluster`, then summarize the planned changes and any risks. Do not apply changes."
+    },
+    "gke-deploy-dry-run": {
+      "description": "Dry-run the two-stage GKE deployment helper.",
+      "template": "Use the gke-terraform-lifecycle skill. Run `./scripts/deploy_with_secrets.sh --project gke-gpu-project-473410 --var-file terraform.v3.tfvars` from `iac/gke-secure-gpu-cluster`, then summarize the dry-run workflow. Do not execute mutating commands."
+    },
+    "gke-deploy": {
+      "description": "Execute the two-stage GKE deployment with Agent Sandbox bootstrap.",
+      "template": "Use the gke-terraform-lifecycle and agent-sandbox-platform skills. From `iac/gke-secure-gpu-cluster`, run `./scripts/deploy_with_secrets.sh --execute --project gke-gpu-project-473410 --var-file terraform.v3.tfvars --bootstrap-agent-sandbox`. Before running, show the command and confirm this is a mutating infrastructure deployment. After completion, verify nodes, pods, Agent Sandbox resources, and summarize results."
+    },
+    "gke-destroy-plan": {
+      "description": "Plan Terraform destroy for the GKE stack without deleting resources.",
+      "template": "Use the gke-terraform-lifecycle skill. From `iac/gke-secure-gpu-cluster`, run `terraform plan -destroy -var-file=terraform.v3.tfvars`, then summarize what would be destroyed and call out blockers such as Kubernetes module ordering, bucket contents, or deletion protection. Do not run terraform destroy."
+    },
+    "cluster-inspect": {
+      "description": "Run the repo cluster inspection script.",
+      "template": "Use the cluster-diagnostics-runbooks skill. Run `./inspect_cluster.sh` from the repository root, then summarize node health, workload health, Agent Sandbox status, and notable warnings. Treat this as read-only diagnostics."
+    },
+    "agent-sandbox-status": {
+      "description": "Check Agent Sandbox controller, templates, warm pools, and router.",
+      "template": "Use the agent-sandbox-platform skill. Run read-only kubectl checks for `agent-sandbox-system` pods, `alt-default` sandboxtemplates/sandboxwarmpools/sandboxclaims, and `sandbox-router` deployment/service. Summarize readiness and likely next diagnostics if anything is unhealthy."
+    },
+    "janet-preflight": {
+      "description": "Check Janet prerequisites before Helm deployment.",
+      "template": "Use the janet-app-ops and cluster-secrets-auth skills. From `apps/janet`, run `./ops.sh preflight`, then summarize missing namespace, service account, secret key, Agent Sandbox, or router prerequisites. Do not print secret values."
+    },
+    "janet-deploy": {
+      "description": "Deploy or upgrade the Janet backend and frontend Helm releases.",
+      "template": "Use the janet-app-ops skill. From `apps/janet`, run `./ops.sh deploy`. Before running, check for required secrets in `alt-default` without printing secret values. After completion, verify backend/frontend rollouts and summarize the deployed resources."
+    },
+    "janet-diag": {
+      "description": "Run Janet Kubernetes diagnostics.",
+      "template": "Use the janet-app-ops and cluster-diagnostics-runbooks skills. From `apps/janet`, run `./ops.sh diag`, then summarize app health, rollout status, logs, router reachability, and any recommended follow-up checks."
+    },
+    "janet-versions": {
+      "description": "Show Janet DockerHub, cluster, and Helm version summary.",
+      "template": "Use the release-build-images skill. From `apps/janet`, run `./ops.sh versions`, then compare DockerHub, Helm values, and cluster deployment image tags. Do not print tokens."
+    },
+    "janet-teardown": {
+      "description": "Tear down Janet Helm releases only.",
+      "template": "Use the janet-app-ops skill. From `apps/janet`, run `./ops.sh teardown`. Confirm this removes Janet Helm releases and `sandboxed-react-agent-secrets` but does not destroy the GKE cluster. After completion, verify remaining Janet deploy/service/ingress resources."
+    }
+  }
+}

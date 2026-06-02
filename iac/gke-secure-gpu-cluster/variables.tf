@@ -138,6 +138,12 @@ variable "agent_sandbox_router_image" {
   default     = "us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/sandbox-router:latest-main"
 }
 
+variable "agent_sandbox_router_allow_unauthenticated" {
+  description = "When true, starts the sandbox router in explicit unauthenticated compatibility mode for clients that do not send ROUTER_AUTH_TOKEN. Keep protected by NetworkPolicy."
+  type        = bool
+  default     = false
+}
+
 variable "agent_sandbox_warm_pool_replicas" {
   description = "Number of pre-warmed sandbox pods to keep available."
   type        = number
