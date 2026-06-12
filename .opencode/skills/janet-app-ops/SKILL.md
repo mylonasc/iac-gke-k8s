@@ -40,6 +40,17 @@ From `apps/janet`:
 ./ops.sh teardown --purge-legacy-manifests
 ```
 
+## Project Diagnostic Tools
+
+The project plugin `.opencode/plugin/janet-sandbox-diagnostics.ts` registers read-only opencode tools for Janet sandbox hangs. Use these before manually sequencing `kubectl` commands when a Janet chat hangs while an agent starts or uses a sandbox.
+
+- `janet_sandbox_triage`: all-in-one app, router, SandboxClaim, scheduling, node label, event, and backend lease-log diagnosis. Pass `sessionId` when a specific Janet session is known.
+- `sandbox_runtime_scheduling`: focused SandboxClaim/Sandbox/pod scheduling diagnosis, including gVisor node labels and FailedScheduling events.
+- `janet_backend_log_correlation`: focused backend log filter for sandbox lease/watch failures, stale pending leases, session polling, timeouts, and claim names.
+- `janet_workload_snapshot`: focused backend/frontend/router deployment, pod, service, ingress, and router-log snapshot.
+
+These tools only run `kubectl get`, `kubectl describe`, and `kubectl logs`. They do not create probe pods and do not read secret values.
+
 ## Required Platform Dependencies
 
 - Agent Sandbox controller/extensions installed.
