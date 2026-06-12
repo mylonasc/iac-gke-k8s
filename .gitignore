@@ -50,6 +50,9 @@
 # Local diagnostics bundles
 gke-diagnostics-*.tgz
 
+# Local planning drafts
+Security Hardening Roadmap.md
+
 # Runtime database snapshots and local session stores
 sessions-snapshot.db
 *.snapshot.db
