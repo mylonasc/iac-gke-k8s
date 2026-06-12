@@ -7,6 +7,7 @@ resource "kubernetes_namespace" "app" {
     name = local.ns
     labels = {
       environment = var.environment
+      name        = local.ns
     }
   }
 }

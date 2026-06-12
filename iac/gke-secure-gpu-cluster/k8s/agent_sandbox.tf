@@ -570,6 +570,54 @@ resource "kubernetes_manifest" "agent_sandbox_router_service" {
   ]
 }
 
+resource "kubernetes_manifest" "agent_sandbox_router_ingress_policy" {
+  count = var.enable_agent_sandbox && var.enable_agent_sandbox_runtime ? 1 : 0
+
+  field_manager {
+    force_conflicts = true
+  }
+
+  manifest = {
+    apiVersion = "networking.k8s.io/v1"
+    kind       = "NetworkPolicy"
+    metadata = {
+      name      = "sandbox-router-allow-janet-backend"
+      namespace = local.ns
+    }
+    spec = {
+      podSelector = {
+        matchLabels = {
+          app = "sandbox-router"
+        }
+      }
+      policyTypes = ["Ingress"]
+      ingress = [
+        {
+          from = [
+            {
+              podSelector = {
+                matchLabels = {
+                  app = "sandboxed-react-agent-backend"
+                }
+              }
+            }
+          ]
+          ports = [
+            {
+              protocol = "TCP"
+              port     = 8080
+            }
+          ]
+        }
+      ]
+    }
+  }
+
+  depends_on = [
+    kubernetes_manifest.agent_sandbox_router_service,
+  ]
+}
+
 resource "kubernetes_manifest" "agent_sandbox_router_deployment" {
   count = var.enable_agent_sandbox && var.enable_agent_sandbox_runtime ? 1 : 0
 
@@ -623,6 +671,12 @@ resource "kubernetes_manifest" "agent_sandbox_router_deployment" {
             {
               name  = "router"
               image = var.agent_sandbox_router_image
+              env = var.agent_sandbox_router_allow_unauthenticated ? [
+                {
+                  name  = "ALLOW_UNAUTHENTICATED_ROUTER"
+                  value = "true"
+                }
+              ] : []
               ports = [
                 {
                   containerPort = 8080
@@ -667,6 +721,7 @@ resource "kubernetes_manifest" "agent_sandbox_router_deployment" {
 
   depends_on = [
     kubernetes_manifest.agent_sandbox_router_service,
+    kubernetes_manifest.agent_sandbox_router_ingress_policy,
     kubernetes_manifest.agent_sandbox_extensions,
   ]
 }

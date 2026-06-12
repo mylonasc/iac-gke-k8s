@@ -7,6 +7,7 @@
 **/planfile*
 
 **/secrets**
+!docs/secrets-inventory.md
 
 # Local Python environments and notebook artifacts
 **/.venv/
@@ -48,3 +49,12 @@
 
 # Local diagnostics bundles
 gke-diagnostics-*.tgz
+
+# Local planning drafts
+Security Hardening Roadmap.md
+
+# Runtime database snapshots and local session stores
+sessions-snapshot.db
+*.snapshot.db
+**/sessions.db
+**/sessions-*.db
