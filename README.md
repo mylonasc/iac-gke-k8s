@@ -1,10 +1,13 @@
 # iac-gke-k8s
 
+[![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://mylonasc.github.io/iac-gke-k8s/)
+
 Infrastructure-as-code for a GKE Standard cluster with mixed node pools (GPU and non-GPU), gVisor-isolated workloads, Secret Manager integration, and Terraform-managed Agent Sandbox.
 
 ## Documentation Map
 
 - Documentation index: `docs/README.md`
+- Rendered architecture docs: https://mylonasc.github.io/iac-gke-k8s/
 - Deployment and day-2 operations: `docs/deploy-and-operations.md`
 - Deployed inventory (what exists and where): `docs/inventory.md`
 - Project links and console entry points: `docs/links.md`

@@ -50,6 +50,9 @@
 # Local diagnostics bundles
 gke-diagnostics-*.tgz
 
+# Documentation build artifacts
+docs/_build/
+
 # Local planning drafts
 Security Hardening Roadmap.md
 
