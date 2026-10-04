@@ -3,7 +3,12 @@
 Postgres is hosted on-prem for better cost performance. The communication to the postgres DB is encrypted using a wireguard-based VPN.
 
 * For the VPN configuration you may refer to [mylonasc/homelab/vpn](https://github.com/mylonasc/homelab/tree/main/vpn).
-* For the on-prem configuration (how the on-prem system is set up) you may refer to [mylonasc/homelab/database]() (might be innaccessible to the public). 
+* For the on-prem configuration (how the on-prem system is set up) you may refer to [mylonasc/homelab/database/postgres](https://github.com/mylonasc/homelab/tree/main/database/postgres) (might be inaccessible to the public).
+* [OpenCode web + SSH](https://github.com/mylonasc/homelab/tree/main/agentic-coding/opencode-wireguard)
+  can share the on-prem `wg-db-sidecar` namespace: web/API `10.8.0.4:4096`,
+  public-key-only SSH `10.8.0.4:2222`. It is managed separately and stopping it
+  does not stop PostgreSQL. If the DB WireGuard container is recreated, recreate
+  the attached OpenCode container so it joins the replacement namespace.
 
 ## 1. Kubernetes Service Abstraction (DNS Aliasing)
 
@@ -145,4 +150,3 @@ To verify that the application container can resolve and reach the on-premise da
 
 ## 4. Summary of Configuration Logic
 By defining a Kubernetes **Service** without a selector and manually populating its **EndpointSlice** with the VPN IP, we decouple the application code from the network infrastructure. The application simply connects to `postgres-db-svc`. If the database is migrated or its VPN IP changes, only the `EndpointSlice` manifest requires updating, ensuring zero changes to the application environment variables or code.
-
